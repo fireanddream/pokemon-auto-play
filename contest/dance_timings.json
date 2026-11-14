@@ -1,0 +1,77 @@
+{
+  "schema": 1,
+  "units": "pixel displacement per emulator frame; all durations are emulator frames",
+  "profiles": {
+    "Normal": {
+      "cues_per_dance": 3,
+      "cue_side_offset_pixels": 128,
+      "pixels_per_frame": 0.5303030303030303,
+      "cycle_frames": 478,
+      "extra_switch_frames": 241,
+      "response_frames": 240,
+      "evidence": {
+        "source": "normal-six-20261109-02",
+        "rank_source": "user_prepared_native_slot",
+        "responses": 6,
+        "fresh_excellent_judgments": 24,
+        "midpoint_frames": [10411, 10889, 11608, 12086, 12805, 13283],
+        "unreadable_demo_frames": [2, 17, 43, 17, 43, 17],
+        "speed_policy": "the applied rate validated by the six-response trial"
+      }
+    },
+    "Super": {
+      "cues_per_dance": 4,
+      "cue_side_offset_pixels": 128,
+      "pixels_per_frame": 0.5333333333333333,
+      "cycle_frames": 478,
+      "extra_switch_frames": 241,
+      "response_frames": 240,
+      "evidence": {
+        "source": "super-six-20261109-01",
+        "rank_source": "user_prepared_native_slot",
+        "source_slot": 1,
+        "responses": 6,
+        "fresh_excellent_judgments": 24,
+        "midpoint_frames": [10411, 10889, 11608, 12086, 12805, 13283],
+        "speed_policy": "median pairwise slope of readable first-demo positions, then held fixed for six responses"
+      }
+    },
+    "Hyper": {
+      "cues_per_dance": 4,
+      "cue_side_offset_pixels": 120,
+      "pixels_per_frame": 0.5555555555555556,
+      "cycle_frames": 432,
+      "extra_switch_frames": 213,
+      "response_frames": 216,
+      "evidence": {
+        "source": "ultra-six-20261109-01",
+        "rank_source": "user_prepared_native_slot",
+        "source_slot": 2,
+        "responses": 6,
+        "fresh_excellent_judgments": 24,
+        "midpoint_frames": [10194, 10626, 11271, 11703, 12348, 12780],
+        "speed_policy": "median pairwise slope of readable first-demo positions, then held fixed for six responses"
+      }
+    },
+    "Master": {
+      "cues_per_dance": 4,
+      "cue_side_offset_pixels": 120,
+      "pixels_per_frame": 0.5555555555555556,
+      "cycle_frames": 432,
+      "extra_switch_frames": 213,
+      "response_frames": 216,
+      "evidence": {
+        "source": "preserved_master_rank_demonstration",
+        "rank_source": "preserved_master_rank_demonstration",
+        "responses": 6,
+        "fresh_excellent_judgments": 24,
+        "midpoint_frames": [9984, 10416, 11061, 11493, 12138, 12570],
+        "speed_policy": "preserved 10-pixel / 18-frame timing"
+      }
+    }
+  },
+  "readability_policy": "Unreadable observations retain their original frame numbers. Position calculations use readable observations and full frame-number differences.",
+  "cycle_policy": "Same-leader midpoint spacing and the additional leader-switch spacing are separate from visible pointer speed.",
+  "response_policy": "Use the retained full response endpoint; a transient missing strip alone does not establish completion.",
+  "evidence_retention": "Compact accepted facts are retained here; detailed temporary captures may be cleared. Rank identity follows the prepared-source assignment."
+}

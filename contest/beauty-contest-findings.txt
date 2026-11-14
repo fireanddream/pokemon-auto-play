@@ -1,0 +1,94 @@
+BEAUTY CONTEST FINDINGS
+
+Status: Beauty-only observations. Interpretation and timing decisions are deferred
+until the same tests are repeated for Cute, Smart, and Tough.
+
+TEST
+Beauty Normal -> Super -> Hyper -> Master, repeated 10 times.
+40 contests, 240 midpoint visits, 900 inputs.
+Unchanged fixed timings; -7 input offset, 2 held frames, 10 released frames.
+No run timers. One existing counted correction per early midpoint.
+Accepted line: x=128 or x=129. Exact first pixel: x=128.
+
+MIDPOINT RESULTS
+
+Pointer position              Before correction    After correction
+x=127 (early)                         152                  11
+x=128 (first line pixel)               88                 199
+x=129 (second accepted pixel)           0                  30
+Late, beyond x=129                      0                   0
+
+Of 152 correction attempts, 141 reached the accepted line:
+- 111 reached x=128.
+- 30 reached the accepted x=129 pixel.
+- 11 remained at x=127.
+
+Therefore, 41 post-fix captures were not on the first pixel, but only 11 were
+outside the two-pixel line. No late midpoint captures occurred.
+
+INITIAL MISSES AND CORRECTION SUCCESS BY RANK
+
+Rank       Visits    Initial misses    Fixed to line    Fixed to x=128
+Normal       60            30                30               30
+Super        60            30                30               30
+Hyper        60            46                42               26
+Master       60            46                39               25
+
+All initial misses were x=127: one pixel early. Each received one correction.
+"Fixed to line" counts corrected misses that reached either accepted pixel.
+
+AFTER CORRECTION BY RANK
+
+Rank       Still x=127    On x=128    On x=129    Not on first pixel
+Normal           0           60           0              0
+Super            0           60           0              0
+Hyper            4           40          16             20
+Master           7           39          14             21
+
+The remaining 4 Hyper and 7 Master misses were one pixel early, approximately
+3 emulator frames by the fixed-speed estimate. The 16 Hyper and 14 Master
+x=129 captures were one pixel right of the first pixel, approximately 3 frames,
+but were still inside the accepted two-pixel line.
+
+ERROR SIZE AND COUNTED CORRECTION
+
+Every initial miss was one pixel early.
+- Beauty Normal/Super: approximately 1.875 emulator frames early; the 2-frame
+  correction reached x=128 in all 60 attempts.
+- Beauty Hyper/Master: approximately 3 emulator frames early; the 3-frame
+  correction reached x=128 in 51 attempts, x=129 in 30, and stayed x=127 in 11.
+
+Frame errors are estimates from the fixed pixel speed, not measured crossing
+frames. The remaining x=127 captures are approximately 3 frames early by that
+model. At Hyper/Master speed, x=129 is approximately 3 frames right of x=128,
+while still being within the accepted line.
+
+OBSERVATIONS AND FEEDBACK
+
+- All 11 residual early captures occurred on dances 3 or 5, immediately after
+  leader switches: 4 Hyper and 7 Master.
+- All 5 Good results occurred on the fourth button of dance 3, with the
+  corrected pointer still at x=127.
+- Midpoints at x=128 or x=129 produced 856/856 Excellent.
+- At x=127, the 44 inputs produced 39 Excellent and 5 Good.
+- Game animation changed during all 11 residual capture pairs while the
+  measured pointer position stayed at x=127. The exact crossing frame was
+  not measured.
+
+Overall: 895/900 Excellent, 5 Good, 0 unreadable feedback.
+
+Rank       Inputs    Excellent    Good    Unreadable
+Normal       180        180         0         0
+Super        240        240         0         0
+Hyper        240        237         3         0
+Master       240        238         2         0
+
+All 240 midpoint visits completed; the diagnostic continued through residual
+off-center positions. The emulator was left paused at the restored baseline.
+
+CONCLUSION FOR THIS BEAUTY RUN
+
+One counted correction reached the accepted line in 141 of 152 attempts, but
+did not guarantee the exact first pixel. The remaining early results were
+concentrated after leader switches. The cause and any timing changes remain
+undecided pending the matching tests for the other three categories.

@@ -1,0 +1,19 @@
+# Local portable emulator, ROMs, and working saves.
+/desmume-0.9.13-win64/
+*.nds
+*.gba
+*.sav
+*.dsv
+*.dst
+*.luasav
+
+# Local recordings and converted videos.
+/*.avi
+/*.mp4
+
+# Project-local scratch and Python caches.
+tmp/
+.tmp/
+__pycache__/
+*.pyc
+.venv/

@@ -1,0 +1,70 @@
+MAIN DANCE PORT - OFFLINE VERIFICATION
+
+Scope and settings
+- Main and debug share fixed category/rank speed, gaps, cue spacing, midpoint
+  targeting/correction, cue selection, and input skips. Input offset is -7 emulator
+  frames; holds/releases before checked feedback are 2/10 frames, first capture +11.
+- Main evaluates only Dance 1/input 1. A skipped first input has no judgment;
+  later inputs do not replace it. Failure, unreadable/skipped feedback, and Good
+  streaks from the second contest onward report in Lua and continue.
+- Main finishes counted responses, input-free Dances 7-8, the 897-frame B segment,
+  and slot 5. The dedicated handoff checks use the full 15-game-second transition;
+  other simulated integration checks use their existing one-frame transition.
+- All results below use simulated emulator callbacks or constructed native images.
+  Counts describe one final suite pass, excluding repeated development checks.
+
+Verification
+- Full offline suite: 92 tests passed, including 56 contest-runtime tests.
+- Main, debug, and preserved standalone Stage 5 Python/Lua syntax checks passed.
+- Command: python -B -m unittest discover -s tests -t . -q
+- Commands: python -B contest/super_contest.py --check;
+  python -B contest/debug_contest.py --check;
+  python -B contest/stage5_dance.py --check.
+
+Focused main continuation totals
+- 22 contests / 22 dancing visits / 132 responses / 486 input opportunities.
+- 425 executed, 61 skipped; all 22 reached the accepted slot-5 handoff.
+- 14 checked judgments: 2 Excellent, 7 Good, 1 Miss, 4 unreadable.
+  Eight first-input skips produced explicit skip results and zero judgments.
+- Eight skip/handoff cases: four Cool Normal and four Cool Master contests.
+  Normal executed/skipped: 46/26 of 72; Master: 63/33 of 96.
+  Combined: 109 executed, 59 skipped, zero judgments, eight slot-5 saves and
+  eight accepted Acting entries. Every B segment lasted exactly 897 frames.
+- Faults cover partial first responses, changed first-cue pixels, missed first
+  input frames, changed Dance 2/input 2, missed Dance 4/input 2, empty Dance 6,
+  and completely unreadable six-response runs. The two fully unreadable contests
+  skipped all 42 opportunities and still entered Acting.
+- Two first-feedback recovery cases: 48 executed inputs, one Excellent and one
+  unreadable judgment. Recovery at +14 used four samples starting at +11;
+  absent feedback exhausted 25 samples at +35, before input 2. Both continued.
+- Two missed-window cases: 46 executed / 2 skipped of 48 opportunities, with
+  one unreadable first judgment per contest and zero feedback samples. Both
+  before-frame and after-frame recovery completed the counted handoff.
+- Ten cross-contest warning cases: 222 executed inputs and ten first judgments.
+  Seven Good results occurred at Cool Master; Beauty Normal/Super/Master;
+  Cute Super/Master; and Smart Normal. The Miss was Cute Normal; the unreadable
+  result was Cute Hyper. All are Dance 1/input 1 and injected labels.
+  Five Lua warnings matched the expected streak/failure policy; all ten contests
+  continued through their simulated Acting win. No later input was evaluated.
+
+Midpoint planner checks
+- Main and debug each used seven constructed-image cases, 14 visits total.
+- Before: x=126/127/128/129/130/230 and unreadable, two visits each.
+  After: x=128 four, x=129 two, x=127 two, x=130 two, x=230 two, unreadable two.
+- Four corrections were attempted: two x=126 cases reached x=128 in four
+  emulator frames each; two x=127 cases stalled after two frames and skipped.
+  Total correction cost: 12 simulated emulator frames; two successful corrections.
+- Six visits ended in the accepted x=128-129 window, four exactly at x=128.
+  Two residual early, four late, and two unreadable cases installed continuation
+  plans. The injected late positions were +2/+102 native pixels from x=128;
+  the residual early position was -1 pixel. These are not gameplay timing errors.
+
+Limits and retention
+- The initial focused run exposed a Normal-rank fixture with its target ribbon
+  already owned. The fixture was corrected; all eight handoff cases then passed
+  through Acting entry, and the final complete suite passed.
+- These checks verify control flow, accounting, warning streaks, and frame-based
+  handoffs. They do not measure live input accuracy, timing-error direction, or wins.
+- Simulated callback records stay in memory; temporary image checks clean their
+  project-local directories. Project tmp/ is empty. This aggregate report is the
+  retained verification artifact.

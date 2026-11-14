@@ -1,0 +1,103 @@
+COOL CONTEST FINDINGS
+
+TEST
+Cool Normal -> Super -> Hyper -> Master, repeated 5 times.
+20 completed contests; 120 Stage 5 midpoint/response visits; 450 inputs.
+61 stage visits: Loading 1, Contest Entry 20, Dress-up transition 20, Dancing 20.
+Each round completed 4 contests, 24 midpoint visits, and 90/90 Excellent inputs.
+Elapsed host time: 1,778.192 seconds (29 minutes 38.192 seconds).
+
+SETTINGS AND UNITS
+Fixed Cool timing profiles; -7 input offset, 2 held frames, 10 released frames.
+Uncapped execution, midpoint diagnostics enabled, run timers disabled.
+Each contest reloaded the same run-owned baseline, including the final contest.
+Normal uses 3 inputs per response; Super/Hyper/Master use 4; 6 responses each.
+Pointer speeds: Normal/Super 8/15 pixel per emulator frame; Hyper/Master 5/9.
+Scheduled capture target: x=127 with floored travel; one counted correction when early.
+Accepted midpoint line: x=128 or x=129. Exact first line pixel: x=128.
+Input/correction delays use emulator frames; elapsed run time uses host seconds.
+Midpoint positions come from fresh paused zero-frame captures. Pixel-derived frame
+errors below are fixed-speed estimates, not measured pointer crossing frames.
+
+MIDPOINT RESULTS
+
+Pointer position                 Before correction    After correction
+x=127 (early)                            70                   0
+x=128 (first line pixel)                  40                 110
+x=129 (second accepted pixel)             10                  10
+Late, beyond x=129                         0                   0
+
+All 70 early captures received one 2-emulator-frame correction:
+- 70/70 reached x=128; correction success to the accepted line was 100%.
+- 0 remained early; 0 overshot; 0 second corrections.
+- The 10 x=129 captures were already accepted before correction.
+
+Final accepted-line success: 120/120 (100%).
+Final exact-first-pixel success: 110/120 (91.67%).
+Each round had 14 initial early captures, all corrected to x=128.
+
+BY RANK
+
+Rank       Visits    Initial x=127    Fixed to x=128    Final x=128    Final x=129
+Normal       30            15                15              30              0
+Super        30            15                15              30              0
+Hyper        30            20                20              25              5
+Master       30            20                20              25              5
+Total       120            70                70             110             10
+
+All four ranks had zero final early, late, or unreadable midpoint results.
+
+INITIAL EARLY CAPTURES BY STAGE 5 DANCE
+
+Rank          Dance 1    Dance 2    Dance 3    Dance 4    Dance 5    Dance 6
+Normal           5          2          3          0          5          0
+Super            5          3          2          0          5          0
+Hyper            5          5          0          5          0          5
+Master           5          5          0          5          0          5
+Total           20         15          5         10         10         10
+
+Every listed early capture was corrected; no residual off-line dance visits occurred.
+
+ERROR SIZE AND DIRECTION
+- Normal/Super: 30 initial captures were -1 pixel from x=128, approximately
+  1.875 emulator frames early. Each received a counted 2-frame correction.
+- Hyper/Master: 40 initial captures were -1 pixel from x=128, approximately
+  1.8 emulator frames early. Each received a counted 2-frame correction.
+- The 10 final x=129 captures were +1 pixel right of the first pixel,
+  approximately 1.8 emulator frames by the fixed-speed estimate, but inside
+  the accepted line: Hyper dance 3: 2, dance 5: 3; Master dance 3: 3, dance 5: 2.
+
+FEEDBACK RESULTS
+
+Rank       Contests    Inputs    Excellent    Timing misses    Unreadable
+Normal         5          90          90             0              0
+Super          5         120         120             0              0
+Hyper          5         120         120             0              0
+Master         5         120         120             0              0
+Total         20         450         450             0              0
+
+Overall: 450/450 Excellent (100%); zero non-Excellent judgments.
+Each dance position 1-6 produced 75/75 Excellent.
+Input positions 1, 2, and 3 each produced 120/120 Excellent; position 4 produced
+90/90 Excellent. Normal has no fourth input.
+At x=128: 410/410 Excellent. At accepted x=129: 40/40 Excellent.
+
+Two inputs needed bounded feedback recovery, totaling 3 extra one-frame captures:
+- Normal dance 4, input 3: 2 extra captures; fresh Excellent 13 frames after press.
+- Super dance 6, input 4: 1 extra capture; fresh Excellent 12 frames after press.
+All other inputs had fresh Excellent at the initial 11-frame feedback capture.
+Neither recovery exhausted its deadline; final unreadable feedback remained zero.
+
+VERIFICATION AND CONCLUSION
+Contest, stage-visit, per-dance, midpoint, and per-input records agree on all totals.
+All 20 baseline reloads and the temporary native slot restoration were verified.
+The runner finished paused at baseline frame 1368 with released inputs and zero
+cleanup errors; the emulator was subsequently closed.
+Analyzed raw records, screenshots, exports, and temporary analysis tools were
+cleared from project scratch. This aggregate report is the retained test artifact.
+
+For this prepared Cool setup, one counted correction reached the accepted line
+in every early attempt, and both accepted pixels yielded only Excellent feedback.
+These repetitions reused one baseline. Exact pointer crossing frames and wider
+setup behavior were not measured; cross-category and causal timing conclusions
+require the relevant matching tests.

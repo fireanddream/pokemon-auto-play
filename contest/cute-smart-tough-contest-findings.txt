@@ -1,0 +1,326 @@
+CUTE / SMART / TOUGH DANCE-INPUT FINDINGS
+
+STATUS
+All requested tests completed: 60 contests, 360 midpoint/response visits,
+1,350 opportunities accounted for as 1,346 actual button presses and four skips.
+Feedback: 1,338 Excellent, eight Good, zero Failure, zero unreadable judgments.
+Excellent rate: 99.41% of executed inputs; 99.11% of all opportunities.
+
+TEST SCOPE AND SETTINGS
+Cute, Smart, and Tough each run Normal -> Super -> Hyper -> Master five times.
+Each category has 20 contests, six responses per contest, and 450 opportunities:
+Normal has three inputs per response; the other ranks have four.
+The live debug runner presses buttons and records feedback for every executed input.
+Current defaults: fixed category/rank profiles; -7-emulator-frame input offset;
+2 held / 10 released emulator frames; initial feedback at press +11 frames.
+Execution is uncapped, with no overlay host wait or entry speed calibration.
+Run timers are enabled: 7,200 total / 300 per-stage host seconds for each category.
+Optional midpoint diagnostics are disabled; normal counted corrections and the
+no-forward-progress skip policy apply. No per-run timing overrides were supplied.
+Each category owns one post-load baseline and reloads it after every contest,
+including its final contest. Native slot 0 (API slot 10) is temporary transport.
+Midpoints use fresh paused zero-frame images. Accepted line: x=128 or x=129;
+exact first pixel: x=128. Signed pixel errors are relative to x=128, with negative
+values early/left. Pixel-derived frame errors below are fixed-speed estimates,
+not measured pointer crossing frames or measured button timing errors.
+
+CONTEST AND INPUT TOTALS
+Category   Contests   Visits   Presses   Excellent   Timing misses   Unreadable   Skipped
+Cute          20        120       450        450             0              0         0
+Smart         20        120       450        442             8              0         0
+Tough         20        120       446        446             0              0         4
+Total         60        360     1,346      1,338             8              0         4
+
+54/60 contests had only Excellent executed feedback; 52/60 also executed every
+opportunity. All 60 contests completed and had zero cue conflicts.
+Cute: 61 stage visits (Loading 1, Contest Entry 20, Dress-up transition 20,
+Dancing 20). Elapsed host time: 1,810.299 seconds (30 minutes 10.299 seconds).
+Each of Cute's five loops completed four contests and 90/90 Excellent inputs.
+Smart: the same 61 stage visits; 1,868.091 host seconds (31 minutes 8.091 seconds).
+Smart loops 1-5 produced 90, 88, 87, 87, and 90 Excellent out of 90 presses each.
+Tough: the same 61 stage visits; 1,899.017 host seconds (31 minutes 39.017 seconds).
+Tough loops 1-5 produced 90, 90, 90, 86, and 90 Excellent; loop 4 skipped four
+opportunities, and every executed Tough input was Excellent.
+Total successful-run host time: 5,577.406 seconds (1 hour 32 minutes 57.406 seconds),
+rounded independently from the individual durations. This excludes the initial
+Smart startup interruption. Total stage visits: 183 (Loading 3, Contest Entry 60,
+Dress-up transition 60, Dancing 60).
+
+FEEDBACK BY CATEGORY AND RANK
+Category   Rank       Contests   Presses   Excellent   Timing misses   Unreadable   Skipped
+Cute       Normal         5          90         90             0              0         0
+Cute       Super          5         120        120             0              0         0
+Cute       Hyper          5         120        120             0              0         0
+Cute       Master         5         120        120             0              0         0
+Smart      Normal         5          90         90             0              0         0
+Smart      Super          5         120        120             0              0         0
+Smart      Hyper          5         120        117             3              0         0
+Smart      Master         5         120        115             5              0         0
+Tough      Normal         5          90         90             0              0         0
+Tough      Super          5         120        120             0              0         0
+Tough      Hyper          5         118        118             0              0         2
+Tough      Master         5         118        118             0              0         2
+
+Cute dance positions 1-6 each produced 75/75 Excellent.
+Executed input positions 1-3 each produced 120/120 Excellent; position 4 produced
+90/90 Excellent. Normal has no fourth input.
+Smart dance positions 1-6 produced 74, 75, 75, 73, 75, and 70 Excellent out of
+75 presses each. Smart input positions 1-3 each produced 120/120 Excellent;
+input 4 produced 82/90 Excellent and eight Good.
+Tough dance positions 1-6 produced 75, 75, 75, 73, 75, and 73 Excellent; dances
+4 and 6 each skipped two of their 75 opportunities.
+
+Combined feedback by original expected input position:
+Position   Opportunities   Presses   Excellent   Good   Unreadable   Skipped
+1               360          359        359        0          0          1
+2               360          359        359        0          0          1
+3               360          358        358        0          0          2
+4               270          270        262        8          0          0
+
+Tough original input positions 1-4 produced 119, 119, 118, and 90 Excellent,
+with one, one, two, and zero skips. Original positions on partial responses are
+resolved from the retained cue views at fixed spacing; executed ordinal 1/2 can
+represent a different original position. Normal has no fourth opportunity.
+
+MIDPOINT POSITIONS
+Category   Position              Before correction   After correction
+Cute       x=125 (-3 pixels)              8                  0
+Cute       x=127 (-1 pixel)              64                  0
+Cute       x=128 (first pixel)           48                112
+Cute       x=129 (accepted)               0                  8
+Cute       Late / unreadable             0                  0
+Smart      x=124 (-4 pixels)             14                  0
+Smart      x=125 (-3 pixels)             16                  0
+Smart      x=127 (-1 pixel)              58                  0
+Smart      x=128 (first pixel)           32                 90
+Smart      x=129 (accepted)               0                 30
+Smart      Late / unreadable             0                  0
+Tough      x=124 (-4 pixels)             25                  0
+Tough      x=125 (-3 pixels)             12                  0
+Tough      x=127 (-1 pixel)              51                  0
+Tough      x=128 (first pixel)           32                105
+Tough      x=129 (accepted)               0                 15
+Tough      Late / unreadable             0                  0
+Total      x=124                        39                  0
+Total      x=125                        36                  0
+Total      x=127                       173                  0
+Total      x=128                       112                307
+Total      x=129                         0                 53
+
+Cute: 72 correction attempts on 72 visits; all 72 reached the accepted line.
+64 corrected visits reached x=128; eight reached x=129. There were no residual
+early/late/unreadable visits and no second corrections. Counted correction cost:
+64 two-frame corrections plus eight five-frame corrections = 168 emulator frames.
+Final accepted-line success: 120/120 (100%). Exact-first-pixel success:
+112/120 (93.33%). At x=128: 418/418 Excellent; at x=129: 32/32 Excellent.
+Smart: 88 correction attempts on 88 visits; all 88 reached the accepted line.
+58 corrected visits reached x=128; 30 reached x=129. There were no residual
+early/late/unreadable visits and no second corrections. Counted correction cost:
+58 two-frame, 16 six-frame, and 14 seven-frame corrections = 310 emulator frames.
+Final accepted-line success: 120/120 (100%); exact-first-pixel success: 90/120 (75%).
+At x=128: 322 Excellent and eight Good out of 330 inputs; at x=129: 120/120 Excellent.
+Tough: 88 correction attempts on 88 visits; all 88 reached the accepted line.
+73 corrected visits reached x=128; 15 reached x=129. Counted correction cost:
+51 two-frame, 12 five-frame, and 25 seven-frame corrections = 337 emulator frames.
+Final accepted-line success: 120/120 (100%); exact-first-pixel success:
+105/120 (87.5%). At x=128: 386/386 Excellent; at x=129: 60/60 Excellent.
+
+Combined: 248/248 early visits corrected to the accepted line, including 195 to
+x=128 and 53 to x=129. There were zero residual early, late, or unreadable visits,
+and zero second corrections. Total correction cost: 815 counted emulator frames.
+Final accepted-line success: 360/360 (100%); exact-first-pixel success:
+307/360 (85.28%). At x=128: 1,126 Excellent and eight Good out of 1,134 presses;
+at x=129: 212/212 Excellent. The four Tough skips occurred at x=128.
+
+MIDPOINTS BY RANK
+Category   Rank     Visits   Initial x=124   Initial x=125   Initial x=127   Fixed to line   Final x=128   Final x=129
+Cute       Normal     30            0               0              15              15              30             0
+Cute       Super      30            0               0              15              15              30             0
+Cute       Hyper      30            0               5              15              20              25             5
+Cute       Master     30            0               3              19              22              27             3
+Smart      Normal     30            0               0              15              15              30             0
+Smart      Super      30            0               0              15              15              30             0
+Smart      Hyper      30            8               7              14              29              15            15
+Smart      Master     30            6               9              14              29              15            15
+Tough      Normal     30            0               0              15              15              30             0
+Tough      Super      30            0               0              15              15              30             0
+Tough      Hyper      30           13               6              10              29              23             7
+Tough      Master     30           12               6              11              29              22             8
+
+INITIAL EARLY MIDPOINTS BY STAGE 5 DANCE
+Category   Rank     Position    Dance 1   Dance 2   Dance 3   Dance 4   Dance 5   Dance 6
+Cute       Normal   x=127           5         4         1         0         5         0
+Cute       Super    x=127           5         2         3         0         5         0
+Cute       Hyper    x=127           5         5         0         5         0         0
+Cute       Hyper    x=125           0         0         0         0         5         0
+Cute       Master   x=127           5         5         2         5         2         0
+Cute       Master   x=125           0         0         0         0         3         0
+Smart      Normal   x=127           5         1         4         0         5         0
+Smart      Super    x=127           5         3         2         0         5         0
+Smart      Hyper    x=127           4         0         0         5         0         5
+Smart      Hyper    x=125           0         5         2         0         0         0
+Smart      Hyper    x=124           0         0         3         0         5         0
+Smart      Master   x=127           4         0         0         5         0         5
+Smart      Master   x=125           0         5         4         0         0         0
+Smart      Master   x=124           0         0         1         0         5         0
+Tough      Normal   x=127           5         1         4         0         5         0
+Tough      Super    x=127           5         2         3         0         5         0
+Tough      Hyper    x=127           2         0         0         3         0         5
+Tough      Hyper    x=125           2         2         0         2         0         0
+Tough      Hyper    x=124           0         3         5         0         5         0
+Tough      Master   x=127           4         0         0         2         0         5
+Tough      Master   x=125           0         3         0         3         0         0
+Tough      Master   x=124           0         2         5         0         5         0
+
+ERROR SIZE AND DIRECTION
+Cute Normal/Super: 30 initial x=127 captures were one pixel early, approximately
+1.875 emulator frames by the 8/15-pixel/frame profile; each received two frames.
+Cute Hyper/Master: 34 initial x=127 captures were one pixel early, approximately
+1.5 emulator frames by the 2/3-pixel/frame profile; each received two frames.
+Eight Hyper/Master x=125 captures were three pixels early, approximately 4.5
+emulator frames; each received five counted frames. All occurred on dance 5.
+The eight final x=129 captures were +1 pixel from the exact first pixel,
+approximately +1.5 frames by that fixed-speed estimate, inside the accepted line.
+Smart Normal/Super: 30 initial x=127 captures were one pixel early, approximately
+1.875 emulator frames; each received two counted frames.
+Smart Hyper/Master uses 71/120 pixel per emulator frame:
+- 28 x=127 captures: -1 pixel, approximately -1.690141 frames; two-frame correction.
+- 16 x=125 captures: -3 pixels, approximately -5.070423 frames; six-frame correction.
+- 14 x=124 captures: -4 pixels, approximately -6.760563 frames; seven-frame correction.
+All 30 Smart high-rank final x=129 captures were +1 pixel from the exact first
+pixel, approximately +1.690141 estimated frames, inside the accepted line.
+Tough Normal/Super: 30 initial x=127 captures were one pixel early, approximately
+1.875 emulator frames; each received two counted frames.
+Tough Hyper/Master uses 151/240 pixel per emulator frame:
+- 21 x=127 captures: -1 pixel, approximately -1.589404 frames; two-frame correction.
+- 12 x=125 captures: -3 pixels, approximately -4.768212 frames; five-frame correction.
+- 25 x=124 captures: -4 pixels, approximately -6.357616 frames; seven-frame correction.
+All 15 Tough high-rank final x=129 captures were +1 pixel from the exact first
+pixel, approximately +1.589404 estimated frames, inside the accepted line.
+
+NON-EXCELLENT INPUT LOCATIONS
+Category   Rank     Stage   Dance   Input   Good count   Loops
+Smart      Hyper       5       1       4          1         3
+Smart      Hyper       5       6       4          2         2,4
+Smart      Master      5       4       4          2         3,4
+Smart      Master      5       6       4          3         2,3,4
+
+All eight were fresh Good at the initial press +11-frame feedback capture.
+All eight responses had final midpoint x=128 (zero midpoint pixel error).
+Actual button timing error direction/magnitude was not measured by these records;
+the midpoint error must not be presented as the button's crossing error.
+There were no Failure judgments or exhausted unreadable judgments.
+
+SMART MISS PIXEL REVIEW
+All 450 saved pre-input pointers were readable. Each of the eight Good inputs
+had response cue x=240 and pointer x=233 in the image one frame before the press:
+seven native pixels left/before the cue. Each +11-frame feedback image had pointer
+x=240. The actual first crossing frame was not sampled.
+
+Smart Hyper/Master fourth inputs, grouped by the observed pre-input pixel gap:
+Gap to cue   Excellent   Good   Estimated press lead before cue (emulator frames)
+4 pixels          5        0                  5.760563
+5 pixels         21        0                  7.450704
+6 pixels         26        0                  9.140845
+7 pixels          0        8                 10.830986
+
+The estimates use gap / (71/120) - 1 because the image is one frame before input.
+All eight misses were on the early side by this visual/fixed-speed model. Their
+pre-input pointers were -2.091667 pixels behind the midpoint-anchored prediction,
+equivalent to approximately -3.535211 estimated emulator frames. This is observed
+pixel/model disagreement, not a measured game judgment threshold or crossing time.
+No speed or offset adjustment was made; cause and timing decisions remain unresolved.
+
+TOUGH SKIPPED-CUE REVIEW
+Category   Rank     Loop   Stage   Dance   Original inputs skipped   Count
+Tough      Hyper      4       5       4             2,3                 2
+Tough      Master     4       5       6             1,3                 2
+
+Both responses reached midpoint x=128. Each view had three of four detected cues,
+with omissions at different positions. The default confirmed_pairs_only policy
+kept two agreeing pairs and recorded two unresolved_cues skips per response.
+Hyper dance 4: left detections at x=16,72,120; right at x=144,160,248. The retained
+pairs were demo x=16/120. Unpaired demo x=32/72 map to response x=160/200.
+Master dance 6: left detections at x=48,72,120; right at x=200,224,248. The retained
+pairs were demo x=72/120. Unpaired demo x=48/96 map to response x=176/224.
+These are cue-evidence omissions; the four skipped inputs received no judgments.
+All other 358 responses executed their complete cue count. The partial responses
+executed two inputs each, all Excellent, and completed the normal baseline reload.
+
+BOUNDED FEEDBACK RECOVERY
+Category   Rank     Loop   Dance   Input   Button   Extra captures   Feedback delay
+Cute       Normal     1       3       3      B            2             13 frames
+Smart      Normal     3       5       3      X            2             13 frames
+Tough      Normal     1       4       3      A            1             12 frames
+Tough      Hyper      1       1       4      Y            1             12 frames
+Tough      Master     1       1       4      A            1             12 frames
+Tough      Hyper      2       2       4      X            2             13 frames
+Tough      Hyper      5       6       4      A            1             12 frames
+
+Seven inputs needed ten extra one-frame captures in total. All recovered Excellent;
+no recovery deadline was exhausted. The other 1,339 executed inputs had fresh
+feedback at the initial press +11 capture. Delays above are counted emulator frames.
+
+STARTUP INTERRUPTION
+The first Smart startup expired under the enabled host deadline before it created
+a run directory or began any contest. The existing Lua handoff was waiting for
+the prior script's Stop control to become disabled; it remained enabled afterward.
+This startup contributed zero contest/visit/input trials to the statistics.
+The owned emulator was closed, with process and window disappearance confirmed.
+Smart restarted successfully from the prepared battery save in a fresh instance;
+Tough also used a fresh instance. Five loops and all default settings were retained.
+The shared startup handoff behavior remains a separate follow-up.
+
+VERIFICATION AND RETENTION
+Run, contest, Stage 5, per-dance, planned/actual press, and judgment records agree.
+All 1,346 executed inputs have matching started presses and feedback images.
+All 60 baseline reloads restored frame 1368 with distinct load epochs.
+Each completed run had one Lua attachment/checkpoint engine and one terminal cleanup.
+Temporary native slot restoration matched its pre-run contents byte for byte.
+All completed-run endpoints were paused with released inputs and zero cleanup errors.
+Normal speed (100%), frame limiter on, fast-forward off, and stopped movie mode
+were restored. Statistics and failure-evidence analysis are complete. The text
+report passed verification against retained run evidence (86 table rows checked).
+The final owned emulator was closed and process/window disappearance confirmed;
+no host callers remained. Analyzed records, screenshots, exports, logs, and temporary
+analysis tools were cleared from project scratch. This aggregate report is retained
+as the results artifact; tmp/ is empty and .tmp/ is absent.
+
+INTERPRETATION
+The requested default comparisons are complete. Cute had no misses or skips;
+Smart's eight Good results were all fourth high-rank inputs with the same early
+pre-input pixel pattern. Tough had no executed timing misses and four cue skips.
+Counted midpoint correction reached the accepted line in every early attempt.
+Accepted midpoint pixels alone did not guarantee Excellent feedback or complete
+cue evidence: the Smart Good results and Tough skips all had midpoint x=128.
+
+Smart required adjustments on 88/120 responses (73.3%), including 58/60
+Hyper/Master responses (96.7%). Correction refreshes the position/time anchor
+but retains the selected fixed speed. The eight missed fourth inputs lagged their
+fresh midpoint-based predictions. Working hypothesis: Smart's Hyper/Master rate of
+71/120 pixel per emulator frame may be too high. Overestimated speed shortens
+calculated waits, allowing prediction to get ahead again before later inputs.
+The deliberate x=127 capture target explains many small corrections, so adjustment
+frequency alone does not establish a speed error. Frame/pixel phase and rounding
+remain possible contributors; no replacement rate is verified.
+
+Exact crossing frames, game timing thresholds, and the cause of Smart's fixed-model
+pixel disagreement remain unresolved. These repetitions reused one baseline per
+category; they do not establish behavior for other prepared saves.
+
+The retained Beauty report covers 40 contests/900 presses: 895 Excellent, five Good.
+It used ten loops, midpoint diagnostic continuation, and disabled run timers;
+the current comparisons used five loops and default midpoint/timeout behavior.
+Those differences limit category-only causal conclusions from the older results.
+Shared timing/reader changes and the startup handoff issue remain separate follow-ups.
+
+FOLLOW-UP: BUTTON ACCURACY
+Planned next-session work: review button accuracy for Normal, Super, Hyper, and
+Master. Cover input positions 1-3 for Normal and 1-4 for the other ranks, with
+accuracy broken down by category, rank, dance, and input position under matching
+baseline/settings. Confirm category selection and repetition counts for that review.
+Measure pointer travel from the accepted midpoint through later inputs independently
+of the fixed-speed prediction. Compare scheduled/actual press frames with fresh
+observed pointer/cue crossing frames and feedback; track whether prediction lag
+grows with elapsed emulator frames. Use those measurements to evaluate the speed
+hypothesis and frame/pixel phase or rounding effects before choosing timing changes.

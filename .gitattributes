@@ -1,0 +1,5 @@
+* text=auto eol=lf
+*.png binary
+*.zip binary
+*.ds[0-9] binary
+/lua/PLATINUM-LICENSE.txt -text
