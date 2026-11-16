@@ -15,11 +15,9 @@ import sys
 import time
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(HERE.parent))
 
-from contest.artifacts import inactive_runs
-from contest.dance_master import DEFAULT_OFFSET_FRAMES as STANDALONE_OFFSET_FRAMES, attach, lua_value, settle_native_osd
+from contest.dance_master import attach, lua_value, settle_native_overlay
 from contest.dance_timings import DEFAULT_OFFSET_FRAMES, calibrated_timing, canonical_rank, fixed_cue_spacing, timing_for
 from contest.pt_dance_read import gd_image, load_image
 from contest.rank_speed_probe import ReviewNeeded, capture_result, cue_positions, fit_speed, pointer_position, response_plan, unpause_window
@@ -28,19 +26,25 @@ from contest.stage4_dress import FRAME_RATE, stacked_gd
 from host.checkpoints import CheckpointClient, write_json
 from host.controller import ControllerConfig
 from host.emulator import DeSmuME
+from host.paths import ROOT
 from host.savestates import StateSlots
-from contest.inputs import MASH_HOLD_FRAMES, MASH_RELEASE_FRAMES, whole
+from contest.inputs import whole
+from contest.timing_profiles import load_profile, section, setting
 
 
 BRIDGE = "pt-rank-dance"
-INPUT_HOLD_FRAMES = 2
-FEEDBACK_RELEASE_FRAMES = 10
+_DANCE = section(None, "stage5_dancing")
+INPUT_HOLD_FRAMES = _DANCE["response_hold_frames"]
+FEEDBACK_RELEASE_FRAMES = _DANCE["feedback_release_frames"]
 FIRST_FEEDBACK_DELAY_FRAMES = INPUT_HOLD_FRAMES + FEEDBACK_RELEASE_FRAMES - 1
 
 
-def settings(*, rank, input_slot, host_timeout, pointer_speed=None, calibrate_speed=False):
+def settings(*, rank, input_slot, host_timeout, pointer_speed=None, calibrate_speed=False,
+             category="Cool", timing_profile=None):
+    timing_profile = load_profile() if timing_profile is None else timing_profile
+    values = section(timing_profile, "stage5_dancing")
     rank = canonical_rank(rank)
-    profile = timing_for(rank)
+    profile = timing_for(rank, category=category, timing_profile=timing_profile)
     StateSlots.validate_slot(input_slot)
     if input_slot == 10:
         raise ValueError("The prepared source must differ from temporary slot 10.")
@@ -50,35 +54,53 @@ def settings(*, rank, input_slot, host_timeout, pointer_speed=None, calibrate_sp
         pointer_speed = profile["pixels_per_frame"]
     if pointer_speed is not None and (not math.isfinite(pointer_speed) or pointer_speed <= 0):
         raise ValueError("The pointer speed must be positive.")
-    return {"game": "CPUJ", "rank": rank, "rank_source": "user_prepared_native_slot",
+    return {"game": timing_profile["game_code"], "timing_profile_source": timing_profile["source"],
+        "category": category, "rank": rank, "rank_source": "user_prepared_native_slot",
         "source_slot": input_slot, "temporary_slot": 10, "dances": 6,
         "cues_per_dance": profile["cues_per_dance"], "rank_timing": profile,
-        "required_excellent": 6 * profile["cues_per_dance"], "pointer_pixels_per_emulator_frame": pointer_speed,
-        "calibrate_speed": calibrate_speed, "render_host_seconds": 0.5,
+        "required_response_inputs": 6 * profile["cues_per_dance"], "pointer_pixels_per_emulator_frame": pointer_speed,
+        "tolerant_inputs": True, "scheduled_feedback_recovery": False, "observation_policy": "diagnostic",
+        "calibrate_speed": calibrate_speed,
+        "render_host_seconds": section(timing_profile, "diagnostics")["rank_state_render_host_seconds"],
         "host_timeout_seconds": host_timeout, "attempts": 1, "speed_percent": 100, "frame_limit": True,
-        "hold_frames": INPUT_HOLD_FRAMES, "offset_frames": STANDALONE_OFFSET_FRAMES, "leader_switch_gap_frames": 213,
+        "hold_frames": values["response_hold_frames"], "offset_frames": values["input_offset_frames"],
+        "feedback_release_frames": values["feedback_release_frames"],
+        "native_osd_settle_host_seconds": values["native_overlay_settle_host_seconds"],
+        "demo_sample_interval_frames": values["demo_sample_interval_frames"],
+        "leader_switch_gap_frames": profile["extra_switch_frames"],
         "anchor_policy": "fresh initial pointer capture; fresh midpoint pointer and the rank-specific cue count for each response",
         "unreadable_frame_policy": "retain the original frame number and unreadable marker; derive positions and speed from readable samples using full frame differences",
         "midpoint_policy": "rank-specific fresh cue pairs; matching sides pass and one readable side wins silently; acknowledged checkpoint before inputs",
-        "finish": f"six responses and {6 * profile['cues_per_dance']} fresh Excellent judgments, or a paused stop with retained evidence"}
+        "finish": "six counted responses with every opportunity executed or skipped; non-Excellent feedback is recorded as Miss"}
 
 
-def stage5_plan(*, rank, source_frame, host_timeout, hold_frames=INPUT_HOLD_FRAMES, offset_frames=DEFAULT_OFFSET_FRAMES,
-                 transition_seconds=15, osd_settle_seconds=0, entry_pointer_x=None,
+def stage5_plan(*, rank, source_frame, host_timeout, hold_frames=None, offset_frames=None,
+                  transition_seconds=None, osd_settle_seconds=None, entry_pointer_x=None,
                  feedback_policy="first_button_only", pointer_calibration=None,
                    observation_policy="diagnostic", first_feedback_delay_frames=None,
-                   fixed_timing=None, first_feedback_policy="require_excellent", midpoint_diagnostics=False):
+                      fixed_timing=None, first_feedback_policy="warn_and_continue", midpoint_diagnostics=False,
+                     timing_profile=None, category="Cool"):
+    timing_profile = load_profile() if timing_profile is None else timing_profile
+    values = section(timing_profile, "stage5_dancing")
+    hold_frames = setting(hold_frames, values, "response_hold_frames")
+    offset_frames = setting(offset_frames, values, "input_offset_frames")
+    transition_seconds = setting(transition_seconds, values, "acting_transition_b_mash_game_seconds")
+    osd_settle_seconds = setting(osd_settle_seconds, values, "native_overlay_settle_host_seconds")
     debug_inputs = feedback_policy == "record_all_buttons"
-    tolerant_inputs = debug_inputs or first_feedback_policy == "warn_and_continue"
+    fixed_schedule = debug_inputs or (feedback_policy == "first_button_only" and fixed_timing is not None
+        and observation_policy == "scheduled")
     if not isinstance(midpoint_diagnostics, bool) or midpoint_diagnostics and not debug_inputs:
         raise ValueError("Off-center midpoint diagnostics belong to the fixed-metric input debug runner.")
     if debug_inputs and fixed_timing is None:
         raise ValueError("Recording-only feedback requires the debug runner's fixed contest metrics.")
     profile = dict(fixed_timing) if fixed_timing is not None else (
-        calibrated_timing(rank, pointer_calibration) if pointer_calibration is not None else timing_for(rank))
+        calibrated_timing(rank, pointer_calibration, category=category, timing_profile=timing_profile) if pointer_calibration is not None
+        else timing_for(rank, category=category, timing_profile=timing_profile))
+    if fixed_timing is None and pointer_calibration is None:
+        profile["timing_source"] = "shared_main_runner_metrics"
     if fixed_timing is not None:
-        native = timing_for(rank)
-        native["cue_side_offset_pixels"] = fixed_cue_spacing(profile["category"], rank)
+        native = timing_for(rank, category=profile["category"], timing_profile=timing_profile)
+        native["cue_side_offset_pixels"] = fixed_cue_spacing(profile["category"], rank, timing_profile=timing_profile)
         if pointer_calibration is not None or any(profile[key] != native[key]
                 for key in ("rank", "cues_per_dance", "cue_side_offset_pixels")):
             raise ValueError("Fixed contest timing must preserve the selected rank's cue contract.")
@@ -103,15 +125,12 @@ def stage5_plan(*, rank, source_frame, host_timeout, hold_frames=INPUT_HOLD_FRAM
         raise ValueError("Overlay settling must be nonnegative host seconds.")
     if feedback_policy not in ("first_button_only", "all_buttons", "record_all_buttons"):
         raise ValueError("Select first_button_only, all_buttons, or record_all_buttons feedback checking.")
-    if first_feedback_policy not in ("require_excellent", "warn_and_continue"):
-        raise ValueError("Select require_excellent or warn_and_continue for the first feedback result.")
-    warn_first_feedback = first_feedback_policy == "warn_and_continue"
-    if warn_first_feedback and (feedback_policy != "first_button_only" or fixed_timing is None or observation_policy != "scheduled"):
-        raise ValueError("Warning-only first feedback requires fixed-metric scheduled main dancing.")
+    if first_feedback_policy != "warn_and_continue":
+        raise ValueError("Dance feedback must warn and continue after a miss.")
     if observation_policy not in ("scheduled", "diagnostic"):
         raise ValueError("Select scheduled or diagnostic dance observations.")
     if first_feedback_delay_frames is None:
-        first_feedback_delay_frames = hold_frames + FEEDBACK_RELEASE_FRAMES - 1
+        first_feedback_delay_frames = hold_frames + values["feedback_release_frames"] - 1
     whole(first_feedback_delay_frames, 1, "First-feedback capture delay")
     first_feedback_delay_frames = max(hold_frames, first_feedback_delay_frames)
     if pointer_calibration is not None:
@@ -128,22 +147,25 @@ def stage5_plan(*, rank, source_frame, host_timeout, hold_frames=INPUT_HOLD_FRAM
         raise ValueError("Scheduled dancing requires fixed metrics or per-contest calibration and first-button feedback.")
     midpoint_timing = {"source": "visual_midpoint_fallback", "entry_frame": source_frame,
         "entry_pointer_x": entry_pointer_x, "frames": None}
-    if tolerant_inputs:
+    if fixed_schedule:
         midpoint_timing.update(capture_target_x=127, accepted_pointer_pixels=[128, 129], rounding="floor")
     if entry_pointer_x is not None:
         whole(entry_pointer_x, 8, "Accepted Dance 1 pointer position")
         if entry_pointer_x >= 128:
             raise ValueError("The accepted Stage 4 pointer must be within Dance 1's demonstration.")
-        travel = ((127 if tolerant_inputs else 128) - entry_pointer_x) / profile["pixels_per_frame"]
-        first = source_frame + (max(1, math.floor(travel)) if tolerant_inputs else math.floor(travel + 0.5))
+        travel = ((127 if fixed_schedule else 128) - entry_pointer_x) / profile["pixels_per_frame"]
+        first = source_frame + (max(1, math.floor(travel)) if fixed_schedule else math.floor(travel + 0.5))
         midpoint_timing.update(source="accepted_stage4_pointer_and_fixed_metrics" if fixed_timing is not None
             else "accepted_stage4_pointer_calibration" if pointer_calibration is not None
             else "accepted_stage4_pointer_and_rank_timing", frames=[
             first + index * profile["cycle_frames"] + (index // 2) * profile["extra_switch_frames"]
             for index in range(6)])
-    return {"stage": 5, "rank": profile["rank"], "rank_source": "accepted_contest_target",
+    return {"stage": 5, "timing_profile_source": timing_profile["source"],
+        "demo_sample_interval_frames": values["demo_sample_interval_frames"],
+        "calibration_window_frames": section(timing_profile, "diagnostics")["pointer_calibration_frames"],
+        "rank": profile["rank"], "rank_source": "accepted_contest_target",
         "rank_timing": profile, "source_frame": source_frame, "debug_inputs": debug_inputs,
-        "tolerant_inputs": tolerant_inputs,
+        "tolerant_inputs": True, "scheduled_feedback_recovery": fixed_schedule,
         "midpoint_diagnostics": midpoint_diagnostics,
         "fixed_metrics": fixed_timing is not None,
         "pointer_calibration": pointer_calibration, "observation_policy": observation_policy,
@@ -157,9 +179,9 @@ def stage5_plan(*, rank, source_frame, host_timeout, hold_frames=INPUT_HOLD_FRAM
         "first_feedback_policy": first_feedback_policy,
         "cues_per_dance": profile["cues_per_dance"],
         "required_response_inputs": 6 * profile["cues_per_dance"],
-        "required_excellent_judgments": 0 if debug_inputs or warn_first_feedback else 6 * profile["cues_per_dance"] if feedback_policy == "all_buttons" else 1,
+        "required_excellent_judgments": 0,
         "transition": {"game_seconds": transition_seconds, "mash_frames": max(1, round(transition_seconds * FRAME_RATE)),
-            "mash_hold_frames": MASH_HOLD_FRAMES, "mash_release_frames": MASH_RELEASE_FRAMES}}
+            "mash_hold_frames": values["transition_mash_hold_frames"], "mash_release_frames": values["transition_mash_release_frames"]}}
 
 
 def read_demo_timing(samples, read_frame):
@@ -235,7 +257,7 @@ def feedback_schedule(planned, *, delay_frames, rank_timing, tolerant_inputs=Fal
 def skipped_response(midpoint, dance, options, reason):
     """Wait out an unreadable response from its counted midpoint without inputs."""
     profile = options["rank_timing"]
-    anchor = midpoint.get("midpoint_timing", {}).get("expected_frame") or midpoint["frame"]
+    anchor = (midpoint.get("midpoint_timing") or {}).get("expected_frame") or midpoint["frame"]
     endpoint = max(midpoint["frame"] + 1,
         anchor + math.ceil(1 / profile["pixels_per_frame"]) + profile["response_frames"])
     required = options["cues_per_dance"]
@@ -271,14 +293,18 @@ def midpoint_diagnostic(captures, adjustments, speed):
             "direct_read_frames": captured["image"]["direct_read_frames"]}
 
     pre, post = measurement(captures[0]), measurement(captures[-1])
+    accepted = [item for item in adjustments if item.get("accepted") is not False]
+    rejected = len(adjustments) - len(accepted)
     attempted = bool(adjustments)
     outcome = "unreadable" if not post["readable"] else ("fixed" if post["on_line"] else "still_early" if post["pointer_x"] < 128 else "overshot") if attempted \
         else "not_needed" if pre["on_line"] else "late_uncorrected"
+    if rejected:
+        outcome = "rejected"
     return {"schema": 1, "accepted_pointer_pixels": [128, 129], "first_line_pixel": 128,
         "pixels_per_emulator_frame": speed, "frame_error_source": "estimate_from_fixed_pointer_speed",
         "pre": pre, "post": post, "post_capture_reused": len(captures) == 1,
-        "correction_attempted": attempted, "correction_count": len(adjustments),
-        "correction_frames": sum(item["next_frame"] - item["frame"] for item in adjustments),
+        "correction_attempted": attempted, "correction_count": len(accepted), "rejected_corrections": rejected,
+        "correction_frames": sum(item["next_frame"] - item["frame"] for item in accepted),
         "correction_outcome": outcome, "visible_progress_pixels": post["pointer_x"] - pre["pointer_x"]
             if pre["readable"] and post["readable"] else None,
         "fixed_to_line": not pre["on_line"] and post["on_line"],
@@ -286,11 +312,18 @@ def midpoint_diagnostic(captures, adjustments, speed):
         "post_off_line": not post["on_line"], "post_off_first_pixel": not post["on_first_pixel"]}
 
 
+def checked_dance_result(result):
+    if result.get("error") or result.get("recovery_required"):
+        raise ReviewNeeded(result.get("error") or result.get("warning") or "The dance needs input-free continuation.")
+    return result
+
+
 def prepare_response(emulator, client, folder, dance, options, *, record):
     controller = emulator.controller
     adjustments, captures = [], []
     debug_inputs = options.get("debug_inputs") is True
-    tolerant_inputs = options.get("tolerant_inputs") is True
+    tolerant_inputs = True
+    scheduled_feedback = options.get("scheduled_feedback_recovery") is True
     diagnostics = options.get("midpoint_diagnostics") is True
     skip_reason = None
     if diagnostics and not (debug_inputs and options.get("fixed_metrics") and options.get("observation_policy") == "scheduled"):
@@ -300,7 +333,7 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
         if observed.get("error") or observed.get("stop_reason") != "demo_midpoint":
             raise ReviewNeeded(observed.get("error") or "The demonstration did not reach its midpoint.")
         name = f"midpoint-{len(captures) + 1:02d}" if tolerant_inputs else "midpoint"
-        captured = client.command("capture", name)
+        captured = checked_dance_result(client.command("capture", name))
         midpoint = capture_result(captured, allow_unreadable=True) if tolerant_inputs else capture_result(captured)
         timing = captured.get("observation", {}).get("midpoint_timing")
         if isinstance(timing, dict):
@@ -322,7 +355,7 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
             break
         if midpoint["position"]["phase"] == "response":
             break
-        if not (options.get("pointer_calibration") or options.get("fixed_metrics")) or midpoint["position"]["phase"] != "demo":
+        if not (options.get("pointer_calibration") or options.get("fixed_metrics") or options.get("prepared_midpoint_anchor")) or midpoint["position"]["phase"] != "demo":
             if tolerant_inputs:
                 skip_reason = "The fresh midpoint does not establish a usable demo or response position."
                 break
@@ -346,8 +379,16 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
         adjustments.append(adjustment)
         write_json(folder / "midpoint-adjustments.json", {"adjustments": adjustments})
         path = folder / "midpoint-adjustment.lua"
-        path.write_text("return " + lua_value(adjustment) + "\n", encoding="utf-8")
-        client.command("retime-midpoint", path.as_posix())
+        path.write_text("return " + lua_value(adjustment) + "\n", encoding="utf-8", newline="\n")
+        adjusted = client.command("retime-midpoint", path.as_posix())
+        if tolerant_inputs and adjusted.get("recovery_required"):
+            adjustment.update(accepted=False, rejection_reason=adjusted["warning"])
+            write_json(folder / "midpoint-adjustments.json", {"adjustments": adjustments})
+            skip_reason = adjusted["warning"]
+            record("midpoint_adjustment_rejected", dance=dance, frame=midpoint["frame"],
+                pointer_x=x, reason=skip_reason, additional_emulator_frames=0)
+            break
+        checked_dance_result(adjusted)
         record("midpoint_adjusted", dance=dance, frame=midpoint["frame"], pointer_x=x,
              additional_emulator_frames=frames, next_frame=adjustment["next_frame"])
     if diagnostics:
@@ -393,9 +434,9 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
             planned = response_plan(midpoint, image, samples, read_frame, rank=options["rank"], expected_cues=options["cues_per_dance"],
                 speed=options["pointer_pixels_per_emulator_frame"], hold_frames=options["hold_frames"],
                 offset_frames=options["offset_frames"], dance=dance,
-                side_offset_pixels=options["rank_timing"]["cue_side_offset_pixels"] if tolerant_inputs
+                side_offset_pixels=options["rank_timing"]["cue_side_offset_pixels"] if options.get("fixed_metrics")
                     else options.get("resolved_cue_side_offset_pixels"),
-                allow_demo_midpoint=diagnostics, fixed_spacing=tolerant_inputs, tolerant_inputs=tolerant_inputs)
+                allow_demo_midpoint=diagnostics, fixed_spacing=options.get("fixed_metrics") is True, tolerant_inputs=True)
         except ReviewNeeded as error:
             if not tolerant_inputs:
                 raise
@@ -406,62 +447,95 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
             + options["rank_timing"]["response_frames"] + 0.5)
         if tolerant_inputs:
             planned["response_end_frame"] = max(midpoint["frame"] + 1, planned["response_end_frame"])
-    if tolerant_inputs:
+    if scheduled_feedback:
         planned.update(feedback_schedule(planned, delay_frames=options["first_feedback_delay_frames"],
             rank_timing=options["rank_timing"], tolerant_inputs=True))
         if not debug_inputs and dance == 1:
             planned["first_feedback_frame"] = next((frame for press, frame in zip(planned["presses"], planned["feedback_frames"])
                 if press["input_index"] == 1), None)
-        record("response_selected", dance=dance, expected_inputs=options["cues_per_dance"],
-            planned_inputs=len(planned["presses"]), skipped_inputs=planned["skipped_input_count"],
-            conflicts=len(planned["cues"]["conflicts"]), reason=planned.get("skip_reason"))
     elif options.get("observation_policy") == "scheduled" and dance == 1:
-        planned["first_feedback_frame"] = planned["presses"][0]["frame"] + options["first_feedback_delay_frames"]
-        if planned["first_feedback_frame"] >= planned["presses"][1]["frame"]:
+        planned["first_feedback_frame"] = planned["presses"][0]["frame"] + options["first_feedback_delay_frames"] if planned["presses"] else None
+        if len(planned["presses"]) > 1 and planned["first_feedback_frame"] >= planned["presses"][1]["frame"]:
             raise ReviewNeeded("The scheduled first-feedback capture must precede the second response input.")
+    record("response_selected", dance=dance, expected_inputs=options["cues_per_dance"],
+        planned_inputs=len(planned["presses"]), skipped_inputs=planned["skipped_input_count"],
+        conflicts=len(planned["cues"]["conflicts"]), reason=planned.get("skip_reason"))
     write_json(folder / "response-plan.json", planned)
     path = folder / "response-plan.lua"
-    path.write_text("return " + lua_value(planned) + "\n", encoding="utf-8")
-    client.command("plan", path.as_posix())
+    path.write_text("return " + lua_value(planned) + "\n", encoding="utf-8", newline="\n")
+    checked_dance_result(client.command("plan", path.as_posix()))
     return midpoint, planned, reading
 
 
 def stage5_responses(runtime, plan):
     """Use the master's existing client, Lua callbacks, deadlines, and slot ownership."""
     responses, last = [], None
-    runtime.command("init")
+    previous_saved = runtime.boundary["save_state"] if runtime.boundary else None
+    initialized = runtime.command("init")
+    if initialized.get("recovery_required"):
+        runtime.record("dance_warning", reason=initialized["warning"])
     for dance in range(1, 7):
         folder = runtime.active_work / f"dance-{dance:02d}"
         folder.mkdir()
-        gap = plan["leader_switch_gap_frames"] if dance in (3, 5) else 0
-        runtime.command("select-dance", dance, folder.as_posix(), gap)
-        if gap:
-            runtime.action("wait-gap", expected="leader_switch_gap_complete")
-        settle_native_osd(runtime.controller, plan["native_osd_settle_host_seconds"])
-        midpoint, planned, reading = prepare_response(runtime.emulator, runtime, folder, dance, plan, record=runtime.record)
 
-        def acknowledge(name, frame):
+        def acknowledge(name, frame, epoch):
             path = folder / f"{name}-context.lua"
-            path.write_text("return " + lua_value({"frame": frame, "epoch": midpoint["epoch"]}) + "\n", encoding="utf-8")
-            return runtime.acknowledge(runtime.command("visit", name, path.as_posix()),
-                slot=runtime.settings["save_policy"]["temporary_slot"] if plan["observation_policy"] == "diagnostic" else None)
+            path.write_text("return " + lua_value({"frame": frame, "epoch": epoch}) + "\n", encoding="utf-8", newline="\n")
+            return checked_dance_result(runtime.acknowledge(
+                checked_dance_result(runtime.command("visit", name, path.as_posix())),
+                slot=runtime.settings["save_policy"]["temporary_slot"] if plan["observation_policy"] == "diagnostic" else None))
 
-        acknowledge("rank-dance-start", midpoint["frame"])
-        settle_native_osd(runtime.controller, plan["native_osd_settle_host_seconds"])
-        responded = runtime.action("mirror")
-        if dance == 1 and not plan.get("debug_inputs"):
-            if responded.get("stop_reason") != "offset_feedback_ready":
-                raise ReviewNeeded("The first-button feedback checkpoint was not reached.")
-            acknowledge("rank-dance-offset", responded["frame"])
-            responded = runtime.action("mirror-rest", expected="dance_response_complete")
-        elif responded.get("stop_reason") != "dance_response_complete":
-            raise ReviewNeeded("The rank-selected response did not reach its counted endpoint.")
-        last = acknowledge("rank-dance-finish", responded["frame"])
+        try:
+            gap = plan["leader_switch_gap_frames"] if dance in (3, 5) else 0
+            checked_dance_result(runtime.command("select-dance", dance, folder.as_posix(), gap))
+            if gap:
+                checked_dance_result(runtime.action("wait-gap", expected="leader_switch_gap_complete"))
+            settle_saved_overlay(runtime, folder, dance, previous_saved, "demo", plan["native_osd_settle_host_seconds"])
+            midpoint, planned, reading = prepare_response(runtime.emulator, runtime, folder, dance, plan, record=runtime.record)
+            started = acknowledge("rank-dance-start", midpoint["frame"], midpoint["epoch"])
+            settle_saved_overlay(runtime, folder, dance, started["host_savestate"], "response", plan["native_osd_settle_host_seconds"])
+            responded = checked_dance_result(runtime.action("mirror"))
+            if dance == 1 and not plan.get("debug_inputs"):
+                if responded.get("stop_reason") != "offset_feedback_ready":
+                    raise ReviewNeeded("The first-button feedback checkpoint was not reached.")
+                acknowledge("rank-dance-offset", responded["frame"], midpoint["epoch"])
+                responded = checked_dance_result(runtime.action("mirror-rest", expected="dance_response_complete"))
+            elif responded.get("stop_reason") != "dance_response_complete":
+                raise ReviewNeeded("The rank-selected response did not reach its counted endpoint.")
+        except Exception as error:
+            if isinstance(error, TimeoutError):
+                raise
+            reason = (str(error) or type(error).__name__).replace("|", "/").replace("\r", " ").replace("\n", " ")
+            captured = checked_dance_result(runtime.command("capture", "response-recovery"))
+            observation = captured["observation"]
+            midpoint = {"frame": captured["frame"], "epoch": captured["epoch"], "image": observation["image"],
+                "position": {"x": None, "phase": "unknown", "reason": "analysis_skipped_after_dance_error"},
+                "midpoint_timing": observation["midpoint_timing"], "recovery_reason": str(error)}
+            skipped = skipped_response(midpoint, dance, plan, reason)
+            skipped.update(feedback_schedule(skipped, delay_frames=plan["first_feedback_delay_frames"],
+                rank_timing=plan["rank_timing"]))
+            path = folder / "response-skip.lua"
+            path.write_text("return " + lua_value(skipped) + "\n", encoding="utf-8", newline="\n")
+            recovered = checked_dance_result(runtime.command("recover-response", dance, path.as_posix(), reason))
+            observation = recovered["observation"]
+            planned = recovered["response_plan"]
+            reading = {"source": "counted_response_recovery", "unreadable_frames": [], "analysis_error": str(error)}
+            write_json(folder / "response-recovery.json", {"midpoint": midpoint, "plan": planned})
+            runtime.record("dance_warning", dance=dance, frame=recovered["frame"], reason=str(error),
+                continuation="counted_input_free_response")
+            if not observation["trial"]["response_started"]:
+                acknowledge("rank-dance-start", recovered["frame"], recovered["epoch"])
+            if dance == 1 and not plan.get("debug_inputs") and not observation["trial"]["first_feedback_verified"]:
+                acknowledge("rank-dance-offset", recovered["frame"], recovered["epoch"])
+            responded = checked_dance_result(runtime.action("mirror", expected="dance_response_complete"))
+        last = acknowledge("rank-dance-finish", responded["frame"], midpoint["epoch"])
+        previous_saved = last["host_savestate"]
         trial = last["checkpoint"]["snapshot"]["trial"]
         value = {"dance": dance, "rank": plan["rank"], "midpoint_frame": midpoint["frame"],
             "midpoint_pointer_x": midpoint["position"]["x"],
             "midpoint_timing": midpoint.get("midpoint_timing"),
-            "end_frame": responded["frame"], "presses": planned["presses"], "judgments": trial["judgments"],
+             "end_frame": responded["frame"], "presses": planned["presses"], "judgments": trial["judgments"],
+             "excellent_count": trial["excellent_count"], "miss_count": trial["miss_count"],
             "unreadable_demo_frames": len(reading["unreadable_frames"]),
             "observation_policy": plan["observation_policy"],
             "checkpoint_receipt": last["host_receipt"],
@@ -472,7 +546,8 @@ def stage5_responses(runtime, plan):
                 skipped_inputs=trial["skipped_inputs"], conflict_count=trial["conflict_count"],
                 selection=planned["cues"])
         if plan.get("midpoint_diagnostics"):
-            value["midpoint_diagnostic"] = {"dance": dance, **midpoint["diagnostic"]}
+            value["midpoint_diagnostic"] = {"dance": dance,
+                **midpoint.get("diagnostic", {"recovery_reason": midpoint.get("recovery_reason")})}
         responses.append(value)
         write_json(folder / "dance-result.json", value)
         if plan.get("tolerant_inputs") or plan["feedback_policy"] == "all_buttons":
@@ -481,9 +556,38 @@ def stage5_responses(runtime, plan):
         runtime.json("dance-progress.json", {"completed_dances": dance, "rank_timing": plan["rank_timing"], "trial": trial})
         runtime.record("dance_complete" if plan.get("tolerant_inputs") else "dance_pass", dance=dance,
             feedback_policy=plan["feedback_policy"], fresh_excellent_judgments=trial["excellent_count"],
-            total_excellent=trial["total_excellent_count"], timing_misses=trial.get("total_timing_misses", 0),
-            unreadable_feedback=trial.get("total_unreadable_feedback", 0), skipped_inputs=trial.get("total_skipped_inputs", 0))
+            total_excellent=trial["total_excellent_count"], total_misses=trial["total_miss_count"],
+            skipped_inputs=trial.get("total_skipped_inputs", 0))
     return responses, last
+
+
+def settle_saved_overlay(runtime, folder, dance, saved, section_name, seconds):
+    """Retain a fresh same-frame capture after a native save's paused host wait."""
+    if saved is None or not seconds:
+        return None
+    try:
+        result = settle_native_overlay(runtime.controller,
+            lambda name: checked_dance_result(runtime.command("capture", name)), seconds, name=section_name)
+    except RuntimeError as error:
+        raise ReviewNeeded(str(error)) from error
+    result.update(dance=dance, native_save=saved)
+    write_json(folder / f"overlay-{section_name}.json", result)
+    runtime.record("dance_overlay_settled", **result)
+    return result
+
+
+def stage5_handoff(runtime, plan):
+    for action, expected, name in (("lead-dances", "lead_dances_complete", "lead-dances-result.json"),
+            ("acting-transition", "B_transition_complete", "transition-result.json")):
+        try:
+            checked_dance_result(runtime.action(action, expected=expected, name=name))
+        except Exception as error:
+            if plan.get("first_feedback_policy") != "warn_and_continue" or isinstance(error, TimeoutError):
+                raise
+            reason = (str(error) or type(error).__name__).replace("|", "/").replace("\r", " ").replace("\n", " ")
+            checked_dance_result(runtime.command("warn", reason))
+            runtime.record("dance_warning", action=action, reason=reason, continuation="counted_handoff")
+            checked_dance_result(runtime.action(action, expected=expected, name=name))
 
 
 def run(run_name, **arguments):
@@ -505,7 +609,7 @@ def run(run_name, **arguments):
     client = CheckpointClient(emulator, work, run_name)
     result = {"outcome": "fail", "run_id": run_name, "host_pid": os.getpid(), "work_dir": str(work),
         "settings": options, "dances": [], "cleanup_errors": [], "completed_dances": 0,
-        "total_inputs": 0, "total_judgments": 0, "total_excellent": 0}
+        "total_inputs": 0, "total_judgments": 0, "total_excellent": 0, "total_misses": 0, "total_skipped_inputs": 0}
     write_json(work / "runner-setup.json", {"run_id": run_name, "host_pid": os.getpid(),
         "work_dir": str(work), "settings": options})
     owned = attached = slot10_touched = False
@@ -522,8 +626,14 @@ def run(run_name, **arguments):
 
     def lua_file(name, value):
         path = current_folder / name
-        path.write_text("return " + lua_value(value) + "\n", encoding="utf-8")
+        path.write_text("return " + lua_value(value) + "\n", encoding="utf-8", newline="\n")
         return path
+
+    def settle(name):
+        evidence = settle_native_overlay(controller, lambda name: checked_dance_result(client.command("capture", name)),
+            options["native_osd_settle_host_seconds"], name=name)
+        if evidence is not None:
+            write_json(current_folder / f"overlay-{name}.json", evidence)
 
     def acknowledge(name, frame, epoch):
         nonlocal slot10_touched
@@ -537,9 +647,12 @@ def run(run_name, **arguments):
         for field in ("completed_dances", "total_inputs", "total_judgments", "total_excellent"):
             if field in trial:
                 result[field] = trial[field]
+        if "total_miss_count" in trial:
+            result["total_misses"] = trial["total_miss_count"]
+        if "total_skipped_inputs" in trial:
+            result["total_skipped_inputs"] = trial["total_skipped_inputs"]
 
     try:
-        inactive_runs(parent, current_pid=os.getpid(), check=controller.remaining)
         native = emulator.states.path(source_slot, data={"rom": str(ROM)})
         StateSlots.validate_header(native, source_slot)
         source_copy = work / f"prepared-slot-{source_slot}.ds{source_slot % 10}"; shutil.copy2(native, source_copy)
@@ -571,21 +684,34 @@ def run(run_name, **arguments):
             original10 = work / "previous-slot-10.ds0"; shutil.copy2(native10, original10)
         attach(controller, HERE / "rank_dance.lua", bridge=BRIDGE)
         attached = True
-        client.command("init-run", run_name, work.as_posix(), options["rank"])
+        client.command("init-run", run_name, work.as_posix(), options["rank"],
+            lua_file("timing-settings.lua", options).as_posix())
         loaded = emulator.load_state(source_slot, refresh=False)
         source = client.command("capture", "loaded-source")
         write_json(work / "source-load.json", {**loaded, "frame": source["frame"], "epoch": source["epoch"],
             "rank": options["rank"], "rank_source": "user_prepared_native_slot", "retained_state": str(source_copy)})
         controller.USER32.SetForegroundWindow(window)
         rendered = unpause_window(controller, options["render_host_seconds"])
-        initial = capture_result(client.command("capture", "initial-position"))
-        if initial["epoch"] != source["epoch"] or initial["frame"] <= source["frame"] or initial["position"]["phase"] != "demo":
-            raise ReviewNeeded("The prepared source did not render within Dance 1's demonstration.")
+        settle("source")
+        initial = capture_result(client.command("capture", "initial-position"), allow_unreadable=True)
+        if initial["epoch"] != source["epoch"] or initial["frame"] <= source["frame"]:
+            raise ReviewNeeded("The prepared render changed epoch or did not advance emulator frames.")
+        if initial["position"]["phase"] != "demo":
+            reason = "The prepared entry is unreadable or already in its response; using the counted dance budget."
+            checked_dance_result(client.command("warn", reason))
+            record("dance_warning", reason=reason)
         result["initial_position"] = initial
         write_json(work / "render-preparation.json", {**rendered, "source_frame": source["frame"],
             "emulator_frames": initial["frame"] - source["frame"], "capture": initial})
-        predicted_midpoint = (initial["frame"] + (128 - initial["position"]["x"]) / options["pointer_pixels_per_emulator_frame"]
-            if options["pointer_pixels_per_emulator_frame"] is not None else None)
+        anchor_speed = options["pointer_pixels_per_emulator_frame"] or options["rank_timing"]["pixels_per_frame"]
+        options["pointer_pixels_per_emulator_frame"] = anchor_speed
+        x = initial["position"]["x"]
+        predicted_midpoint = initial["frame"] + (max(1, math.ceil((128 - x) / anchor_speed))
+            if x is not None else options["rank_timing"]["response_frames"])
+        anchor = {"frame": initial["frame"], "epoch": initial["epoch"], "pointer_x": initial["position"]["x"],
+            "speed": anchor_speed, "first_midpoint_frame": predicted_midpoint}
+        checked_dance_result(client.command("anchor-midpoints", lua_file("midpoint-anchor.lua", anchor).as_posix()))
+        options["prepared_midpoint_anchor"] = True
         record("initial_position", frame=initial["frame"], pointer_x=initial["position"]["x"],
             predicted_first_midpoint_frame=predicted_midpoint)
 
@@ -594,25 +720,47 @@ def run(run_name, **arguments):
             current_folder = work / f"dance-{current_dance:02d}"
             current_folder.mkdir()
             gap = options["leader_switch_gap_frames"] if current_dance in (3, 5) else 0
-            selected = client.command("select-dance", current_dance, current_folder.as_posix(), gap)
-            if gap:
-                waited = emulator.command("wait-gap", timeout=None, deadline=controller.live_deadline)
-                if waited.get("error") or waited.get("stop_reason") != "leader_switch_gap_complete":
-                    raise RuntimeError(waited.get("error") or "The leader-switch gap did not complete.")
-                write_json(current_folder / "leader-switch.json", {"start_frame": selected["frame"],
-                    "end_frame": waited["frame"], "emulator_frames": waited["frame"] - selected["frame"], "inputs": "none"})
-            record("observe_demo")
-            midpoint, planned, reading = prepare_response(emulator, client, current_folder, current_dance, options, record=record)
-            acknowledge("start", midpoint["frame"], midpoint["epoch"])
-            record("respond", presses=planned["presses"])
-            responded = emulator.command("mirror", timeout=None, deadline=controller.live_deadline)
+            try:
+                selected = checked_dance_result(client.command("select-dance", current_dance, current_folder.as_posix(), gap))
+                if gap:
+                    waited = emulator.command("wait-gap", timeout=None, deadline=controller.live_deadline)
+                    if waited.get("error") or waited.get("stop_reason") != "leader_switch_gap_complete":
+                        raise ReviewNeeded(waited.get("error") or "The leader-switch gap needs counted continuation.")
+                    write_json(current_folder / "leader-switch.json", {"start_frame": selected["frame"],
+                        "end_frame": waited["frame"], "emulator_frames": waited["frame"] - selected["frame"], "inputs": "none"})
+                record("observe_demo")
+                settle("demo")
+                midpoint, planned, reading = prepare_response(emulator, client, current_folder, current_dance, options, record=record)
+                acknowledge("start", midpoint["frame"], midpoint["epoch"])
+                settle("response")
+                record("respond", presses=planned["presses"])
+                responded = emulator.command("mirror", timeout=None, deadline=controller.live_deadline)
+                if responded.get("error") or responded.get("stop_reason") != "dance_response_complete":
+                    raise ReviewNeeded(responded.get("error") or "The response needs counted input-free continuation.")
+            except Exception as error:
+                if isinstance(error, TimeoutError):
+                    raise
+                reason = (str(error) or type(error).__name__).replace("|", "/").replace("\r", " ").replace("\n", " ")
+                captured = checked_dance_result(client.command("capture", "response-recovery"))
+                midpoint = {"frame": captured["frame"], "epoch": captured["epoch"], "image": captured["observation"]["image"],
+                    "position": {"x": None, "phase": "unknown"}, "midpoint_timing": captured["observation"].get("midpoint_timing")}
+                skipped = skipped_response(midpoint, current_dance, options, reason)
+                recovered = checked_dance_result(client.command("recover-response", current_dance,
+                    lua_file("response-skip.lua", skipped).as_posix(), reason))
+                planned = recovered["response_plan"]
+                reading = {"unreadable_frames": [], "observed_speed": None, "analysis_error": reason}
+                if not recovered["observation"]["trial"]["response_started"]:
+                    acknowledge("start", recovered["frame"], recovered["epoch"])
+                record("dance_warning", reason=reason, continuation="counted_input_free_response")
+                settle("recovery")
+                responded = emulator.command("mirror", timeout=None, deadline=controller.live_deadline)
             summary(responded.get("observation", {}))
-            if responded.get("error") or responded.get("stop_reason") != "dance_response_complete":
-                raise ReviewNeeded(responded.get("error") or "The response stopped before completion.")
             completed = acknowledge("finish", responded["frame"], midpoint["epoch"])
             trial = completed["checkpoint"]["snapshot"]["trial"]
             value = {"dance": current_dance, "outcome": "pass", "midpoint_frame": midpoint["frame"],
                 "end_frame": responded["frame"], "presses": planned["presses"], "judgments": trial["judgments"],
+                "excellent_count": trial["excellent_count"], "miss_count": trial["miss_count"],
+                "input_count": trial["inputs"], "skipped_input_count": trial["skipped_input_count"],
                 "unreadable_demo_frames": len(reading["unreadable_frames"]), "observed_demo_speed": reading["observed_speed"],
                 "retained_state": completed["host_savestate"]["retained_path"]}
             result["dances"].append(value)
@@ -621,8 +769,8 @@ def run(run_name, **arguments):
             for path in current_folder.glob("judgment-*.gd"):
                 stacked_gd(path).save(path.with_suffix(".png"))
             record("dance_pass", judgments=len(trial["judgments"]), completed_dances=current_dance)
-        if result["completed_dances"] != 6 or result["total_excellent"] != options["required_excellent"]:
-            raise RuntimeError(f"The complete six-dance result needs {options['required_excellent']} Excellent judgments.")
+        if result["total_inputs"] + result["total_skipped_inputs"] != options["required_response_inputs"]:
+            record("dance_warning", reason="The six-response input accounting needs review.")
         result["outcome"] = "pass"
         result["finish_state"] = result["dances"][-1]["retained_state"]
     except (Exception, SystemExit) as error:
@@ -701,6 +849,8 @@ def main():
     modes.add_argument("--check", action="store_true")
     parser.add_argument("--run-name")
     parser.add_argument("--rank", default="Master")
+    parser.add_argument("--category", choices=("Cool", "Beauty", "Cute", "Smart", "Tough"), default="Cool",
+                        help="Category of the prepared source; uses the shared main-runner metrics.")
     parser.add_argument("--input-slot", type=int, default=1)
     parser.add_argument("--host-timeout", type=float, default=300)
     parser.add_argument("--pointer-speed", type=float)
@@ -715,11 +865,11 @@ def main():
         finally:
             lua.close()
         return 0
-    options = {name: getattr(args, name) for name in ("rank", "input_slot", "host_timeout", "pointer_speed", "calibrate_speed")}
+    options = {name: getattr(args, name) for name in ("rank", "category", "input_slot", "host_timeout", "pointer_speed", "calibrate_speed")}
     if not args.execute:
         print(json.dumps(settings(**options), indent=2)); return 0
     result = run(args.run_name, **options)
-    keys = ("outcome", "work_dir", "completed_dances", "total_inputs", "total_judgments", "total_excellent",
+    keys = ("outcome", "work_dir", "completed_dances", "total_inputs", "total_judgments", "total_excellent", "total_misses", "total_skipped_inputs",
         "stopped_dance", "error", "emulator_paused", "inputs_released", "source_slot_preserved",
         "temporary_slot_10_restored", "cleanup_errors", "total_host_seconds")
     print(json.dumps({key: result.get(key) for key in keys}, indent=2))

@@ -1,5 +1,13 @@
 # Local portable emulator, ROMs, and working saves.
 /desmume-0.9.13-win64/
+/DeSmuME*.exe
+/lua51.dll
+/desmume.ini
+/Battery/
+/StateSlots/
+/States/
+/Screenshots/
+/AviFiles/
 *.nds
 *.gba
 *.sav
@@ -17,3 +25,10 @@ tmp/
 __pycache__/
 *.pyc
 .venv/
+
+# Persistent local evidence; retain the empty folder in source and releases.
+/contest/debug/*
+!/contest/debug/.gitkeep
+
+# Generated release archives.
+/dist/

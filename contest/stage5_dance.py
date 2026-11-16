@@ -18,7 +18,6 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from contest.dance_master import (
-    DEMO_SAMPLE_FRAMES, DANCE_SPACING, HALF_FRAMES, POKEMON_SWITCH_EXTRA, DEFAULT_OFFSET_FRAMES,
     attach, check as check_dance, dance_schedule, lua_value, response_dances,
 )
 from contest.runtime import ROM, TimedController, TimedSlots, automatic_review, setup_speed, finish_speed
@@ -29,29 +28,34 @@ from host.checkpoints import CheckpointClient, CheckpointStopped, write_json
 from host.controller import ControllerConfig
 from host.emulator import DeSmuME
 from host.paths import ROOT, project_path
-from contest.inputs import MASH_HOLD_FRAMES, MASH_RELEASE_FRAMES, whole
+from contest.inputs import whole
+from contest.dance_timings import fixed_timing
+from contest.timing_profiles import load_profile, section, setting
 
 
 HERE = Path(__file__).resolve().parent
 INPUT_SLOT, OUTPUT_SLOT = 10, 5
-TRANSITION_SECONDS = 15
+TRANSITION_SECONDS = section(None, "stage5_dancing")["acting_transition_b_mash_game_seconds"]
 
 
 class Stage5Controller(TimedController):
     def remaining(self):
         if self.live_deadline is not None and time.monotonic() >= self.live_deadline:
-            raise TimeoutError("The Stage 5 host deadline expired.")
+            raise TimeoutError("timeout")
         return super().remaining()
 
 
-def dance_source(path):
+def dance_source(path, *, timing_profile=None):
     """Restore the accepted Stage 4 state with its paired dynamic-entry anchor."""
     handoff_path = project_path(path)
     handoff = json.loads(handoff_path.read_text(encoding="utf-8"))
     if handoff.get("source_stage") != 4 or handoff.get("dance") != 1:
         raise ValueError("Stage 5 requires Stage 4's Dance 1 handoff.")
-    if handoff.get("demo_frames") != HALF_FRAMES or handoff.get("response_frames") != HALF_FRAMES:
-        raise ValueError("The handoff must use the existing 216-frame dance halves.")
+    target = handoff.get("target") or {"category": "Cool", "rank": "Master"}
+    motion = fixed_timing(target["category"], target["rank"], timing_profile=timing_profile)
+    if (handoff.get("demo_frames") != motion["visible_half_frames"]
+            or handoff.get("response_frames") != motion["response_frames"]):
+        raise ValueError("The handoff must use its selected category/rank's main-runner dance halves.")
     receipt_path, source, previous = accepted_source(handoff["source_checkpoint"])
     if previous.get("checkpoint") != "stage-4-dress":
         raise ValueError("The dance source must be an accepted Stage 4 checkpoint.")
@@ -78,9 +82,18 @@ def dance_source(path):
     return handoff_path, handoff, receipt_path, source, previous
 
 
-def dancing_plan(*, host_timeout, timing_anchor=None, source_frame=None, hold_frames=2,
-                  offset_frames=DEFAULT_OFFSET_FRAMES, transition_seconds=TRANSITION_SECONDS,
-                 uncapped=False, osd_settle_seconds=0):
+def dancing_plan(*, host_timeout, timing_anchor=None, source_frame=None, hold_frames=None,
+                  offset_frames=None, transition_seconds=None,
+                 uncapped=False, osd_settle_seconds=None, timing_profile=None, category="Cool", rank="Master"):
+    profile = load_profile() if timing_profile is None else timing_profile
+    values = section(profile, "stage5_dancing")
+    motion = fixed_timing(category, rank, timing_profile=profile)
+    half_frames = motion["response_frames"]
+    visible_half = motion["visible_half_frames"]
+    hold_frames = setting(hold_frames, values, "response_hold_frames")
+    offset_frames = setting(offset_frames, values, "input_offset_frames")
+    transition_seconds = setting(transition_seconds, values, "acting_transition_b_mash_game_seconds")
+    osd_settle_seconds = setting(osd_settle_seconds, values, "native_overlay_settle_host_seconds")
     for value, label in ((host_timeout, "host timeout"), (transition_seconds, "B-mashing duration")):
         if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
             raise ValueError(f"The {label} must be positive seconds.")
@@ -99,15 +112,15 @@ def dancing_plan(*, host_timeout, timing_anchor=None, source_frame=None, hold_fr
                 or any(isinstance(value, bool) or not isinstance(value, int) for value in bounds)
                 or not bounds[0] <= demo_start <= bounds[1]):
             raise ValueError("Retain the Stage 4 demo-start estimate and its measured frame range.")
-        if (timing_anchor.get("response_start_frame") != demo_start + HALF_FRAMES
-                or timing_anchor.get("response_start_frame_range") != [value + HALF_FRAMES for value in bounds]):
-            raise ValueError("The handoff response timing must use the same 216-frame half offset.")
+        if (timing_anchor.get("response_start_frame") != demo_start + visible_half
+                or timing_anchor.get("response_start_frame_range") != [value + visible_half for value in bounds]):
+            raise ValueError("The handoff response timing must use the selected main-runner half offset.")
         whole(source_frame, 0, "Source frame")
-        if not demo_start <= source_frame < demo_start + HALF_FRAMES:
+        if not demo_start <= source_frame < demo_start + visible_half:
             raise ValueError("Stage 5 starts somewhere within Dance 1's demonstration.")
     elif source_frame is not None:
         raise ValueError("A source frame requires its paired Stage 4 timing anchor.")
-    dances = dance_schedule(demo_start_frame=demo_start, count=8)
+    dances = dance_schedule(demo_start_frame=demo_start, count=8, timing_profile=profile, category=category, rank=rank)
     if timing_anchor is not None:
         for dance in dances:
             for field in ("demo_start_frame", "boundary_frame", "end_frame"):
@@ -117,29 +130,29 @@ def dancing_plan(*, host_timeout, timing_anchor=None, source_frame=None, hold_fr
     if mash_frames < 1:
         raise ValueError("The B-mashing duration must cover at least one emulator frame.")
     end_frame = dances[-1]["end_frame"] + mash_frames
-    return {"stage": 5, "host_timeout_seconds": host_timeout, "attempts": 1,
+    return {"stage": 5, "timing_profile_source": profile["source"], "host_timeout_seconds": host_timeout, "attempts": 1,
         "source_frame": source_frame, "refresh_frames": 0, "timing_anchor": timing_anchor,
         "frame_coordinates": "absolute_emulator_frames" if timing_anchor is not None else "relative_to_dance_1_demo_start",
         "dynamic_demo_entry": True, "uncapped": uncapped, "speed_percent": 100, "frame_limit": not uncapped,
         "native_osd_settle_host_seconds": osd_settle_seconds,
         "hold_frames": hold_frames, "offset_frames": offset_frames,
-        "timing": {"same_pokemon_spacing_frames": DANCE_SPACING, "extra_switch_frames": POKEMON_SWITCH_EXTRA,
-            "demo_frames": HALF_FRAMES, "response_frames": HALF_FRAMES, "demo_sample_frames": DEMO_SAMPLE_FRAMES,
+        "feedback_release_frames": values["feedback_release_frames"], "cues_per_dance": motion["cues_per_dance"],
+        "timing": {"same_pokemon_spacing_frames": motion["cycle_frames"], "extra_switch_frames": motion["extra_switch_frames"],
+            "demo_frames": half_frames, "response_frames": half_frames, "demo_sample_frames": values["demo_sample_interval_frames"],
             "frame_rate": FRAME_RATE, "anchor_exact": timing_anchor.get("exact", False) if timing_anchor else False},
-        "dances": dances, "required_response_inputs": 24, "required_excellent_judgments": 1,
-        "feedback_policy": "first_button_only",
+        "dances": dances, "required_response_inputs": 6 * motion["cues_per_dance"], "required_excellent_judgments": 0,
+        "feedback_policy": "first_button_only", "first_feedback_policy": "warn_and_continue", "tolerant_inputs": True,
         "lead_dances": {"first_dance": 7, "last_dance": 8, "input_policy": "none",
             "start_frame": dances[5]["end_frame"], "end_frame": dances[7]["end_frame"],
             "duration_frames": dances[7]["end_frame"] - dances[5]["end_frame"],
             "leader_switch_frames": dances[6]["demo_start_frame"] - dances[5]["end_frame"]},
         "transition": {"button": "B", "game_seconds": transition_seconds, "mash_frames": mash_frames,
-            "mash_hold_frames": MASH_HOLD_FRAMES, "mash_release_frames": MASH_RELEASE_FRAMES,
+            "mash_hold_frames": values["transition_mash_hold_frames"], "mash_release_frames": values["transition_mash_release_frames"],
             "frame_conversion": "nearest frame at 67027965 / 1120380 frames per second"},
         "end_frame": end_frame, "total_emulator_frames": end_frame - source_frame if source_frame is not None else None,
         "checkpoint_slot": OUTPUT_SLOT, "temporary_slot": INPUT_SLOT,
-        "acceptance": "The first response input receives fresh Excellent feedback; all 24 scheduled inputs, input-free Dances 7 and 8, and Acting entry complete.",
-        "failure_policy": "Pause on a non-Excellent first-button result or failed cue/timing checks.",
-        "feedback_failure_message": "FAIL: dance timing wrong; calibrate button press timing",
+        "acceptance": f"All {6 * motion['cues_per_dance']} opportunities are executed or skipped; input-free Dances 7 and 8 and the Acting transition complete.",
+        "failure_policy": "Warn on feedback or cue failures and continue to the counted endpoint; a skipped input is not a feedback Miss.",
         "review_source": "visual_review", "memory_proven_phase": False}
 
 
@@ -165,10 +178,14 @@ def await_acting_review(controller, request):
 
 def run(*, run_name, dance_handoff, deadline=None, auto_review=False, keep_uncapped=False, **options):
     started = time.monotonic()
+    if options.get("timing_profile") is None:
+        options["timing_profile"] = load_profile()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", run_name):
         raise ValueError("Use a run name containing letters, digits, underscores, or hyphens.")
-    handoff_path, handoff, receipt_path, source, previous = dance_source(dance_handoff)
-    plan = dancing_plan(timing_anchor=handoff["timing_anchor"], source_frame=previous["frame"], **options)
+    handoff_path, handoff, receipt_path, source, previous = dance_source(dance_handoff, timing_profile=options["timing_profile"])
+    target = handoff.get("target") or {"category": "Cool", "rank": "Master"}
+    plan = dancing_plan(timing_anchor=handoff["timing_anchor"], source_frame=previous["frame"],
+        category=target["category"], rank=target["rank"], **options)
     if deadline is not None and (isinstance(deadline, bool) or not math.isfinite(deadline)):
         raise ValueError("The shared deadline must be an absolute monotonic host time.")
     work = ROOT / "tmp" / "contest" / run_name
@@ -191,7 +208,7 @@ def run(*, run_name, dance_handoff, deadline=None, auto_review=False, keep_uncap
         "shared_host_deadline": deadline})
     attachment = work / "attach.lua"
     attachment.write_text(
-        f"assert(loadfile({lua_value((HERE / 'dance_master.lua').as_posix())}))({lua_value(config)})\n", encoding="utf-8")
+        f"assert(loadfile({lua_value((HERE / 'dance_master.lua').as_posix())}))({lua_value(config)})\n", encoding="utf-8", newline="\n")
     result = {"outcome": "fail", "stage": 5, "run_id": run_name, "work_dir": str(work),
         "stage5_accepted": False, "source_context": source_context, "source_kind": "accepted_stage4_checkpoint",
         "host_timeout_seconds": plan["host_timeout_seconds"], "timing_anchor": plan["timing_anchor"],
@@ -264,25 +281,41 @@ def run(*, run_name, dance_handoff, deadline=None, auto_review=False, keep_uncap
         for completed in response_dances(emulator, client, plan["dances"], checkpoint_slot=INPUT_SLOT,
                 finish_slot=INPUT_SLOT, hold_frames=plan["hold_frames"], offset_frames=plan["offset_frames"],
                 osd_settle_seconds=plan["native_osd_settle_host_seconds"],
-                terminal_section="lead-dances", first_feedback_only=True, on_progress=on_progress):
+                terminal_section="lead-dances", first_feedback_only=True, on_progress=on_progress,
+                timing_profile=options["timing_profile"]):
             result["dances"].append(completed["response"])
             trial = completed["trial"]
             result.update(completed_dances=len(result["dances"]), input_count=trial["total_input_count"],
                 excellent_count=trial["total_excellent_count"], feedback_checks=trial["total_judgment_count"],
+                miss_count=trial["total_miss_count"], skipped_input_count=trial["total_skipped_inputs"],
                 offset_check=completed["finish"]["checkpoint"]["snapshot"]["offset_check"],
                 response_end_frame=completed["finish"]["frame"])
             write_json(work / "runner-progress.json", result)
         record("lead-dances", **plan["lead_dances"])
-        lead = emulator.command("lead-dances", timeout=None, deadline=controller.live_deadline)
+        def handoff_action(action, expected):
+            try:
+                value = emulator.command(action, timeout=None, deadline=controller.live_deadline)
+                if value.get("error") or value.get("stop_reason") != expected:
+                    raise RuntimeError(value.get("error") or "The handoff needs counted continuation.")
+            except Exception as error:
+                if isinstance(error, TimeoutError):
+                    raise
+                reason = (str(error) or type(error).__name__).replace("|", "/").replace("\r", " ").replace("\n", " ")
+                client.command("warn", reason)
+                record("dance-warning", action=action, reason=reason)
+                value = emulator.command(action, timeout=None, deadline=controller.live_deadline)
+            return value
+
+        lead = handoff_action("lead-dances", "lead_dances_complete")
         write_json(work / "lead-dances-result.json", lead)
-        if lead.get("stop_reason") != "lead_dances_complete" or lead["frame"] != plan["dances"][7]["end_frame"]:
-            raise RuntimeError("The input-free Dances 7 and 8 did not reach their configured endpoint.")
+        if lead["frame"] != plan["dances"][7]["end_frame"]:
+            client.command("warn", "The input-free dance endpoint was overrun")
         result["lead_dances"] = lead["observation"]["lead_dances"]
         record("acting-transition", **plan["transition"])
-        transitioned = emulator.command("acting-transition", timeout=None, deadline=controller.live_deadline)
+        transitioned = handoff_action("acting-transition", "B_transition_complete")
         write_json(work / "transition-result.json", transitioned)
-        if transitioned.get("stop_reason") != "B_transition_complete" or transitioned["frame"] != plan["end_frame"]:
-            raise RuntimeError("The B transition did not reach its configured Acting-entry endpoint.")
+        if transitioned["frame"] != plan["end_frame"]:
+            client.command("warn", "The Acting transition endpoint was overrun")
         result["transition"] = transitioned["observation"]["transition"]
         capture = client.command("capture-acting")
         image_path = work / "stage5.png"
@@ -300,7 +333,7 @@ def run(*, run_name, dance_handoff, deadline=None, auto_review=False, keep_uncap
                screenshot=str(image_path))
         review = await_acting_review(controller, request)
         review_path = work / "review.lua"
-        review_path.write_text("return " + lua_value(review) + "\n", encoding="utf-8")
+        review_path.write_text("return " + lua_value(review) + "\n", encoding="utf-8", newline="\n")
         client.command("review-acting", review_path.as_posix())
         pending = client.command("visit", "stage-5-dance")
         touched.add(OUTPUT_SLOT)
@@ -332,10 +365,6 @@ def run(*, run_name, dance_handoff, deadline=None, auto_review=False, keep_uncap
                 if attached and result["outcome"] != "pass":
                     touched.add(OUTPUT_SLOT)
                     result["stopped_evidence"] = client.stop(result["error"], slot=OUTPUT_SLOT)
-                    failure = result["stopped_evidence"].get("checkpoint", {}).get("snapshot", {}).get("feedback_failure")
-                    if failure:
-                        result.update(outcome="fail", error=failure["message"], feedback_failure=failure,
-                                      failure_message=failure["message"], calibration_required=True)
                     controller.screenshot(work / "failure.png")
                     shutil.copy2(controller.config.mailbox_dir / "screen.gd", work / "failure.gd")
             except (Exception, SystemExit) as error:
@@ -408,11 +437,11 @@ def main():
     parser.add_argument("--run-name")
     parser.add_argument("--dance-handoff")
     parser.add_argument("--host-timeout", type=float)
-    parser.add_argument("--hold-frames", type=int, default=2)
-    parser.add_argument("--offset-frames", type=int, default=DEFAULT_OFFSET_FRAMES)
-    parser.add_argument("--transition-seconds", type=float, default=TRANSITION_SECONDS)
+    parser.add_argument("--hold-frames", type=int)
+    parser.add_argument("--offset-frames", type=int)
+    parser.add_argument("--transition-seconds", type=float)
     parser.add_argument("--uncapped", action="store_true")
-    parser.add_argument("--osd-settle-seconds", type=float, default=0)
+    parser.add_argument("--osd-settle-seconds", type=float)
     args = parser.parse_args()
     if args.check:
         check()
@@ -426,7 +455,9 @@ def main():
             source = {}
             if args.dance_handoff:
                 _, handoff, _, _, previous = dance_source(args.dance_handoff)
-                source = {"timing_anchor": handoff["timing_anchor"], "source_frame": previous["frame"]}
+                target = handoff.get("target") or {"category": "Cool", "rank": "Master"}
+                source = {"timing_anchor": handoff["timing_anchor"], "source_frame": previous["frame"],
+                    "category": target["category"], "rank": target["rank"]}
             print(json.dumps(dancing_plan(**source, **options), indent=2))
             return 0
         if not args.run_name or not args.dance_handoff:
@@ -435,8 +466,8 @@ def main():
     except (ValueError, OSError, KeyError) as error:
         parser.error(str(error))
     print(json.dumps({key: result[key] for key in ("outcome", "stage5_accepted", "completed_dances", "input_count",
-        "excellent_count", "feedback_checks", "frame", "emulator_paused", "work_dir", "error", "failure_message",
-        "calibration_required", "cleanup_errors") if key in result}, indent=2))
+        "excellent_count", "miss_count", "skipped_input_count", "feedback_checks", "frame", "emulator_paused", "work_dir", "error",
+        "cleanup_errors") if key in result}, indent=2))
     return 0 if result["outcome"] == "pass" else 1
 
 

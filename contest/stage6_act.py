@@ -26,27 +26,35 @@ from host.controller import ControllerConfig
 from host.emulator import DeSmuME
 from host.paths import ROOT, project_path
 from host.savestates import StateSlots
-from contest.inputs import MASH_HOLD_FRAMES, MASH_RELEASE_FRAMES, NORMAL_HOLD_FRAMES, NORMAL_RELEASE_FRAMES, whole
+from contest.inputs import whole
+from contest.timing_profiles import load_profile, section, setting
 
 
 HERE = Path(__file__).resolve().parent
 SOURCE_SLOT, OUTPUT_SLOT, TEMPORARY_SLOT = 5, 6, 10
-ENTRY_RENDER_FRAMES = 10
-RETRY_RENDER_HOST_SECONDS = 1
-ROUND_SECONDS = 60
-FINAL_SECONDS = 125
+_ACTING = section(None, "stage6_acting")
+ENTRY_RENDER_FRAMES = _ACTING["handoff_render_frames"]
+RETRY_RENDER_HOST_SECONDS = _ACTING["loaded_state_render_host_seconds"]
+ROUND_SECONDS = _ACTING["rounds_1_to_3_b_mash_game_seconds"]
+FINAL_SECONDS = _ACTING["final_round_and_results_b_mash_game_seconds"]
 
 
 class Stage6Controller(TimedController):
     def remaining(self):
         if self.live_deadline is not None and time.monotonic() >= self.live_deadline:
-            raise TimeoutError("The shared Stage 6 host deadline expired.")
+            raise TimeoutError("timeout")
         return super().remaining()
 
 
-def acting_plan(*, host_timeout, hold_frames=NORMAL_HOLD_FRAMES, release_frames=NORMAL_RELEASE_FRAMES,
-                from_stage5=False, max_attempts=None, uncapped=False,
-                round_seconds=ROUND_SECONDS, final_seconds=FINAL_SECONDS, source_slot=SOURCE_SLOT):
+def acting_plan(*, host_timeout, hold_frames=None, release_frames=None,
+                 from_stage5=False, max_attempts=None, uncapped=False,
+                round_seconds=None, final_seconds=None, source_slot=SOURCE_SLOT, timing_profile=None):
+    profile = load_profile() if timing_profile is None else timing_profile
+    values = section(profile, "stage6_acting")
+    hold_frames = setting(hold_frames, values, "menu_hold_frames")
+    release_frames = setting(release_frames, values, "menu_release_frames")
+    round_seconds = setting(round_seconds, values, "rounds_1_to_3_b_mash_game_seconds")
+    final_seconds = setting(final_seconds, values, "final_round_and_results_b_mash_game_seconds")
     if isinstance(host_timeout, bool) or not math.isfinite(host_timeout) or host_timeout <= 0:
         raise ValueError("The host timeout must be positive seconds.")
     whole(hold_frames, 1, "Menu held frames")
@@ -61,23 +69,23 @@ def acting_plan(*, host_timeout, hold_frames=NORMAL_HOLD_FRAMES, release_frames=
     for value in (round_seconds, final_seconds):
         if isinstance(value, bool) or not math.isfinite(value) or value <= 0 or round(value * FRAME_RATE) < 1:
             raise ValueError("Acting waits must be positive game seconds covering at least one emulator frame.")
-    return {"stage": 6, "host_timeout_seconds": host_timeout,
+    return {"stage": 6, "timing_profile_source": profile["source"], "host_timeout_seconds": host_timeout,
         "uncapped": uncapped, "speed_percent": 100, "frame_limit": not uncapped, "fast_forward": False,
         "retry_policy": f"reload_accepted_slot_{source_slot}_and_repeat_acting",
         "retry_limit": None if max_attempts is None else max_attempts - 1, "max_attempts": max_attempts,
-        "capture_policy": "all_three_judges_each_round_and_four_move_categories_at_entry",
-        "move_policy": "four_stars_lowest_matching_category_else_round_1_2_1_2",
+        "capture_policy": "all_three_judges_each_round_and_available_move_categories_at_entry",
+        "move_policy": "exclude_empty_and_last_used_slots_then_four_star_match_else_round_fallback",
         "move_category_read_policy": "once_per_attempt_from_first_round_framebuffer",
         "move_navigation": "remembered_row_major_2x2",
         "judge_policy": "first_exactly_four_else_first_fewest",
         "source_slot": source_slot, "checkpoint_slot": OUTPUT_SLOT, "temporary_slot": TEMPORARY_SLOT,
         "entry_mode": "stage5_handoff" if from_stage5 else "load_retry_state",
-        "handoff_render_frames": ENTRY_RENDER_FRAMES,
-        "retry_render_host_seconds": RETRY_RENDER_HOST_SECONDS,
+        "handoff_render_frames": values["handoff_render_frames"],
+        "retry_render_host_seconds": values["loaded_state_render_host_seconds"],
         "entry_render_method": ("input_bridge_advance_then_fresh_paused_capture" if from_stage5
             else "host_unpause_then_native_pause_and_fresh_capture"),
         "timing": {"hold_frames": hold_frames, "release_frames": release_frames,
-            "mash_hold_frames": MASH_HOLD_FRAMES, "mash_release_frames": MASH_RELEASE_FRAMES,
+            "mash_hold_frames": values["mash_hold_frames"], "mash_release_frames": values["mash_release_frames"],
             "frame_rate": FRAME_RATE, "frame_conversion": "nearest emulator frame at the native frame rate"},
         "rounds": [{"round": index, "move": 1 if index % 2 else 2,
             "mash_game_seconds": seconds, "mash_frames": round(seconds * FRAME_RATE)}
@@ -151,13 +159,12 @@ def overworld_reference_from_checkpoint(path, previous):
         if opened.format != "PNG" or opened.size != (256, 384):
             raise ValueError("The overworld reference must be a native stacked PNG.")
         image = opened.convert("RGB")
-    regions = ((88, 44, 104, 52), (184, 44, 200, 52), (24, 128, 40, 136),
-               (200, 128, 216, 136), (72, 170, 88, 178))
-    points = [[x, y, *image.getpixel((x, y))] for left, top, right, bottom in regions
-              for y in range(top, bottom, 2) for x in range(left, right, 2)]
+    regions = ((124, 54, 131, 67), (124, 78, 131, 95))
+    coordinates = [(x, y) for y in (54, 60, 66, 78, 84, 94) for x in (124, 130)]
+    points = [[x, y, *image.getpixel((x, y))] for x, y in coordinates]
     return {"points": points, "regions": regions, "reference": {"path": str(image_path),
         "checkpoint": str(receipt_path), "frame": previous["frame"], "epoch": previous["epoch"],
-        "source": "reviewed_prepared_contest_hall", "scope": "fixed_hall_view_without_dialogue"}}
+        "source": "reviewed_prepared_contest_hall", "scope": "central_player_and_receptionist_only"}}
 
 
 def retain_capture(snapshot, work, images, *, judges=False):
@@ -193,9 +200,12 @@ def cleanup_images(work, images):
     return receipt
 
 
-def prepare_render(emulator, client, initial, *, entry_mode):
+def prepare_render(emulator, client, initial, *, entry_mode, plan=None):
     """Prepare the selected entry, then confirm native pause before fresh analysis."""
     controller = emulator.controller
+    values = section(None, "stage6_acting") if plan is None else plan
+    render_frames = values["handoff_render_frames"]
+    retry_seconds = values.get("retry_render_host_seconds", values.get("loaded_state_render_host_seconds"))
     controller.remaining()
     session = controller.session()
     if initial.get("emulator_paused") is not True or not controller.paused(session):
@@ -208,11 +218,11 @@ def prepare_render(emulator, client, initial, *, entry_mode):
             if controller.paused(session):
                 raise RuntimeError("Acting retry render preparation did not reach native unpause.")
             unpaused_at = time.monotonic()
-            until = unpaused_at + RETRY_RENDER_HOST_SECONDS
+            until = unpaused_at + retry_seconds
             while True:
                 controller.remaining()
                 if controller.paused(session):
-                    raise RuntimeError("Native pause interrupted the one-second Acting retry render window.")
+                    raise RuntimeError("Native pause interrupted the configured Acting retry render window.")
                 left = until - time.monotonic()
                 if left <= 0:
                     break
@@ -227,12 +237,12 @@ def prepare_render(emulator, client, initial, *, entry_mode):
             raise RuntimeError("No emulator frames advanced during the Acting retry unpause window.")
         method = "host_unpause_then_native_pause"
     elif entry_mode == "stage5_handoff":
-        advanced = emulator.command("advance", ENTRY_RENDER_FRAMES, timeout=None, deadline=controller.live_deadline)
+        advanced = emulator.command("advance", render_frames, timeout=None, deadline=controller.live_deadline)
         if advanced.get("emulator_paused") is not True or not controller.paused(session):
-            raise RuntimeError("The ten-frame handoff render advance did not return to native pause.")
+            raise RuntimeError("The configured handoff render advance did not return to native pause.")
         prepared = client.command("render-prepared")
-        if prepared["frame"] != initial["frame"] + ENTRY_RENDER_FRAMES:
-            raise RuntimeError("The Acting handoff changed during its ten-frame render preparation.")
+        if prepared["frame"] != initial["frame"] + render_frames:
+            raise RuntimeError("The Acting handoff changed during its configured render preparation.")
         method = "input_bridge_advance"
     else:
         raise ValueError("Unknown Stage 6 entry mode.")
@@ -247,6 +257,8 @@ def prepare_render(emulator, client, initial, *, entry_mode):
 def run(*, run_name, acting_handoff, overworld_checkpoint, deadline=None, keep_uncapped=False,
         cleanup_on_success=True, **options):
     started = time.monotonic()
+    if options.get("timing_profile") is None:
+        options["timing_profile"] = load_profile()
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", run_name):
         raise ValueError("Use a run name containing letters, digits, underscores, or hyphens.")
     plan = acting_plan(**options)
@@ -268,7 +280,7 @@ def run(*, run_name, acting_handoff, overworld_checkpoint, deadline=None, keep_u
         "source_state": str(source), "shared_host_deadline": deadline})
     attachment = work / "attach.lua"
     attachment.write_text(
-        f"assert(loadfile({lua_value((HERE / 'stage6_act.lua').as_posix())}))({lua_value(config)})\n", encoding="utf-8")
+        f"assert(loadfile({lua_value((HERE / 'stage6_act.lua').as_posix())}))({lua_value(config)})\n", encoding="utf-8", newline="\n")
     result = {"outcome": "fail", "stage": 6, "run_id": run_name, "work_dir": str(work),
         "stage6_accepted": False, "ribbon_acquired": False, "target": config["target"],
         "source_context": source_context, "host_timeout_seconds": plan["host_timeout_seconds"],
@@ -353,7 +365,7 @@ def run(*, run_name, acting_handoff, overworld_checkpoint, deadline=None, keep_u
             attempt = {"attempt": index, "entry_mode": entry_mode,
                 "source_frame": initial["frame"], "source_epoch": initial["epoch"], "rounds": []}
             result["attempts"].append(attempt)
-            attempt["render_preparation"] = prepare_render(emulator, client, initial, entry_mode=entry_mode)
+            attempt["render_preparation"] = prepare_render(emulator, client, initial, entry_mode=entry_mode, plan=plan)
             write_json(folder / "render-preparation.json", attempt["render_preparation"])
             record("render-prepared", attempt=index, **attempt["render_preparation"])
             for number in range(1, 5):
@@ -379,6 +391,9 @@ def run(*, run_name, acting_handoff, overworld_checkpoint, deadline=None, keep_u
                     timeout=None, deadline=controller.live_deadline)
                 round_result["end_frame"] = progressed["frame"]
                 write_json(folder / f"round-{number}.json", round_result)
+            client.command("inspect")
+            emulator.command("combo", "inputs", f"X:{plan['timing']['hold_frames']}:{plan['timing']['release_frames']}",
+                timeout=None, deadline=controller.live_deadline)
             pending = client.command("result-visit")
             snapshot = pending["checkpoint"]["snapshot"]
             attempt["result_image"] = retain_capture(snapshot, work, images)
@@ -518,10 +533,10 @@ def main():
     parser.add_argument("--uncapped", action="store_true",
                         help="Disable the frame limiter while preserving counted emulator-frame timings.")
     parser.add_argument("--host-timeout", type=float)
-    parser.add_argument("--hold-frames", type=int, default=NORMAL_HOLD_FRAMES)
-    parser.add_argument("--release-frames", type=int, default=NORMAL_RELEASE_FRAMES)
-    parser.add_argument("--round-seconds", type=float, default=ROUND_SECONDS)
-    parser.add_argument("--final-seconds", type=float, default=FINAL_SECONDS)
+    parser.add_argument("--hold-frames", type=int, help="Override profile menu hold emulator frames.")
+    parser.add_argument("--release-frames", type=int, help="Override profile menu release emulator frames.")
+    parser.add_argument("--round-seconds", type=float, help="Override profile rounds 1–3 game seconds.")
+    parser.add_argument("--final-seconds", type=float, help="Override profile final round/results game seconds.")
     args = parser.parse_args()
     if args.check:
         check()

@@ -1,37 +1,35 @@
 # Project instructions
 
-Standalone Japanese Platinum (`CPUJ`) contest automation. Follow the user's scope.
+Platinum contest automation. Follow the user's scope; region acceptance is separate from live verification.
 
-## Documentation and ownership
+## Ownership and design
 
-- Root [README.md](README.md) owns setup and shared contracts; [contest/README.md](contest/README.md)
-  owns full-run, stage, dancing, and diagnostic details. Keep guidance concise.
-- Follow [single-instance ownership](README.md#setup-and-ownership): one controlled
-  emulator and one host caller. Scratch stays under project `tmp/` or `.tmp/`.
-- Keep runtime dependencies project-local and preserve prepared states and findings.
+- [README.md](README.md) owns setup/shared contracts; [contest/README.md](contest/README.md)
+  owns runner/stage design. Keep guidance concise and current; omit run histories.
+- Keep source and Markdown files LF-only, following `.gitattributes`; mixed LF/CRLF
+  triggers IDLE warnings. Verify Python-file line endings after edits. Code that rewrites
+  source files must explicitly write LF (e.g. `newline="\n"` in Python text writes).
+- One controlled emulator and one host caller. Keep dependencies and scratch project-local
+  (`tmp/` or `.tmp/`); preserve prepared states and established design facts.
+- Keep checkpoint master/client game-independent; adapters own targets, timing, slots, and screen policy.
 
 ## Runners and verification
 
-- Agree on actions, readable checkpoints, branches, guards with values/units,
-  the live attempt, and the finish point. Prepared runs use saved defaults unless overridden.
-- Keep normal progress and retries local to the runner; unexpected stops retain paused evidence.
-- Use `lua/checkpoint_master.lua`, its adapters, and `host/checkpoints.py`:
-  **pause -> fresh zero-frame snapshot -> Lua checks -> save when required ->
-  acknowledge final log -> proceed/abort**. Evaluate once per visit and share boundaries.
-- Keep master/client game-independent; adapters own targets, timing, slots, and screen policy.
-- Distinguish emulator frames, game seconds, and host seconds. Ask before changing shared
-  timing defaults or adding arbitrary retry/timeout limits.
-- Unreadable screen checks stay paused with their actual evidence source recorded.
-- Use `python -B -m tests` and existing `--check` entry points. New/expanded tests
-  require a concrete reason and user agreement. Offline checks do not prove live behavior.
+- Follow [planning and checkpoints](README.md#runner-planning-and-checkpoints): agree on
+  actions, readable boundaries, branches, guards with units, live attempt, and finish point.
+  Prepared runs use saved defaults; ask before shared timing changes or new retry/timeout limits.
+- Keep progress/retries local. Use the shared pause/capture/check/save/acknowledge protocol
+  once per boundary visit. Unreadable checks retain paused evidence and its actual source.
+- Distinguish emulator frames, game seconds, and host seconds. Use `python -B -m tests`
+  and existing `--check` entries; new/expanded tests need an agreed reason.
+  Offline checks do not prove live behavior.
 
 ## Contest contracts
 
-- Full runs follow the [integrated runner contracts](contest/README.md#integrated-runner-design).
-- All contest tests follow the [statistics and retention policy](contest/README.md#test-statistics-and-retention).
-- Stage 5 follows [entry-anchored midpoint scheduling](contest/README.md#stage-5--dancing).
-  Follow the [observation and save policy](contest/README.md#stage-checkpoints-and-resume).
-- Stage 6 entry and ribbon-miss retries follow the [render-before-analysis sequence](contest/README.md#stage-6-retry-render-preparation):
-  accepted Stage 5 handoff or Acting retry-state load paused -> complete agreed input-free
-  render preparation -> confirm native pause -> fresh zero-frame capture -> judge analysis.
-  An earlier cached screenshot cannot establish readiness.
+- Follow the [integrated design](contest/README.md#integrated-runner-design),
+  [save policy](contest/README.md#stage-checkpoints-and-resume), and
+  [test retention policy](contest/README.md#test-statistics-and-retention).
+- Stage 5 uses [entry-anchored midpoint scheduling](contest/README.md#stage-5--dancing).
+- Stage 6 follows [render-before-analysis](contest/README.md#stage-6-retry-render-preparation):
+  accepted paused source -> agreed input-free preparation -> confirmed native pause ->
+  fresh zero-frame capture -> judge analysis. Cached screenshots cannot establish readiness.

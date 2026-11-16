@@ -1,6 +1,7 @@
 -- Saved-entry, input-free pointer samples inside the persistent contest dispatcher.
 local directory = assert(debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("^(.*)/"))
-local bridge_io = dofile(directory .. "/../lua/bridge_io.lua")
+local root = dofile(directory .. "/resource_root.lua")
+local bridge_io = dofile(root .. "/lua/bridge_io.lua")
 local measurement = dofile(directory .. "/debug_measure.lua")
 local pixels = dofile(directory .. "/dance_pixels.lua")
 local M = {}
@@ -110,9 +111,12 @@ function M.new(config, runtime, entry)
     local mailbox = bridge_io.new(directory .. "/../tmp")
     local sampling, start = config.sampling, config.entry_observation
     assert(sampling.sample_count == 10 and #sampling.wait_frames == sampling.sample_count
-        and sampling.min_frames == 20 and sampling.max_frames == math.floor(sampling.dance_frames * 3 / 5)
+        and type(sampling.min_frames) == "number" and sampling.min_frames >= 1
+        and sampling.min_frames == math.floor(sampling.min_frames)
+        and type(sampling.maximum_fraction) == "number" and sampling.maximum_fraction > 0 and sampling.maximum_fraction < 1
+        and sampling.max_frames == math.floor(sampling.dance_frames * sampling.maximum_fraction)
         and start.visual.readable and start.visual.phase == "demo" and start.frame == config.source_frame,
-        "Declare ten waits from 20 frames through 60 percent of demo plus response")
+        "Declare ten waits inside the configured minimum and fraction of demo plus response")
     local unique = {}
     for _, frames in ipairs(sampling.wait_frames) do
         assert(type(frames) == "number" and frames == math.floor(frames) and frames >= sampling.min_frames

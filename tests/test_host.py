@@ -94,10 +94,12 @@ class StateSlotChecks(unittest.TestCase):
         self.assertEqual(self.controller.bridge_calls, [])
 
     def test_timestamped_slots_can_be_saved_again_and_loaded_frozen(self):
-        for slot in (1, 2, 3):
+        for slot in (1, 2, 3, 4, 5, 6):
             with self.subTest(slot=slot):
                 first = self.emulator.save_state(slot)
+                self.assertEqual(Path(first["path"]).suffix, f".ds{slot}")
                 self.assertIn("30-Oct-2026 16:22:16", self.emulator.states.menu("Save", slot)["text"])
+                self.assertTrue(self.emulator.states.menu("Save", slot)["text"].endswith(f"\tShift+F{slot}"))
                 second = self.emulator.save_state(slot)
                 loaded = self.emulator.load_state(slot, refresh=False)
                 self.assertEqual(first["path"], second["path"])

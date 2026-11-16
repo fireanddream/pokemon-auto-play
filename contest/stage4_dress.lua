@@ -9,13 +9,16 @@ if paused_handoff then
         and emu.framecount() == config.source_frame, "Expected the paused Stage 3 handoff frame")
 end
 local source = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/")
-local root = assert(source:match("^(.*)/")) .. "/.."
+local directory = assert(source:match("^(.*)/"))
+local root = dofile(directory .. "/resource_root.lua")
 local bridge_io = dofile(root .. "/lua/bridge_io.lua")
 local master = dofile(root .. "/lua/checkpoint_master.lua")
-local dress_pixels = dofile(root .. "/contest/dress_pixels.lua")
-local dance_pixels = dofile(root .. "/contest/dance_pixels.lua")
-local mailbox = bridge_io.new(root .. "/tmp")
-local checkpoint_mailbox = bridge_io.new(root .. "/tmp", "checkpoint-")
+local platinum = dofile(root .. "/lua/platinum.lua")
+local dress_pixels = dofile(directory .. "/dress_pixels.lua")
+local dance_pixels = dofile(directory .. "/dance_pixels.lua")
+local mailbox_directory = runtime and runtime.mailbox_directory or root .. "/tmp"
+local mailbox = bridge_io.new(mailbox_directory)
+local checkpoint_mailbox = bridge_io.new(mailbox_directory, "checkpoint-")
 local checkpoint_id = checkpoint_mailbox:previous_id()
 local idle, active, engine, pending, latest = false, nil, runtime and runtime.engine, nil, nil
 local initialized = false
@@ -46,8 +49,7 @@ local function read_file(path)
 end
 
 local function game()
-    local code = emu.gamecode()
-    return {code = code, supported = code == "CPUJ", identity_source = "emu.gamecode"}
+    return platinum.game(emu.gamecode())
 end
 
 local function release()
@@ -83,7 +85,7 @@ local function snapshot(frame)
         page.index, page.frame, page.epoch = dressing.pages, frame, adapter.epoch()
         page.path = config.work .. string.format("/dress-page-%03d.gd", page.index)
         write_file(page.path, raw, "wb")
-        write_file(root .. "/tmp/screen.gd", raw, "wb")
+        write_file(mailbox_directory .. "/screen.gd", raw, "wb")
         state.screen_frame = frame
         dressing.page = page
         if page.full then
@@ -119,13 +121,13 @@ local function snapshot(frame)
             and last.frame == frame and last.epoch == adapter.epoch() and last.path == screen.path
             and calibration.end_frame == frame and calibration.epoch == adapter.epoch()
             and last.epoch == first.epoch and last.frame - first.frame == config.pointer_calibration_frames
-            and measured.emulator_frames == 60 and measured.input_policy == "none"
+            and measured.emulator_frames == config.pointer_calibration_frames and measured.input_policy == "none"
             and measured.source == "fresh_paused_pointer_displacement"
             and point ~= nil and point[1] == last.pointer_x and point[2] == last.pointer_x
             and pointer_in_strip(raw, last.pointer_x) and last.pointer_x > first.pointer_x
             and measured.pointer_pixels == last.pointer_x - first.pointer_x
-            and measured.pixels_per_frame == (last.pointer_x - first.pointer_x) / 60
-            and measured.frames_per_pixel == 60 / (last.pointer_x - first.pointer_x) or false
+            and measured.pixels_per_frame == (last.pointer_x - first.pointer_x) / config.pointer_calibration_frames
+            and measured.frames_per_pixel == config.pointer_calibration_frames / (last.pointer_x - first.pointer_x) or false
     end
     return {frame = frame, game = game(), source_context = config.source_context, target = config.target,
         screen = current_screen, transition = transition, dressing = dressing, trial = trial,
@@ -185,7 +187,7 @@ end
 local function definitions()
     return {
         ["stage-4-dress"] = {checks = {
-            {id = "cpuj", field = "game.code", expected = "CPUJ"},
+            {id = "platinum", field = "game.supported", expected = true},
             {id = "finish_tap_complete", field = "trial.touch_complete", expected = true},
             {id = "dressing_complete", field = "trial.dressing_complete", expected = true},
             {id = "A_mashing_complete", field = "trial.mash_complete", expected = true},
@@ -200,7 +202,7 @@ local function definitions()
             {id = "pointer_calibration", field = "trial.pointer_calibration_valid", expected = true},
         }, branches = {pass = "finish"}},
         ["stage-4-dress-page"] = {checks = {
-            {id = "cpuj", field = "game.code", expected = "CPUJ"},
+            {id = "platinum", field = "game.supported", expected = true},
             {id = "released", field = "trial.released", expected = true},
             {id = "render_prepared", field = "trial.render_prepared", expected = true},
             {id = "readable_rank_indicator", field = "dressing.page.readable", expected = true},
@@ -232,19 +234,27 @@ local function dispatch(action, args)
             log = master.jsonl(config.work .. "/checkpoint-events.jsonl"), definitions = definitions()})
         assert(config.target and config.automatic_dressing.full_checks[config.target.rank],
             "Automatic dressing requires the accepted contest rank")
-        assert(config.pointer_calibration_frames == nil or config.pointer_calibration_frames == 60,
-            "Per-contest pointer calibration uses exactly 60 input-free emulator frames")
+        assert(config.pointer_calibration_frames == nil or type(config.pointer_calibration_frames) == "number"
+            and config.pointer_calibration_frames >= 1 and config.pointer_calibration_frames == math.floor(config.pointer_calibration_frames),
+            "Per-contest pointer calibration needs a positive configured input-free frame window")
+        assert(type(config.entry_render_frames) == "number" and config.entry_render_frames >= 0
+            and config.entry_render_frames == math.floor(config.entry_render_frames),
+            "Declare the loaded-entry input-free render frame count")
         local taps = config.initial_page_taps
         assert(type(taps) == "number" and taps >= 0 and taps <= 7 and taps == math.floor(taps),
             "Choose the initial accessory page once, from zero through seven taps")
         local page = config.automatic_dressing.next_page
+        local page_flip_limit = config.automatic_dressing.page_flip_limit
+        assert(page_flip_limit == nil or type(page_flip_limit) == "number" and page_flip_limit >= 1
+            and page_flip_limit == math.floor(page_flip_limit), "The collection page-flip limit must be a positive whole count")
         local initial_frames = taps * (page.hold_frames + page.release_frames + page.wait_frames)
         assert(config.entry_render_frames + initial_frames + config.automatic_dressing.motion.release_frames
             <= config.automatic_dressing.budget_frames, "Initial navigation must fit inside the dressing budget")
         dressing = {start_frame = adapter.frame(), epoch = adapter.epoch(),
             budget_frames = config.automatic_dressing.budget_frames,
             elapsed_frames = 0, remaining_frames = config.automatic_dressing.budget_frames,
-            pages = 0, attempted_drags = 0, completed_drag_inputs = 0, page_taps = 0,
+            pages = 0, attempted_drags = 0, completed_drag_inputs = 0, page_taps = 0, collection_page_taps = 0,
+            page_flip_limit = page_flip_limit, page_flip_limit_reached = false,
             full_detected = false, complete = false, render_preparation_frames = config.entry_render_frames,
             initial_navigation = {chosen_taps = taps, executed_taps = 0, planned_frames = initial_frames,
                 executed_frames = 0, complete = taps == 0}}
@@ -253,14 +263,14 @@ local function dispatch(action, args)
         stage = not render_prepared and "prepare-dress-render" or taps > 0 and "initial-pages" or "dressing"
     elseif action == "dress-render-prepared" then
         assert(engine and stage == "dress-render-ready" and not active and not pending
-            and not render_prepared and config.entry_render_frames == 10
+            and not render_prepared and config.entry_render_frames > 0
             and state.last_action == "prepare-dress-render"
             and state.stop_reason == "dress_render_preparation_complete"
             and state.command_start_frame == config.source_frame
             and state.command_end_frame == config.source_frame + config.entry_render_frames
             and adapter.frame() == config.source_frame + config.entry_render_frames
             and state.buttons == "" and state.stylus_touch == false,
-            "A loaded Stage 3 source needs ten input-free frames and a confirmed native pause")
+            "A loaded Stage 3 source needs its configured input-free frames and a confirmed native pause")
         render_prepared = true
         stage = dressing.initial_navigation.complete and "dressing" or "initial-pages"
         observation = {frame = adapter.frame(), game = game(), dressing = dressing,
@@ -296,7 +306,7 @@ local function dispatch(action, args)
         observation.tip = observation.screen.tip
     elseif action == "calibration-start" then
         assert(engine and stage == "dance_candidate" and not active and not pending and not calibration
-            and config.pointer_calibration_frames == 60 and #args == 1,
+            and config.pointer_calibration_frames and #args == 1,
             "Calibrate once from the first paused Dance 1 candidate")
         local first = assert(loadfile(args[1]))()
         local raw = gui.gdscreenshot()
@@ -377,9 +387,9 @@ local function start(parts)
     state.phase, state.stop_reason, state.command_end_frame = "running", nil, nil
     active = {kind = parts[2], elapsed = 0}
     if active.kind == "prepare-dress-render" then
-        assert(#parts == 2 and stage == "prepare-dress-render" and config.entry_render_frames == 10
+        assert(#parts == 2 and stage == "prepare-dress-render" and config.entry_render_frames > 0
             and state.frame == config.source_frame and not render_prepared,
-            "Only a loaded Stage 3 source needs the ten-frame render advance")
+            "Only a loaded Stage 3 source needs its configured render advance")
         active.total = config.entry_render_frames
     elseif active.kind == "dress-initial-pages" then
         local navigation = dressing.initial_navigation
@@ -405,8 +415,9 @@ local function start(parts)
     elseif active.kind == "finish-dressing" then
         assert(#parts == 2 and not touch_complete and render_prepared
             and dressing.complete and state.frame == dressing.end_frame
-            and (stage == "dress_deadline" or stage == "finish-dress-early" and dressing.full_detected),
-            "Reach the accessory limit or dressing deadline before the Finish tap")
+            and (stage == "dress_deadline" or stage == "finish-dress-early" and dressing.full_detected
+                or stage == "dress_page_limit" and dressing.page_flip_limit_reached),
+            "Reach the accessory limit, page-flip limit, or dressing deadline before the Finish tap")
         active.total = config.stylus.hold_frames + config.stylus.release_frames
     elseif active.kind == "dress-transition" then
         assert(#parts == 2 and stage == "transition" and touch_complete and not mash_complete, "Complete the Finish tap first")
@@ -453,8 +464,12 @@ local function page_touch()
         end
     else
         local phase = elapsed - active.drag_total
-        if phase < settings.next_page.hold_frames and not released_tail then
-            if phase == 0 then dressing.page_taps = dressing.page_taps + 1 end
+        if phase < settings.next_page.hold_frames and not released_tail
+            and not dressing.last_input.deadline_truncated then
+            if phase == 0 then
+                dressing.page_taps = dressing.page_taps + 1
+                dressing.collection_page_taps = dressing.collection_page_taps + 1
+            end
             stylus.set({x = settings.next_page.x, y = settings.next_page.y, touch = true})
             state.stylus_touch = true
             return
@@ -547,6 +562,13 @@ local function after_frame()
             return
         elseif active.kind == "dress-page-inputs" and active.elapsed >= active.total then
             dressing.last_input.end_frame, dressing.last_input.executed_frames = state.frame, active.elapsed
+            if dressing.page_flip_limit and dressing.collection_page_taps >= dressing.page_flip_limit then
+                dressing.complete, dressing.end_frame, stage = true, state.frame, "dress_page_limit"
+                dressing.page_flip_limit_reached, dressing.end_reason = true, "page_flip_limit"
+                dressing.elapsed_game_seconds = dressing.elapsed_frames / config.automatic_dressing.frame_rate
+                stop(nil, "dress_page_flip_limit_reached")
+                return
+            end
             stage = "dressing"
             stop(nil, "dress_page_complete")
             return
@@ -564,7 +586,7 @@ local function after_frame()
             stop(nil, "observation_interval_complete")
             return
         elseif active.kind == "calibrate-pointer" and active.elapsed >= active.total then
-            assert(active.elapsed == 60 and state.frame == calibration.start.frame + 60
+            assert(active.elapsed == config.pointer_calibration_frames and state.frame == calibration.start.frame + config.pointer_calibration_frames
                 and adapter.epoch() == calibration.epoch, "Pointer calibration exceeded its counted frame window")
             calibration.complete, calibration.end_frame = true, state.frame
             transition.total_frames = state.frame - transition.start_frame

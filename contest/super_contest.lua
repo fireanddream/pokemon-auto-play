@@ -1,25 +1,27 @@
 -- One persistent native callback set, input dispatcher, and checkpoint engine.
 local directory = assert(debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("^(.*)/"))
-local root = directory .. "/.."
+local root = dofile(directory .. "/resource_root.lua")
 local bridge_io = dofile(root .. "/lua/bridge_io.lua")
 local combos = dofile(root .. "/lua/input_sequences.lua")
 local master = dofile(root .. "/lua/checkpoint_master.lua")
 local sections = dofile(directory .. "/sections.lua")
-local mailbox = bridge_io.new(root .. "/tmp")
-local checkpoint_mailbox = bridge_io.new(root .. "/tmp", "checkpoint-")
+local platinum = dofile(root .. "/lua/platinum.lua")
+local mailbox_directory = CONTEST_MAILBOX_DIR or root .. "/tmp"
+CONTEST_MAILBOX_DIR = nil
+local mailbox = bridge_io.new(mailbox_directory)
+local checkpoint_mailbox = bridge_io.new(mailbox_directory, "checkpoint-")
 local checkpoint_id, idle = checkpoint_mailbox:previous_id(), false
-local active, current, config, latest, run_id, work, retry_mode, debug_mode
+local active, current, config, latest, run_id, work, debug_mode
 local dance_observation_policy
 local measurement_run
-local dance_good_streak, last_dance_feedback_visit = 0, nil
-local saved_contexts, armed_retry, loaded_source, loaded_context, loaded_slot = {}, nil, nil, nil, nil
-local acting_retry_slot = 10
+local last_dance_feedback_visit
 local halted = false
 local state = {protocol = 1, checkpoint_protocol = 1, bridge = "pt-super-contest",
     game_code = emu.gamecode(), frame = emu.framecount(), phase = "ready", buttons = "", stylus_touch = false,
     command_id = mailbox:previous_id(), command_done = true, error = "", combo_name = "",
     combo_history = setmetatable({}, bridge_io.array_metatable)}
-local runtime = {state = state, is_paused = function() return idle end}
+local runtime = {state = state, mailbox_directory = mailbox_directory,
+    is_paused = function() return idle end}
 local adapter = dofile(root .. "/lua/checkpoint_desmume.lua").new({
     pause = function() assert(idle, "A host-confirmed native pause is required") end,
     is_paused = runtime.is_paused,
@@ -27,7 +29,7 @@ local adapter = dofile(root .. "/lua/checkpoint_desmume.lua").new({
 runtime.adapter = adapter
 
 local stage_feedback = {
-    {name = "Loading", checkpoint = "stage-1-load", message = "Game loaded."},
+    {name = "Loading", checkpoint = "stage-1-load", message = "Fast text speed, position, Bag, and first Pokemon readiness confirmed."},
     {name = "Preparation", checkpoint = "stage-2-prep", message = "Ribbon and held-item checks complete."},
     {name = "Contest Entry", checkpoint = "stage-3-enter", message = "Dress-up entry confirmed."},
     {name = "Dress-up", checkpoint = "stage-4-dress", message = "Dancing entry confirmed."},
@@ -52,25 +54,16 @@ end
 function runtime.main_dance_feedback(judgment, section)
     assert(not measurement_run and section.stage == 5 and section.feedback_policy == "first_button_only"
         and section.first_feedback_policy == "warn_and_continue" and judgment.dance == 1 and judgment.index == 1
-        and (judgment.fresh_message or judgment.label == "Unreadable" or judgment.skipped)
+        and (judgment.label == "Excellent" and judgment.fresh_message or judgment.label == "Miss" or judgment.skipped)
         and (not last_dance_feedback_visit or section.section_visit > last_dance_feedback_visit),
         "Account for only the first mirrored input once per main contest")
     last_dance_feedback_visit = section.section_visit
     local label, warning = judgment.label, nil
-    if label == "Good" then
-        dance_good_streak = dance_good_streak + 1
-        if dance_good_streak >= 2 then
-            warning = string.format("Dancing: WARN - First mirrored button Good for %d consecutive contests (%s - %s); continuing.",
-                dance_good_streak, section.target.category, section.target.rank)
-        end
-    else
-        dance_good_streak = 0
-        if label ~= "Excellent" then
-            warning = string.format("Dancing: WARN - First mirrored button: %s (%s - %s); continuing.",
-                label, section.target.category, section.target.rank)
-        end
+    if label ~= "Excellent" then
+        warning = string.format("Dancing: WARN - First mirrored button: %s (%s - %s); continuing.",
+            label, section.target.category, section.target.rank)
     end
-    local result = {label = label, consecutive_good_contests = dance_good_streak, warning = warning,
+    local result = {label = label, warning = warning,
         section_visit = section.section_visit, target = section.target}
     state.dance_first_feedback = result
     if warning then print(warning) end
@@ -82,12 +75,18 @@ local function report_checkpoint(action, record)
     if record.decision == "abort" then runtime.fail_stage(); return end
     if action == "complete" and record.status == "complete" and record.proceed
         and record.checkpoint == "stage-6-round" and record.snapshot.trial.round == 1 then
-        print("Acting entry: PASS - All 15 empty star slots and four move categories confirmed.")
+        print("Acting entry: PASS - All 15 empty star slots and available move categories confirmed.")
     end
     local feedback = stage_feedback[feedback_stage]
     if action ~= "complete" or record.status ~= "complete" or not record.proceed
         or record.checkpoint ~= feedback.checkpoint or reported_result then return end
-    if record.decision == "miss" then runtime.fail_stage(); return end
+    if record.decision == "miss" then
+        if feedback_stage == 5 then
+            print("Dancing: WARN - Handoff dance checks missed; continuing to Acting.")
+            reported_result = "warning"
+            return
+        else runtime.fail_stage(); return end
+    end
     print(feedback.name .. ": PASS - " .. feedback.message)
     reported_result = "pass"
     local snapshot = record.snapshot
@@ -116,7 +115,7 @@ adapter.release = release
 
 local function observation(frame)
     if current and current.observation then return current.observation(frame) end
-    return {frame = frame, game = {code = emu.gamecode(), supported = emu.gamecode() == "CPUJ"},
+    return {frame = frame, game = platinum.game(emu.gamecode()),
         active_stage = state.active_stage}
 end
 
@@ -141,7 +140,10 @@ function runtime.image(path, frame)
 end
 
 local function finish(message, reason)
-    if message then runtime.fail_stage() end
+    if message then
+        runtime.fail_stage()
+        print("Contest stopped: " .. tostring(message))
+    end
     active = nil
     release()
     state.command_done, state.error = true, message or ""
@@ -173,17 +175,6 @@ local function same_target(a, b)
     return true
 end
 
-local function same_bag(a, b)
-    return type(a) == "table" and type(b) == "table" and a.opened_once == b.opened_once
-        and a.cursor_position == b.cursor_position
-end
-
-local function same_flags(a, b)
-    if type(a) ~= "table" or type(b) ~= "table" or #a ~= #b then return false end
-    for index, value in ipairs(a) do if value ~= b[index] then return false end end
-    return true
-end
-
 local function stable(record)
     assert(record and record.status == "complete" and record.proceed and record.frame == adapter.frame()
         and record.epoch == adapter.epoch() and state.command_done and state.buttons == "" and not state.stylus_touch,
@@ -192,19 +183,27 @@ end
 
 local function initialize(args)
     assert(not runtime.engine and (#args == 3 or #args == 4 or #args == 5) and (args[3] == "0" or args[3] == "1")
-        and (args[4] == nil or args[4] == "0" or args[4] == "1")
-        and (args[5] == nil or args[5] == "scheduled" or args[5] == "diagnostic"
-            or args[5] == "measurement" or args[5] == "debug_inputs" or args[5] == "pointer_speed"),
-        "Initialize once with run identity, retry/debug modes, and the dance observation policy")
-    run_id, work, retry_mode, debug_mode = args[1], args[2], tonumber(args[3]), tonumber(args[4] or "0")
-    dance_observation_policy = args[5] or "diagnostic"
-    local definitions = sections.definitions(retry_mode)
+        and (args[4] == nil or args[4] == "scheduled" or args[4] == "diagnostic"
+            or args[4] == "measurement" or args[4] == "debug_inputs" or args[4] == "pointer_speed"
+            or args[4] == "scarf_test"),
+        "Initialize once with run identity, debug mode, and the dance observation policy")
+    run_id, work, debug_mode = args[1], args[2], tonumber(args[3])
+    dance_observation_policy = args[4] or "diagnostic"
+    if args[5] then
+        runtime.timing_profile = assert(loadfile(args[5]))()
+        assert(runtime.timing_profile.schema == 1 and runtime.timing_profile.game_code == emu.gamecode()
+            and type(runtime.timing_profile.sections) == "table",
+            "The resolved timing profile must match the trusted running ROM code")
+        state.timing_profile_source = runtime.timing_profile.source
+    end
+    local definitions = sections.definitions()
     local prototypes = {}
     if dance_observation_policy == "measurement" or dance_observation_policy == "debug_inputs"
-        or dance_observation_policy == "pointer_speed" then
-        assert(debug_mode == 0 and retry_mode == 0, "Measurement modes own their declared state policies")
+        or dance_observation_policy == "pointer_speed" or dance_observation_policy == "scarf_test" then
+        assert(debug_mode == 0, "Measurement modes own their declared state policies")
         local measurement = dofile(directory .. (dance_observation_policy == "pointer_speed"
-            and "/debug_pointer_speed.lua" or "/debug_measure.lua"))
+            and "/debug_pointer_speed.lua" or dance_observation_policy == "scarf_test"
+            and "/scarf_tester.lua" or "/debug_measure.lua"))
         definitions = measurement.definitions(definitions, runtime, dance_observation_policy == "debug_inputs")
         measurement_run = measurement.run(runtime, dance_observation_policy == "debug_inputs")
     else
@@ -213,7 +212,7 @@ local function initialize(args)
             assert(loadfile(directory .. "/dance_master.lua"))({stage = 5,
                 dances = {{}, {}, {}, {}, {}, {}, {}, {}}, transition = {mash_frames = 1}}, runtime),
             assert(loadfile(directory .. "/rank_dance.lua"))({stage = 5,
-                first_feedback_policy = dance_observation_policy == "scheduled" and "warn_and_continue" or "require_excellent"}, runtime),
+                first_feedback_policy = "warn_and_continue"}, runtime),
         }
     end
     for _, section in ipairs(prototypes) do
@@ -226,7 +225,7 @@ local function initialize(args)
     end
     local save_policies = {
         ["stage-1-load"] = "screen", ["stage-2-prep"] = "memory", ["stage-3-enter"] = "screen",
-        ["stage-4-dress"] = "screen", ["stage-4-dress-page"] = "screen", ["stage-5-dance"] = "retry",
+        ["stage-4-dress"] = "handoff", ["stage-4-dress-page"] = "screen", ["stage-5-dance"] = "handoff",
         ["stage-6-round"] = "screen", ["stage-6-act"] = "memory",
         start = "screen", ["offset-check"] = "screen", finish = "dance_debug",
         ["rank-dance-start"] = "screen", ["rank-dance-offset"] = "screen", ["rank-dance-finish"] = "dance_debug",
@@ -235,11 +234,11 @@ local function initialize(args)
     if not measurement_run then
         for name, definition in pairs(definitions) do
             local policy = assert(save_policies[name], "Classify each contest checkpoint's save policy")
-            definition.save_state = policy == "retry" or debug_mode == 1 and (policy == "memory" or policy == "debug"
+            definition.save_state = debug_mode == 1 and (policy == "memory" or policy == "handoff" or policy == "debug"
                 or policy == "dance_debug" and dance_observation_policy == "diagnostic")
         end
     end
-    state.debug, state.true_retry, state.dance_observation_policy = debug_mode, retry_mode, dance_observation_policy
+    state.debug, state.dance_observation_policy = debug_mode, dance_observation_policy
     runtime.engine = master.new({run_id = run_id, emulator = adapter, definitions = definitions,
         reader = {snapshot = function(frame)
             if current then return current.snapshot(frame) end
@@ -250,7 +249,7 @@ local function initialize(args)
 end
 
 local function begin_section(path)
-    assert(runtime.engine and not halted and not armed_retry and state.command_done, "The shared runtime must be ready")
+    assert(runtime.engine and not halted and state.command_done, "The shared runtime must be ready")
     local next_config = assert(loadfile(path))()
     begin_feedback(next_config.stage, next_config.section_visit)
     assert(next_config.run_id == run_id and next_config.source_frame == adapter.frame(),
@@ -265,32 +264,26 @@ local function begin_section(path)
             handoff = {stage = config.stage, source_context = config.source_context,
                 emulator_frames = 0, native_lua_attachment = "persistent"}}
     end
-    local number, source = next_config.stage, loaded_source or latest
+    local number, source = next_config.stage, latest
     if number == 1 then
-        assert(not latest and not current and not loaded_source, "Run Stage 1 once at fresh setup")
+        assert(not latest and not current, "Run Stage 1 once at fresh setup")
     else
-        local expected
-        if loaded_source then
-            assert(retry_mode == 0 and loaded_slot == acting_retry_slot, "Only Acting-only retries may use a loaded source")
-            expected = 6
-            assert(source.frame == adapter.frame(), "The retry source frame changed after its load")
-            next_config.retry_context = copy(loaded_context)
-            assert(number ~= 6 or next_config.entry_mode == "load_retry_state", "Acting retries require the load render path")
-        else
-            stable(source)
-            local order = {["stage-1-load"] = 2, ["stage-2-prep"] = 3, ["stage-3-enter"] = 4,
-                ["stage-4-dress"] = 5, ["stage-5-dance"] = 6}
-            local prepare_again = source.checkpoint == "stage-6-act"
-                and (source.decision == "hit" or source.decision == "miss" and retry_mode == 1)
-            expected = prepare_again and 2 or order[source.checkpoint]
-            assert(number ~= 6 or next_config.entry_mode == "stage5_handoff", "Normal Acting entry is a direct Stage 5 handoff")
-        end
+        stable(source)
+        local order = {["stage-1-load"] = 2, ["stage-2-prep"] = 3, ["stage-3-enter"] = 4,
+            ["stage-4-dress"] = 5, ["stage-5-dance"] = 6}
+        local prepare_again = source.checkpoint == "stage-6-act"
+            and (source.decision == "hit" or source.decision == "miss")
+        local expected = prepare_again and 2 or order[source.checkpoint]
+        assert(number ~= 6 or next_config.entry_mode == "stage5_handoff", "Acting entry is a direct Stage 5 handoff")
         assert(number == expected, "The accepted checkpoint did not authorize this stage transition")
         for key, value in pairs(identity(source)) do
             assert(next_config.source_context[key] == value, "The section's source context differs from its accepted boundary")
         end
         if number ~= 2 then
             assert(same_target(next_config.target, source.snapshot.target), "The section changed the accepted contest target")
+        end
+        if number == 2 and source.checkpoint == "stage-1-load" then
+            next_config.accepted_readiness = copy(source.snapshot)
         end
         if number == 5 and next_config.rank_timing then
             assert(next_config.observation_policy == dance_observation_policy,
@@ -312,11 +305,10 @@ local function begin_section(path)
     else
         current = sections.new(config, runtime)
     end
-    loaded_source, loaded_context, loaded_slot = nil, nil, nil
     state.active_stage, state.section_visit = number, config.section_visit
     return {frame = adapter.frame(), epoch = adapter.epoch(), next_section = "section_ready",
         handoff = {stage = number, source_context = config.source_context,
-            emulator_frames = 0, native_lua_attachment = "persistent", retry_context = config.retry_context}}
+            emulator_frames = 0, native_lua_attachment = "persistent"}}
 end
 
 local function dispatch(action, args)
@@ -337,13 +329,7 @@ local function dispatch(action, args)
                 current = nil
             end
         else
-            assert(args[1] == "load" and armed_retry and tonumber(args[2]) == armed_retry.source.visit,
-                "Only an armed acknowledged ribbon miss may load a paired retry checkpoint")
-            assert(adapter.frame() == armed_retry.source.frame, "The retry load did not restore its exact saved frame")
-            loaded_source, loaded_context, loaded_slot = armed_retry.source, armed_retry.context, armed_retry.slot
-            armed_retry = nil
-            if current then current.finish() end
-            current = nil
+            error("Quick-loads are disabled in the full contest runner")
         end
         adapter.state_changed()
         state.frame = adapter.frame()
@@ -362,34 +348,6 @@ local function dispatch(action, args)
         if current then current.finish() end
         current, config = nil, nil
         return result
-    elseif action == "retain-context" then
-        stable(latest)
-        local slot = tonumber(args[1])
-        assert(#args == 2 and ((slot == 2 and latest.checkpoint == "stage-2-prep")
-            or (slot == acting_retry_slot and latest.checkpoint == "stage-5-dance")),
-            "Retain only accepted preparation facts or the final-slot Acting retry source")
-        local context = assert(loadfile(args[2]))()
-        assert(same_target(context.target, latest.snapshot.target), "Pair retry context with its accepted target")
-        local paired = slot == 2 and latest.snapshot or assert(saved_contexts[2], "Stage 5 needs its accepted preparation context").context
-        local party = slot == 2 and paired.party or paired.source_party
-        assert(same_bag(context.bag_context, paired.bag_context) and context.source_party.species_id == party.species_id
-            and context.source_party.held_item_id == party.held_item_id
-            and same_flags(context.source_party.owned_ribbon_bits, party.owned_ribbon_bits),
-            "Pair retry context with its prepared Bag state and prior ribbon progress")
-        saved_contexts[slot] = {source = copy(latest), context = context, slot = slot}
-        return {frame = adapter.frame(), epoch = adapter.epoch(), retained_context = identity(latest), slot = slot}
-    elseif action == "arm-retry" then
-        stable(latest)
-        local slot = tonumber(args[1])
-        assert(latest.checkpoint == "stage-6-act" and latest.decision == "miss" and not armed_retry
-            and retry_mode == 0 and slot == acting_retry_slot,
-            "Only an acknowledged Acting-only ribbon miss may load the final-slot retry source")
-        local saved = assert(saved_contexts[slot], "The current target has no paired retry checkpoint")
-        assert(tonumber(args[2]) == saved.source.visit and same_target(saved.context.target, latest.snapshot.target),
-            "The retry context belongs to a different contest or accepted source")
-        armed_retry = copy(saved)
-        return {frame = adapter.frame(), epoch = adapter.epoch(), retry_slot = slot,
-            source_context = identity(saved.source), context = copy(saved.context)}
     elseif action == "terminal" then
         if current then current.finish() end
         finish(nil, "terminal")

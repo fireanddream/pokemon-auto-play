@@ -24,50 +24,64 @@ from host.checkpoints import CheckpointClient, CheckpointStopped, write_json
 from host.controller import ControllerConfig
 from host.emulator import DeSmuME
 from host.paths import ROOT, project_path
-from contest.inputs import MASH_HOLD_FRAMES, MASH_RELEASE_FRAMES, NORMAL_HOLD_FRAMES, NORMAL_RELEASE_FRAMES, taps
+from contest.inputs import taps
+from contest.timing_profiles import FRAME_RATE, load_profile, section, setting
 
 
 HERE = Path(__file__).resolve().parent
 CATEGORIES = ("Cool", "Beauty", "Cute", "Smart", "Tough")
 RANKS = ("Normal", "Super", "Hyper", "Master")
 INPUT_SLOT, OUTPUT_SLOT = 10, 3
-INTRO_SECONDS = 50
+INTRO_SECONDS = section(None, "stage3_entry")["intro_a_mash_game_seconds"]
 
 
 class Stage3Controller(TimedController):
     def remaining(self):
         if self.live_deadline is not None and time.monotonic() >= self.live_deadline:
-            raise TimeoutError("The Stage 3 host deadline expired.")
+            raise TimeoutError("timeout")
         return super().remaining()
 
 
-def entry_plan(category, rank, *, host_timeout, hold_frames=NORMAL_HOLD_FRAMES,
-               release_frames=NORMAL_RELEASE_FRAMES, intro_seconds=INTRO_SECONDS, timing_probe=False,
-               enrollment_check=False):
+def entry_plan(category, rank, *, host_timeout, hold_frames=None,
+                release_frames=None, intro_seconds=None, timing_probe=False,
+                enrollment_check=False, timing_profile=None):
+    profile = load_profile() if timing_profile is None else timing_profile
+    values, diagnostic = section(profile, "stage3_entry"), section(profile, "diagnostics")
+    hold_frames = setting(hold_frames, values, "menu_hold_frames")
+    release_frames = setting(release_frames, values, "menu_release_frames")
+    intro_seconds = setting(intro_seconds, values, "intro_a_mash_game_seconds")
+    mash_hold, mash_release = values["intro_mash_hold_frames"], values["intro_mash_release_frames"]
+    probe_first = diagnostic["entry_probe_first_capture_game_seconds"]
+    probe_interval = diagnostic["entry_probe_capture_interval_game_seconds"]
     if category not in CATEGORIES or rank not in RANKS:
         raise ValueError("Supply a supported contest category and rank.")
     if not math.isfinite(host_timeout) or host_timeout <= 0:
         raise ValueError("The host timeout must be positive seconds.")
     if not math.isfinite(intro_seconds) or intro_seconds <= 0:
         raise ValueError("The introduction duration must be positive game seconds.")
-    if timing_probe and intro_seconds < 40:
-        raise ValueError("The timing probe begins taking screenshots at 40 game seconds.")
+    if timing_probe and intro_seconds < probe_first:
+        raise ValueError(f"The timing probe begins taking screenshots at {probe_first:g} game seconds.")
     if timing_probe and enrollment_check:
         raise ValueError("Choose timing measurement or enrollment verification for this run.")
     menu = ["A"] * 4 + ["down"] * RANKS.index(rank) + ["A"]
     menu += ["down"] * CATEGORIES.index(category) + ["A"] * 4
     steps = taps(menu, hold_frames, release_frames)
-    intro_frames = round(intro_seconds * 67027965 / 1120380)
+    intro_frames = round(intro_seconds * FRAME_RATE)
     if intro_frames < 1:
         raise ValueError("The introduction must cover at least one emulator frame.")
-    cycle = MASH_HOLD_FRAMES + MASH_RELEASE_FRAMES
+    cycle = mash_hold + mash_release
     count, tail = divmod(intro_frames, cycle)
-    steps += taps(["A"] * count, MASH_HOLD_FRAMES, MASH_RELEASE_FRAMES) if count else []
-    if tail > MASH_HOLD_FRAMES:
-        steps += taps("A", MASH_HOLD_FRAMES, tail - MASH_HOLD_FRAMES)
+    steps += taps(["A"] * count, mash_hold, mash_release) if count else []
+    if tail > mash_hold:
+        steps += taps("A", mash_hold, tail - mash_hold)
     elif tail:
         steps.append(f"wait:{tail}")
-    sample_seconds = list(range(40, math.ceil(intro_seconds), 5)) if timing_probe else []
+    sample_seconds = []
+    if timing_probe:
+        index = 0
+        while probe_first + index * probe_interval < intro_seconds:
+            sample_seconds.append(probe_first + index * probe_interval)
+            index += 1
     if timing_probe and (not sample_seconds or sample_seconds[-1] != intro_seconds):
         sample_seconds.append(intro_seconds)
     tap_frames = hold_frames + release_frames
@@ -80,15 +94,15 @@ def entry_plan(category, rank, *, host_timeout, hold_frames=NORMAL_HOLD_FRAMES,
         {"label": "party_selection", "expected": "party slot 1", "entry_frame_offset": category_frame + 2 * tap_frames},
         {"label": "dress_up_entry", "expected": "dress-up controls", "entry_frame_offset": total_frames},
     ] if enrollment_check else []
-    return {"stage": 3, "target": {"category": category, "rank": rank, "party_slot": 1},
+    return {"stage": 3, "timing_profile_source": profile["source"], "target": {"category": category, "rank": rank, "party_slot": 1},
         "host_timeout_seconds": host_timeout, "attempts": 1, "uncapped": True,
         "timing_probe": timing_probe,
         "enrollment_check": enrollment_check, "enrollment_samples": enrollment_samples,
         "timing_samples": [{"intro_game_seconds": seconds,
-                            "intro_frame_offset": round(seconds * 67027965 / 1120380)}
+                            "intro_frame_offset": round(seconds * FRAME_RATE)}
                            for seconds in sample_seconds],
         "timing": {"hold_frames": hold_frames, "release_frames": release_frames,
-            "mash_hold_frames": MASH_HOLD_FRAMES, "mash_release_frames": MASH_RELEASE_FRAMES,
+            "mash_hold_frames": mash_hold, "mash_release_frames": mash_release,
             "intro_game_seconds": intro_seconds, "intro_frames": intro_frames,
             "frame_conversion": "nearest frame at 67027965 / 1120380 frames per second"},
         "rank_down_presses": RANKS.index(rank), "category_down_presses": CATEGORIES.index(category),
@@ -105,7 +119,7 @@ def preview_plan(category, rank, **options):
     plan = entry_plan(category or CATEGORIES[0], rank or RANKS[0], **options)
     if category is not None:
         return plan
-    return {**{key: plan[key] for key in ("stage", "host_timeout_seconds", "timing", "timing_probe", "enrollment_check")},
+    return {**{key: plan[key] for key in ("stage", "timing_profile_source", "host_timeout_seconds", "timing", "timing_probe", "enrollment_check")},
             "target": None, "target_selection": "fresh first-party Sinnoh contest-ribbon flags",
             "category_order": CATEGORIES, "rank_order": RANKS, "input_plan_pending_source_read": True}
 
@@ -227,8 +241,10 @@ def retain_images(controller, work, planned, sampling):
 
 
 def run(*, run_name, source_checkpoint, category, rank, host_timeout, ribbon_test=None, deadline=None,
-        auto_review=False, keep_uncapped=False, **timing):
+         auto_review=False, keep_uncapped=False, **timing):
     started = time.monotonic()
+    if timing.get("timing_profile") is None:
+        timing["timing_profile"] = load_profile()
     plan = preview_plan(category, rank, host_timeout=host_timeout, **timing)
     automatic_target = category is None
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", run_name):
@@ -489,12 +505,12 @@ def main():
     parser.add_argument("--category", choices=CATEGORIES)
     parser.add_argument("--rank", choices=RANKS)
     parser.add_argument("--host-timeout", type=float)
-    parser.add_argument("--hold-frames", type=int, default=NORMAL_HOLD_FRAMES)
-    parser.add_argument("--release-frames", type=int, default=NORMAL_RELEASE_FRAMES)
-    parser.add_argument("--intro-seconds", type=float, default=INTRO_SECONDS)
+    parser.add_argument("--hold-frames", type=int, help="Override profile menu hold emulator frames.")
+    parser.add_argument("--release-frames", type=int, help="Override profile menu release emulator frames.")
+    parser.add_argument("--intro-seconds", type=float, help="Override profile introduction game seconds.")
     capture_mode = parser.add_mutually_exclusive_group()
     capture_mode.add_argument("--timing-probe", action="store_true",
-                              help="Capture from 40 game seconds every 5 seconds, plus the endpoint; finish locally for later review.")
+                              help="Use profile probe capture times plus the endpoint; finish locally for later review.")
     capture_mode.add_argument("--enrollment-check", action="store_true",
                               help="Capture rank, category, party selection, and dress-up for the endpoint review.")
     args = parser.parse_args()

@@ -20,21 +20,23 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from contest import rank_dance, sections, stage1_load, stage3_enter, stage4_dress, super_contest
-from contest.artifacts import OwnedArtifacts, cleanup_stale, inactive_runs
+from contest.artifacts import OwnedArtifacts, cleanup_stale, previous_runs
 from contest.dance_timings import DEFAULT_OFFSET_FRAMES, RANKS, canonical_rank, fixed_timing as measured_timing
 from contest.pt_dance_read import POINTER_LOWER_SPRITES, POINTER_SPRITES
 from contest.runtime import ContestRuntime
 from contest.stage3_enter import CATEGORIES
 from host.checkpoints import write_json
 from host.paths import ROOT
+from contest.timing_profiles import load_profile, section, setting
 
 
 DEFAULT_CATEGORY = "Cool"
-CHECK_WAIT_FRAMES = round(stage4_dress.FRAME_RATE)
-CAPTURE_WAIT_FRAMES = round(2 * stage4_dress.FRAME_RATE)
+_DIAGNOSTIC = section(None, "diagnostics")
+CHECK_WAIT_FRAMES = round(_DIAGNOSTIC["dance_entry_poll_game_seconds"] * stage4_dress.FRAME_RATE)
+CAPTURE_WAIT_FRAMES = round(_DIAGNOSTIC["dance_capture_interval_game_seconds"] * stage4_dress.FRAME_RATE)
 RESULT_KEYS = ("outcome", "target", "active_stage", "completed_contests", "measured_contests", "total_contests",
     "loop_count", "required_midpoint_visits", "measurements_path", "results_path", "total_inputs", "required_response_inputs", "total_excellent",
-    "timing_misses", "unreadable_feedback", "total_skipped_inputs", "total_conflicting_cues", "baseline_restored", "finish_reason", "frame", "emulator_paused",
+    "total_misses", "total_skipped_inputs", "total_conflicting_cues", "baseline_restored", "finish_reason", "frame", "emulator_paused",
     "inputs_released", "emulator_closed", "measurement_dances", "total_samples", "required_samples", "entry_restored",
     "total_host_seconds", "last_checkpoint", "last_save_state", "work_dir", "error", "cleanup_errors")
 
@@ -48,15 +50,20 @@ def fixed_target(rank, *, category=DEFAULT_CATEGORY):
         "category_down_presses": category_index, "rank_down_presses": tier, "party_slot": 1}
 
 
-def fixed_timing(category, rank):
+def fixed_timing(category, rank, *, timing_profile=None):
     target = fixed_target(rank, category=category)
-    return measured_timing(target["category"], target["rank"])
+    return measured_timing(target["category"], target["rank"], timing_profile=timing_profile)
 
 
 def debug_plan(*, category=None, rank=None, total_timeout=super_contest.total_timeout_seconds,
                stage_timeout=super_contest.stage_timeout_seconds, skip_joined_from=None, resume_paused_from=None,
-               measure_only=False, offset_frames=DEFAULT_OFFSET_FRAMES, no_timeout=False,
-               loops=1, midpoint_diagnostics=False, measurement_dances=2):
+                measure_only=False, offset_frames=None, no_timeout=False,
+                loops=1, midpoint_diagnostics=False, measurement_dances=2, timing_profile=None):
+    profile = load_profile() if timing_profile is None else timing_profile
+    dance_values = section(profile, "stage5_dancing")
+    diagnostic = section(profile, "diagnostics")
+    dress_values = section(profile, "stage4_dress_up")
+    offset_frames = setting(offset_frames, dance_values, "input_offset_frames")
     if category is None and rank is not None:
         raise ValueError("Supply a category with the selected rank, or omit both for all 20.")
     for name, value in (("total timeout", total_timeout), ("stage timeout", stage_timeout)):
@@ -120,16 +127,16 @@ def debug_plan(*, category=None, rank=None, total_timeout=super_contest.total_ti
             raise ValueError("The retained entry images must reach the stopped frame exactly.")
         resume = {"run_id": previous["run_id"], "emulator_pid": previous["emulator_pid"],
             "frame": previous["frame"], "history": history, "source": str(source.resolve())}
-    entry = stage3_enter.entry_plan(targets[0]["category"], targets[0]["rank"], host_timeout=stage_timeout)
-    transition = stage4_dress.dress_plan(host_timeout=stage_timeout, from_stage3=True)["timing"]
+    entry = stage3_enter.entry_plan(targets[0]["category"], targets[0]["rank"], host_timeout=stage_timeout, timing_profile=profile)
+    transition = stage4_dress.dress_plan(host_timeout=stage_timeout, from_stage3=True, timing_profile=profile)["timing"]
     transition_inputs, remaining = [], transition["mash_frames"]
     while remaining:
         hold = min(transition["mash_hold_frames"], remaining)
         release = min(transition["mash_release_frames"], remaining - hold)
         transition_inputs.append(f"A:{hold}:{release}")
         remaining -= hold + release
-    plan = {"game": "CPUJ", "runner": "contest_dance_debug", "mode": "measurement",
-        "debug": 0, "true_retry": 0, "uncapped": True,
+    plan = {"game": profile["game_code"], "timing_profile": profile, "runner": "contest_dance_debug", "mode": "measurement",
+        "debug": 0, "uncapped": True,
         "total_timeout_seconds": total_timeout, "stage_timeout_seconds": stage_timeout,
         "host_timeouts_enabled": not no_timeout,
         "runtime": {"host_callers": 1, "lua_windows": 1, "lua_attachments": 1, "checkpoint_engines": 1,
@@ -143,20 +150,22 @@ def debug_plan(*, category=None, rank=None, total_timeout=super_contest.total_ti
             "terminal": "restore_normal_once"},
         "deadline_policy": "no whole-run or per-stage host deadline; completion or manual closure" if no_timeout
             else "existing stage host budget per visit, capped by the whole-run deadline",
-        "native_osd_settle_host_seconds": 0,
+        "native_osd_settle_host_seconds": dance_values["native_overlay_settle_host_seconds"],
         "baseline": {"source": "new run-owned state after game load, B, and its full released wait",
-            "load_timing": stage1_load.load_plan()["timing"], "reload_after_each_completed_combination": True,
+            "load_timing": stage1_load.load_plan(timing_profile=profile)["timing"], "reload_after_each_completed_combination": True,
             "native_transport_slot": 10, "restore_transport_slot_on_finish": True},
         "dressing": {"enabled": False, "frame_limit": False,
-            "finish": {"x": 230, "y": 173, "hold_frames": 2, "release_frames": 1}},
+            "finish": {"x": 230, "y": 173, "hold_frames": dress_values["finish_tap_hold_frames"],
+                "release_frames": dress_values["finish_tap_release_frames"]}},
         "enrollment": {"continuous": True, "intro_game_seconds": entry["timing"]["intro_game_seconds"],
             "intro_frames": entry["timing"]["intro_frames"], "endpoint_check": "dress_up_entry"},
         "transition": {**transition, "inputs": transition_inputs, "continuous_after_finish": True},
-        "entry_poll": {"wait_frames": CHECK_WAIT_FRAMES, "wait_emulator_seconds": 1,
+        "entry_poll": {"wait_frames": round(diagnostic["dance_entry_poll_game_seconds"] * stage4_dress.FRAME_RATE),
+            "wait_emulator_seconds": diagnostic["dance_entry_poll_game_seconds"],
             "input_policy": "none", "starts_after": "Finish and the complete transition A mash"},
         "dance_observation_policy": "measurement", "measurement_dances": measurement_dances,
-        "capture_wait_frames": CAPTURE_WAIT_FRAMES,
-        "capture_wait_emulator_seconds": 2, "dance_memory_snapshots": False,
+        "capture_wait_frames": round(diagnostic["dance_capture_interval_game_seconds"] * stage4_dress.FRAME_RATE),
+        "capture_wait_emulator_seconds": diagnostic["dance_capture_interval_game_seconds"], "dance_memory_snapshots": False,
         "dance_button_recognition": False, "dance_inputs": False,
         "pointer_templates": {"full": [vars(sprite) for sprite in POINTER_SPRITES],
             "lower": [vars(sprite) for sprite in POINTER_LOWER_SPRITES], "source": "existing_pink_pointer_sprite_reader"},
@@ -168,7 +177,7 @@ def debug_plan(*, category=None, rank=None, total_timeout=super_contest.total_ti
                 (3, "enter", "Selected contest's dress-up controls."),
                 (4, "skip_dress", "Immediate Finish and continuous 40-second A mash, then input-free one-second Dance 1 checks."),
                 (5, "dance", "Two visually tracked sweeps, then Pokemon 2 / dance 1 / demo."))],
-        "save_policy": {"baseline_only": True, "screen_checks": "log_only", "memory_check_slots": [],
+        "save_policy": {"enabled": True, "loads_enabled": True, "baseline_only": True, "screen_checks": "log_only", "memory_check_slots": [],
             "diagnostic_states": False, "temporary_slot": 10},
         "finish": "final confirmed Pokemon 2 / dance 1 demo capture of the last selected combination; paused"}
     if measure_only and measurement_dances == 1:
@@ -179,12 +188,12 @@ def debug_plan(*, category=None, rank=None, total_timeout=super_contest.total_ti
         plan["baseline"].update(native_slot=0, reload_after_final_combination=True)
         plan["sections"][-1].update(checkpoint_facts="Input-free Dance 1; stop on the first readable Dance 2 entry and reload slot 0.")
     if not measure_only:
-        profiles = [fixed_timing(target["category"], target["rank"]) for target in targets]
+        profiles = [fixed_timing(target["category"], target["rank"], timing_profile=profile) for target in targets]
         plan.update(mode="debug_inputs", dance_observation_policy="debug_inputs",
             dance_button_recognition=True, dance_inputs=True, feedback_policy="record_all_buttons",
             fixed_timings=profiles, required_response_inputs=sum(6 * item["cues_per_dance"] for item in profiles),
             required_midpoint_visits=6 * len(targets),
-            input_timing={"hold_frames": rank_dance.INPUT_HOLD_FRAMES, "release_frames": rank_dance.FEEDBACK_RELEASE_FRAMES,
+            input_timing={"hold_frames": dance_values["response_hold_frames"], "release_frames": dance_values["feedback_release_frames"],
                 "offset_frames": offset_frames},
             midpoint_policy={"capture_target_x": 127, "accepted_pointer_pixels": [128, 129], "rounding": "floor",
                 "capture_each_visit": True, "retain_early_captures": True,
@@ -192,9 +201,10 @@ def debug_plan(*, category=None, rank=None, total_timeout=super_contest.total_ti
                 "diagnostic_continuation": midpoint_diagnostics,
                 "post_fix_policy": "record_and_continue" if midpoint_diagnostics else "skip_response_if_no_progress",
                 "late_policy": "record_and_play_remaining_inputs", "unreadable_policy": "counted_input_free_response_skip"},
-            feedback={"delay_frames": rank_dance.FIRST_FEEDBACK_DELAY_FRAMES,
-                "source": "shared_scheduled_input_feedback_capture", "timing_miss_policy": "record_and_continue",
-                "unreadable_feedback_policy": "recover_each_frame_until_next_input_or_response_end_or_full_release_wait",
+            feedback={"delay_frames": dance_values["response_hold_frames"] + dance_values["feedback_release_frames"] - 1,
+                "source": "shared_scheduled_input_feedback_capture", "recognition": "excellent_bubble_palette_only",
+                "miss_policy": "count_every_non_excellent_outcome_together_and_continue",
+                "recovery_policy": "recover_each_frame_until_next_input_or_response_end_or_full_release_wait",
                 "recovery_exhausted_policy": "retain_capture_and_continue", "final_input_policy": "same_as_every_input"},
             cue_spacing_policy="fixed_category_rank",
             cue_selection_policy={"conflicts": "demo_prefix_response_suffix", "demo_prefix_count": "required_cues_minus_two",
@@ -211,7 +221,7 @@ def debug_plan(*, category=None, rank=None, total_timeout=super_contest.total_ti
 
 
 def load(runtime):
-    plan = stage1_load.load_plan()
+    plan = stage1_load.load_plan(timing_profile=runtime.settings.get("timing_profile"))
     runtime.start_section(plan, measurement_targets=runtime.settings["targets"],
         measurement_dances=runtime.settings.get("measurement_dances", 2))
     inputs = runtime.action("combo", "inputs", *plan["inputs"], expected="combo_complete", name="input-result.json")
@@ -260,7 +270,8 @@ def retain_capture(runtime, capture, *, protected=False):
 
 def enter(runtime):
     target = runtime.target
-    plan = stage3_enter.entry_plan(target["category"], target["rank"], host_timeout=runtime.settings["stage_timeout_seconds"])
+    plan = stage3_enter.entry_plan(target["category"], target["rank"], host_timeout=runtime.settings["stage_timeout_seconds"],
+        timing_profile=runtime.settings.get("timing_profile"))
     runtime.start_section(plan)
     runtime.action("combo", "inputs", *plan["inputs"], expected="debug_entry_complete", name="input-result.json")
     capture = runtime.command("capture")["observation"]
@@ -350,13 +361,13 @@ def input_dance(runtime):
     inputs = runtime.settings["input_timing"]
     if runtime.settings["feedback"]["delay_frames"] != inputs["hold_frames"] + inputs["release_frames"] - 1:
         raise RuntimeError("The shared feedback capture must follow the complete held and released input block.")
-    profile = fixed_timing(runtime.target["category"], runtime.target["rank"])
+    profile = fixed_timing(runtime.target["category"], runtime.target["rank"], timing_profile=runtime.settings.get("timing_profile"))
     plan = rank_dance.stage5_plan(rank=runtime.target["rank"], source_frame=entry["frame"],
         host_timeout=runtime.settings["stage_timeout_seconds"], entry_pointer_x=entry["visual"]["x"],
         hold_frames=inputs["hold_frames"], offset_frames=inputs["offset_frames"],
         fixed_timing=profile, feedback_policy="record_all_buttons", observation_policy="scheduled",
         first_feedback_delay_frames=runtime.settings["feedback"]["delay_frames"],
-        midpoint_diagnostics=runtime.settings["midpoint_diagnostics"])
+        midpoint_diagnostics=runtime.settings["midpoint_diagnostics"], timing_profile=runtime.settings.get("timing_profile"))
     runtime.start_section(plan)
     responses, last = rank_dance.stage5_responses(runtime, plan)
     trial = last["checkpoint"]["snapshot"]["trial"]
@@ -376,8 +387,8 @@ def input_dance(runtime):
         raise RuntimeError("The final response image must share the acknowledged reload boundary.")
     return sections.accepted(runtime, target=runtime.target, input_debug_complete=True, dances=responses,
         rank_timing=profile, input_count=trial["total_input_count"], feedback_count=trial["total_judgment_count"],
-        excellent_count=trial["total_excellent_count"], timing_misses=trial["total_timing_misses"],
-        unreadable_feedback=trial["total_unreadable_feedback"], skipped_input_count=trial["total_skipped_inputs"],
+        excellent_count=trial["total_excellent_count"], miss_count=trial["total_miss_count"],
+        skipped_input_count=trial["total_skipped_inputs"],
         conflict_count=sum(response["conflict_count"] for response in responses), final_capture=final,
         finish_point="final_response_input_feedback" if trial["final_feedback_bound"] else "final_response_accounted",
         **({"midpoint_diagnostics": [
@@ -443,32 +454,6 @@ def validate_run_name(run_name):
         raise ValueError("Use a fresh run name containing letters, digits, underscores, or hyphens.")
 
 
-def python_host_alive(pid):
-    """A recorded Python caller is inactive if Windows reused its PID for another app."""
-    import ctypes
-    from host.windows import KERNEL32, ProcessEntry, process_alive
-
-    if not process_alive(pid):
-        return False
-    snapshot = KERNEL32.CreateToolhelp32Snapshot(2, 0)
-    if snapshot == ctypes.c_void_p(-1).value:
-        raise ctypes.WinError(ctypes.get_last_error())
-    try:
-        entry = ProcessEntry()
-        entry.size = ctypes.sizeof(entry)
-        ready = KERNEL32.Process32FirstW(snapshot, ctypes.byref(entry))
-        while ready:
-            if entry.pid == pid:
-                name = entry.executable.lower()
-                return name == Path(sys.executable).name.lower() or name.startswith("python") and name.endswith(".exe")
-            ready = KERNEL32.Process32NextW(snapshot, ctypes.byref(entry))
-        if ctypes.get_last_error() != 18:
-            raise ctypes.WinError(ctypes.get_last_error())
-        return False
-    finally:
-        KERNEL32.CloseHandle(snapshot)
-
-
 def run(*, run_name, **options):
     import msvcrt
 
@@ -504,10 +489,10 @@ def _run(run_name, plan, started, *, pointer_sections=None):
         if (session is None or session["pid"] != resume["emulator_pid"] or not runtime.controller.paused(session)
                 or runtime.controller.status()["frame"] != resume["frame"]):
             raise RuntimeError("Paused continuation requires the same emulator at the exact retained frame.")
-    candidates = inactive_runs(work.parent, current_pid=os.getpid(), check=runtime.check, process_alive=python_host_alive)
+    candidates = previous_runs(work.parent, check=runtime.check)
     runtime.prepare_fresh_ownership(session)
     protected = [Path(session["lua_script"])] if session and session.get("lua_script") else []
-    startup_cleanup = cleanup_stale(work.parent, current_pid=os.getpid(), protected=protected,
+    startup_cleanup = cleanup_stale(work.parent, protected=protected,
         check=runtime.check, candidates=candidates)
     work.mkdir(exist_ok=False)
     (work / "checkpoints").mkdir()
@@ -535,9 +520,9 @@ def _run(run_name, plan, started, *, pointer_sections=None):
     if inputs_mode:
         result.pop("measurements_path")
         result.pop("measured_contests")
-        result.update(results_path=str(report_path), total_inputs=0, total_excellent=0, timing_misses=0,
+        result.update(results_path=str(report_path), total_inputs=0, total_excellent=0, total_misses=0,
             total_skipped_inputs=0, total_conflicting_cues=0,
-            unreadable_feedback=0, required_response_inputs=plan["required_response_inputs"],
+            required_response_inputs=plan["required_response_inputs"],
             required_midpoint_visits=plan["required_midpoint_visits"], baseline_restored=False)
     else:
         if not pointer_mode:
@@ -634,13 +619,13 @@ def _run(run_name, plan, started, *, pointer_sections=None):
             entry.update(final_capture=captured["final_capture"], checkpoint_receipt=captured["checkpoint_receipt"])
             if inputs_mode:
                 entry.update({key: captured[key] for key in
-                     ("rank_timing", "input_count", "feedback_count", "excellent_count", "timing_misses", "unreadable_feedback",
+                     ("rank_timing", "input_count", "feedback_count", "excellent_count", "miss_count",
                       "skipped_input_count", "conflict_count")})
                 if plan["midpoint_diagnostics"]:
                     entry["midpoint_diagnostics"] = captured["midpoint_diagnostics"]
                 for total, field in (("total_inputs", "input_count"), ("total_excellent", "excellent_count"),
                         ("total_skipped_inputs", "skipped_input_count"), ("total_conflicting_cues", "conflict_count"),
-                        ("timing_misses", "timing_misses"), ("unreadable_feedback", "unreadable_feedback")):
+                        ("total_misses", "miss_count")):
                     result[total] += captured[field]
                 write_json(report_path, report)
                 entry["baseline_reload"] = reload_baseline(runtime)
@@ -671,7 +656,7 @@ def _run(run_name, plan, started, *, pointer_sections=None):
             write_json(report_path, report)
             record("contest_completed" if inputs_mode else "contest_captured", target=target,
                 **{key: result[key] for key in ("completed_contests", "measured_contests", "total_inputs",
-                    "total_excellent", "timing_misses", "unreadable_feedback", "total_skipped_inputs", "total_conflicting_cues") if key in result})
+                    "total_excellent", "total_misses", "total_skipped_inputs", "total_conflicting_cues") if key in result})
         if inputs_mode and result["total_inputs"] + result["total_skipped_inputs"] != result["required_response_inputs"]:
             raise RuntimeError("Executed and skipped inputs must account for the selected rank requirements.")
         if pointer_mode and result["total_samples"] != result["required_samples"]:
@@ -706,7 +691,7 @@ def _run(run_name, plan, started, *, pointer_sections=None):
             if entry["status"] == "running":
                 entry.update(status=result["outcome"], error=result.get("error"))
         report.update({key: result[key] for key in ("outcome", "completed_contests", "measured_contests", "total_inputs",
-            "required_response_inputs", "total_excellent", "timing_misses", "unreadable_feedback", "total_skipped_inputs",
+            "required_response_inputs", "total_excellent", "total_misses", "total_skipped_inputs",
             "total_conflicting_cues", "baseline_restored", "total_samples", "required_samples", "entry_restored") if key in result})
         write_json(report_path, report)
         result["total_host_seconds"] = time.monotonic() - started
@@ -772,8 +757,8 @@ def main():
     parser.add_argument("--total-timeout", type=float, default=super_contest.total_timeout_seconds)
     parser.add_argument("--stage-timeout", type=float, default=super_contest.stage_timeout_seconds)
     parser.add_argument("--no-timeout", action="store_true", help="Disable both run timers; continue through completion or manual closure.")
-    parser.add_argument("--offset-frames", type=int, default=DEFAULT_OFFSET_FRAMES,
-        help="Response input offset in emulator frames (default: -7).")
+    parser.add_argument("--offset-frames", type=int,
+        help="Override the profile response input offset in emulator frames.")
     args = parser.parse_args()
     options = {name: getattr(args, name) for name in ("category", "rank", "total_timeout", "stage_timeout",
         "skip_joined_from", "resume_paused_from", "measure_only", "offset_frames", "no_timeout", "loops", "midpoint_diagnostics", "measurement_dances")}

@@ -17,8 +17,7 @@ import time
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from contest.artifacts import inactive_runs
-from contest.dance_master import DEFAULT_OFFSET_FRAMES, attach, lua_value
+from contest.dance_master import DEFAULT_OFFSET_FRAMES, attach, lua_value, settle_native_overlay
 from contest.dance_timings import timing_for
 from contest.pt_dance_read import (
     CUE_SIDE_OFFSET, LEFT_SPRITES, RIGHT_SPRITES, _match, gd_image, layout_for, load_image,
@@ -30,6 +29,8 @@ from host.checkpoints import CheckpointClient, write_json
 from host.controller import ControllerConfig
 from host.emulator import DeSmuME
 from host.savestates import StateSlots
+from contest.dance_timings import fixed_timing
+from contest.timing_profiles import load_profile, section, setting
 
 
 HERE = Path(__file__).resolve().parent
@@ -223,9 +224,8 @@ def measurement_speed(start, end, samples):
 def response_plan(midpoint, image, samples, read_frame, *, rank, expected_cues, speed, hold_frames, offset_frames,
                   dance=1, side_offset_pixels=None, allow_demo_midpoint=False, fixed_spacing=False, tolerant_inputs=False):
     side_offset = timing_for(rank)["cue_side_offset_pixels"] if side_offset_pixels is None else side_offset_pixels
-    if tolerant_inputs and (not fixed_spacing or samples):
-        raise ValueError("Count-aware cue selection uses fixed spacing and the fresh midpoint only.")
     seen = {"left": {}, "right": {}}
+    changed = {side: set() for side in seen}
     previous = None
     for sample in samples:
         if sample["epoch"] != midpoint["epoch"] or previous is not None and sample["frame"] <= previous:
@@ -238,17 +238,33 @@ def response_plan(midpoint, image, samples, read_frame, *, rank, expected_cues, 
             for cue in cue_positions(captured, side, dance):
                 old = seen[side].get(cue["x"])
                 if old and old["button"] != cue["button"]:
-                    raise ReviewNeeded("A demonstrated cue changed at the same native position.")
+                    if not tolerant_inputs:
+                        raise ReviewNeeded("A demonstrated cue changed at the same native position.")
+                    changed[side].add(cue["x"])
                 seen[side][cue["x"]] = cue
     fresh = {side: cue_positions(image, side, dance) for side in seen}
-    paired = select_cues(fresh["left"], fresh["right"], expected_cues=expected_cues, side_offset_pixels=side_offset) \
-        if tolerant_inputs else merge_cues(fresh["left"], fresh["right"], expected_cues=expected_cues, dance=dance,
+    resolved = None
+    if tolerant_inputs and not fixed_spacing:
+        try:
+            resolved = merge_cues(fresh["left"], fresh["right"], expected_cues=expected_cues, dance=dance,
+                side_offset_pixels=side_offset)
+        except ReviewNeeded:
+            pass
+    if tolerant_inputs:
+        paired = select_cues(fresh["left"], fresh["right"], expected_cues=expected_cues,
+            side_offset_pixels=resolved["side_offset_pixels"] if resolved else side_offset)
+        if resolved:
+            paired["side_offset_source"] = resolved["side_offset_source"]
+    else:
+        paired = merge_cues(fresh["left"], fresh["right"], expected_cues=expected_cues, dance=dance,
             side_offset_pixels=side_offset, fixed_spacing=fixed_spacing)
     for side in seen:
         for cue in fresh[side]:
             old = seen[side].get(cue["x"])
             if old and old["button"] != cue["button"]:
-                raise ReviewNeeded("The fresh midpoint contradicts an earlier cue.")
+                if not tolerant_inputs:
+                    raise ReviewNeeded("The fresh midpoint contradicts an earlier cue.")
+                changed[side].add(cue["x"])
             seen[side][cue["x"]] = cue
     if not tolerant_inputs:
         history = merge_cues(*(list(values.values()) for values in seen.values()), expected_cues=expected_cues, dance=dance,
@@ -265,7 +281,8 @@ def response_plan(midpoint, image, samples, read_frame, *, rank, expected_cues, 
     predicted_end = midpoint["frame"] + math.floor((248 - position["x"]) / speed + 0.5)
     for input_index, cue in enumerate(paired["accepted"], 1):
         due = midpoint["frame"] + math.floor((cue["response_x"] - position["x"]) / speed + 0.5) + offset_frames
-        reason = "input_already_due" if due <= midpoint["frame"] else "input_outside_response" \
+        reason = "cue_changed_during_demo" if any(reading["x"] in changed[side] for side, reading in cue["evidence"].items()) \
+            else "input_already_due" if due <= midpoint["frame"] else "input_outside_response" \
             if due + hold_frames >= predicted_end else "overlapping_input" \
             if presses and presses[-1]["frame"] + hold_frames >= due else None
         if tolerant_inputs and reason:
@@ -293,15 +310,39 @@ def response_plan(midpoint, image, samples, read_frame, *, rank, expected_cues, 
     result = {"rank": rank, "dance": dance, "frame": midpoint["frame"], "epoch": midpoint["epoch"],
         "pointer_x": position["x"], "speed": speed, "hold_frames": hold_frames,
         "offset_frames": offset_frames, "player_center_x": 204 - 80 * ((dance - 1) // 2), "presses": presses,
-        "predicted_end_frame": predicted_end, "pixel_points": points,
+        "predicted_end_frame": predicted_end, "response_end_frame": predicted_end, "pixel_points": points,
         "cues": paired, "source": "fresh_native_cues_with_per_button_fallback"}
     if tolerant_inputs:
         result.update(expected_inputs=expected_cues, skipped_input_count=expected_cues - len(presses), skipped_inputs=skipped)
     return result
 
 
-def probe_plan(*, super_slot=1, hyper_slot=2, render_host_seconds=0.5, measurement_host_seconds=1,
-        host_timeout=300, hold_frames=2, offset_frames=DEFAULT_OFFSET_FRAMES, measure_only=False):
+def skipped_trial(midpoint, source, *, speed, hold_frames, offset_frames, reason):
+    """Finish an unreadable prepared response using its existing native half-sweep budget."""
+    x = midpoint["position"]["x"]
+    anchor = (midpoint.get("midpoint_timing") or {}).get("expected_frame")
+    frames = math.floor((248 - x) / speed + 0.5) if x is not None else math.ceil(120 / speed)
+    if anchor is not None and (x is None or anchor > midpoint["frame"]):
+        frames = anchor - midpoint["frame"] + math.ceil(120 / speed)
+    endpoint = midpoint["frame"] + max(1, frames)
+    return {"rank": source["rank"], "dance": 1, "frame": midpoint["frame"], "epoch": midpoint["epoch"],
+        "pointer_x": None, "speed": speed, "hold_frames": hold_frames, "offset_frames": offset_frames,
+        "player_center_x": 204, "presses": [], "pixel_points": [], "predicted_end_frame": endpoint,
+        "response_end_frame": endpoint, "expected_inputs": source["expected_cues"],
+        "skipped_input_count": source["expected_cues"], "skipped_inputs": [{"reason": reason, "count": source["expected_cues"]}],
+        "skip_reason": reason, "source": "retained_paused_capture_and_counted_input_free_response",
+        "cues": {"accepted": [], "conflicts": [], "side_offset_pixels": source["rank_timing"]["cue_side_offset_pixels"]}}
+
+
+def probe_plan(*, super_slot=1, hyper_slot=2, render_host_seconds=None, measurement_host_seconds=None,
+        host_timeout=300, hold_frames=None, offset_frames=None, measure_only=False, timing_profile=None):
+    profile = load_profile() if timing_profile is None else timing_profile
+    diagnostic, dance = section(profile, "diagnostics"), section(profile, "stage5_dancing")
+    render_host_seconds = setting(render_host_seconds, diagnostic, "rank_state_render_host_seconds")
+    measurement_host_seconds = setting(measurement_host_seconds, diagnostic, "rank_measurement_host_seconds")
+    hold_frames = setting(hold_frames, dance, "response_hold_frames")
+    offset_frames = setting(offset_frames, dance, "input_offset_frames")
+    gaps = fixed_timing("Cool", "Hyper", timing_profile=profile)
     for slot in (super_slot, hyper_slot):
         StateSlots.validate_slot(slot)
         if slot == TEMPORARY_SLOT:
@@ -315,27 +356,33 @@ def probe_plan(*, super_slot=1, hyper_slot=2, render_host_seconds=0.5, measureme
         raise ValueError("Button holds must be positive emulator-frame counts.")
     if isinstance(offset_frames, bool) or not isinstance(offset_frames, int):
         raise ValueError("The response offset must be an integer emulator-frame count.")
-    return {"game": "CPUJ", "sources": [
-        {"rank": "Super", "japanese_rank": "Great", "slot": super_slot, "expected_cues": 4},
-        {"rank": "Hyper", "japanese_rank": "Ultra", "slot": hyper_slot, "expected_cues": 4}],
+    return {"game": profile["game_code"], "timing_profile_source": profile["source"],
+        "demo_sample_interval_frames": dance["demo_sample_interval_frames"], "sources": [
+        {"rank": "Super", "japanese_rank": "Great", "slot": super_slot, "expected_cues": 4,
+            "rank_timing": timing_for("Super", timing_profile=profile)},
+        {"rank": "Hyper", "japanese_rank": "Ultra", "slot": hyper_slot, "expected_cues": 4,
+            "rank_timing": timing_for("Hyper", timing_profile=profile)}],
         "render_host_seconds": render_host_seconds, "measurement_host_seconds": measurement_host_seconds,
         "host_timeout_per_source_seconds": host_timeout, "speed_percent": 100, "frame_limit": True,
         "fast_forward": False, "hold_frames": hold_frames, "offset_frames": offset_frames,
+        "feedback_release_frames": dance["feedback_release_frames"],
+        "first_feedback_delay_frames": hold_frames + dance["feedback_release_frames"] - 1,
+        "native_osd_settle_host_seconds": dance["native_overlay_settle_host_seconds"],
         "measure_only": measure_only,
         "order": "measure both sources" if measure_only else "measure both sources, then reload each source for one complete Dance 1 response",
         "capture_policy": "native pause, fresh paused-Lua-menu framebuffer, zero added frames",
         "speed_policy": "endpoint pixel displacement divided by actual emulator-frame change; recorded trajectory refines the trial rate",
         "cue_policy": "80-percent button-cue matching at native centers; per-button agreement or silent one-sided fallback",
-        "finish_to_next_start_gap_frames": {"same_pokemon": 0, "pokemon_switch": 213},
+        "finish_to_next_start_gap_frames": {"same_pokemon": gaps["dance_gap_frames"], "pokemon_switch": gaps["leader_gap_frames"]},
         "temporary_checkpoint_slot": TEMPORARY_SLOT,
         "deadline_policy": "per-source absolute host deadline from its first measurement; setup belongs to the first source",
         "finish": ("both pointer-speed measurements acknowledged, or an unexpected paused stop" if measure_only
-            else "both Dance 1 responses have fresh Excellent feedback for every input, or an unexpected paused stop"),
+            else "both counted Dance 1 responses finish with every opportunity executed or skipped and feedback recorded as Excellent or Miss"),
         "memory_proven_phase": False}
 
 
 def lua_file(path, value):
-    path.write_text("return " + lua_value(value) + "\n", encoding="utf-8")
+    path.write_text("return " + lua_value(value) + "\n", encoding="utf-8", newline="\n")
     return path
 
 
@@ -377,6 +424,7 @@ def capture_result(result, *, allow_unreadable=False):
     image = result["observation"]["image"]
     path = Path(image["path"])
     if (result.get("emulator_paused") is not True or image["capture_callback"] != "paused_lua_menu"
+            or result["observation"].get("released") is not True or image.get("source") != "fresh_zero_frame_framebuffer"
             or image["direct_read_frames"] != 0 or image["frame"] != result["frame"] or image["epoch"] != result["epoch"]):
         raise RuntimeError("The fresh capture frame/epoch does not match its paused packet.")
     stacked_gd(path).save(path.with_suffix(".png"))
@@ -388,6 +436,8 @@ def capture_result(result, *, allow_unreadable=False):
         position = {"x": None, "phase": "unknown", "source": "unreadable_native_pixels", "reason": str(error)}
     value = {"frame": result["frame"], "epoch": result["epoch"], "image": image,
         "png": str(path.with_suffix(".png")), "position": position}
+    if isinstance(result["observation"].get("midpoint_timing"), dict):
+        value["midpoint_timing"] = result["observation"]["midpoint_timing"]
     return value
 
 
@@ -433,6 +483,12 @@ def run(*, run_name, **options):
         slot10_touched = True
         return client.acknowledge(pending, slot=TEMPORARY_SLOT)
 
+    def settle(name):
+        evidence = settle_native_overlay(controller, lambda name: client.command("capture", name),
+            settings["native_osd_settle_host_seconds"], name=name)
+        if evidence is not None:
+            write_json(current_folder / f"overlay-{name}.json", evidence)
+
     def load_source(source, phase):
         nonlocal current_folder
         rank = source["rank"]
@@ -447,7 +503,8 @@ def run(*, run_name, **options):
             "rank": rank, "rank_source": "user_prepared_native_slot", "source_copy": str(source_copies[source["slot"]]),
             "host_deadline": deadlines[rank]})
         rendered = unpause_window(controller, settings["render_host_seconds"])
-        start = capture(client, "rendered-entry")
+        settle("source")
+        start = capture_result(client.command("capture", "rendered-entry"), allow_unreadable=phase == "trial")
         if start["epoch"] != selected["epoch"] or start["frame"] <= selected["frame"]:
             raise ReviewNeeded("The render preparation changed epoch or did not advance emulator frames.")
         write_json(current_folder / "render-preparation.json", {**rendered, "start_frame": selected["frame"],
@@ -455,7 +512,6 @@ def run(*, run_name, **options):
         return start
 
     try:
-        inactive_runs(parent, current_pid=os.getpid(), check=controller.remaining)
         for source in settings["sources"]:
             native = emulator.states.path(source["slot"], data={"rom": str(ROM)})
             StateSlots.validate_header(native, source["slot"])
@@ -492,13 +548,15 @@ def run(*, run_name, **options):
             shutil.copy2(native10, original_slot10)
         attach(controller, HERE / "rank_speed_probe.lua", bridge=BRIDGE)
         attached = True
-        client.command("init-run", run_name, work.as_posix())
+        client.command("init-run", run_name, work.as_posix(),
+            lua_file(work / "timing-settings.lua", settings).as_posix())
         controller.USER32.SetForegroundWindow(window)
 
         # Finish both speed measurements before replaying either prepared source.
         for source in settings["sources"]:
             start = load_source(source, "measure")
             acknowledge("measure-start", {"frame": start["frame"], "epoch": start["epoch"], "pointer_x": start["position"]["x"]})
+            settle("measurement")
             client.command("measure-begin")
             timed = unpause_window(controller, settings["measurement_host_seconds"])
             end = capture_result(client.command("measure-end"))
@@ -517,26 +575,53 @@ def run(*, run_name, **options):
         trial_sources = [] if settings["measure_only"] else settings["sources"]
         for source in trial_sources:
             entry = load_source(source, "trial")
-            if entry["position"]["phase"] != "demo":
-                raise ReviewNeeded("The reloaded trial source is outside Dance 1's demonstration.")
-            observed = emulator.command("observe-demo", timeout=None, deadline=controller.live_deadline)
-            if observed.get("error") or observed.get("stop_reason") != "demo_midpoint":
-                raise RuntimeError(observed.get("error") or "The demonstration did not reach the observed midpoint.")
-            midpoint = capture(client, "midpoint")
-            samples = [json.loads(line) for line in (current_folder / "demo-frames.jsonl").read_text(encoding="utf-8").splitlines()]
-            with (current_folder / "demo-frames.bin").open("rb") as stream:
-                def read_frame(sample):
-                    stream.seek(sample["capture_offset"])
-                    return stream.read(sample["capture_bytes"])
-                planned = response_plan(midpoint, gd_image(Path(midpoint["image"]["path"]).read_bytes()), samples, read_frame,
-                    rank=source["rank"], expected_cues=source["expected_cues"], speed=speeds[source["rank"]],
-                    hold_frames=settings["hold_frames"], offset_frames=settings["offset_frames"])
-            write_json(current_folder / "response-plan.json", planned)
-            client.command("plan", lua_file(current_folder / "response-plan.lua", planned).as_posix())
-            acknowledge("trial-start", {"frame": midpoint["frame"], "epoch": midpoint["epoch"]})
-            responded = emulator.command("mirror", timeout=None, deadline=controller.live_deadline)
-            if responded.get("error") or responded.get("stop_reason") != "dance_1_response_complete":
-                raise ReviewNeeded(responded.get("error") or "The first response stopped before completion.")
+            try:
+                x = entry["position"]["x"]
+                if entry["position"]["phase"] != "demo":
+                    reason = "The prepared trial entry is unreadable or already in its response; using counted continuation."
+                    client.command("warn", reason)
+                    record("dance_warning", rank=source["rank"], reason=reason)
+                predicted_midpoint = entry["frame"] + (max(1, math.ceil((128 - x) / speeds[source["rank"]]))
+                    if x is not None else math.ceil(120 / speeds[source["rank"]]))
+                entry["midpoint_timing"] = {"expected_frame": predicted_midpoint}
+                observed = emulator.command("observe-demo", predicted_midpoint, timeout=None, deadline=controller.live_deadline)
+                if observed.get("error") or observed.get("stop_reason") != "demo_midpoint":
+                    raise ReviewNeeded(observed.get("error") or "The demonstration needs counted response continuation.")
+                midpoint = capture_result(client.command("capture", "midpoint"), allow_unreadable=True)
+                samples = [json.loads(line) for line in (current_folder / "demo-frames.jsonl").read_text(encoding="utf-8").splitlines()]
+                with (current_folder / "demo-frames.bin").open("rb") as stream:
+                    def read_frame(sample):
+                        stream.seek(sample["capture_offset"])
+                        return stream.read(sample["capture_bytes"])
+                    planned = response_plan(midpoint, gd_image(Path(midpoint["image"]["path"]).read_bytes()), samples, read_frame,
+                        rank=source["rank"], expected_cues=source["expected_cues"], speed=speeds[source["rank"]],
+                        hold_frames=settings["hold_frames"], offset_frames=settings["offset_frames"],
+                        side_offset_pixels=source["rank_timing"]["cue_side_offset_pixels"], tolerant_inputs=True)
+                write_json(current_folder / "response-plan.json", planned)
+                loaded = client.command("plan", lua_file(current_folder / "response-plan.lua", planned).as_posix())
+                if loaded.get("recovery_required"):
+                    raise ReviewNeeded(loaded["warning"])
+                acknowledge("trial-start", {"frame": midpoint["frame"], "epoch": midpoint["epoch"]})
+                settle("response")
+                responded = emulator.command("mirror", timeout=None, deadline=controller.live_deadline)
+                if responded.get("error") or responded.get("stop_reason") != "dance_1_response_complete":
+                    raise ReviewNeeded(responded.get("error") or "The response needs counted input-free continuation.")
+            except Exception as error:
+                if isinstance(error, TimeoutError):
+                    raise
+                reason = (str(error) or type(error).__name__).replace("|", "/").replace("\r", " ").replace("\n", " ")
+                midpoint = capture_result(client.command("capture", "response-recovery"), allow_unreadable=True)
+                midpoint.setdefault("midpoint_timing", entry.get("midpoint_timing", {}))
+                planned = skipped_trial(midpoint, source, speed=speeds[source["rank"]], hold_frames=settings["hold_frames"],
+                    offset_frames=settings["offset_frames"], reason=reason)
+                recovered = client.command("recover-response", lua_file(current_folder / "response-skip.lua", planned).as_posix(), reason)
+                planned = recovered["response_plan"]
+                write_json(current_folder / "response-recovery.json", {"capture": midpoint, "plan": planned, "reason": reason})
+                if not recovered["observation"]["trial"]["response_started"]:
+                    acknowledge("trial-start", {"frame": recovered["frame"], "epoch": recovered["epoch"]})
+                record("dance_warning", rank=source["rank"], reason=reason, continuation="counted_input_free_response")
+                settle("recovery")
+                responded = emulator.command("mirror", timeout=None, deadline=controller.live_deadline)
             completed = acknowledge("trial-finish", {"frame": responded["frame"], "epoch": midpoint["epoch"],
                 "expected_cues": source["expected_cues"]})
             snapshot = completed["checkpoint"]["snapshot"]
@@ -546,10 +631,13 @@ def run(*, run_name, **options):
             trial = {"rank": source["rank"], "slot": source["slot"], "outcome": "pass", "entry": entry,
                 "midpoint": midpoint, "end_frame": responded["frame"], "actual_response_frames": responded["frame"] - midpoint["frame"],
                 "speed": speeds[source["rank"]], "presses": planned["presses"], "judgments": snapshot["trial"]["judgments"],
+                "excellent_count": snapshot["trial"]["excellent_count"], "miss_count": snapshot["trial"]["miss_count"],
+                "input_count": snapshot["trial"]["inputs"], "skipped_input_count": snapshot["trial"]["skipped_input_count"],
                 "checkpoint_visit": completed["checkpoint"]["visit"], "source": "fresh_judgment_pixels_and_response_strip_completion"}
             write_json(current_folder / "trial-result.json", trial)
             result["trials"].append(trial)
-            record("trial_pass", rank=source["rank"], judgments=len(trial["judgments"]), frame=responded["frame"])
+            record("trial_complete", rank=source["rank"], judgments=len(trial["judgments"]), frame=responded["frame"],
+                misses=trial["miss_count"], skipped_inputs=trial["skipped_input_count"])
         result["outcome"] = "pass"
     except (Exception, SystemExit) as error:
         result["outcome"] = "review" if isinstance(error, ReviewNeeded) else "timeout" if isinstance(error, TimeoutError) else "fail"
@@ -644,11 +732,11 @@ def main(argv=None):
     parser.add_argument("--measure-only", action="store_true", help="Finish paused after both pointer-speed measurements")
     parser.add_argument("--super-slot", type=int, default=1)
     parser.add_argument("--hyper-slot", type=int, default=2)
-    parser.add_argument("--render-host-seconds", type=float, default=0.5)
-    parser.add_argument("--measurement-host-seconds", type=float, default=1)
+    parser.add_argument("--render-host-seconds", type=float)
+    parser.add_argument("--measurement-host-seconds", type=float)
     parser.add_argument("--host-timeout", type=float, default=300)
-    parser.add_argument("--hold-frames", type=int, default=2)
-    parser.add_argument("--offset-frames", type=int, default=DEFAULT_OFFSET_FRAMES)
+    parser.add_argument("--hold-frames", type=int)
+    parser.add_argument("--offset-frames", type=int)
     args = parser.parse_args(argv)
     if args.check:
         check()

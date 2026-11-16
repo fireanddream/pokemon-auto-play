@@ -25,16 +25,18 @@ from host.checkpoints import CheckpointClient, CheckpointStopped, write_json
 from host.controller import ControllerConfig
 from host.emulator import DeSmuME
 from host.paths import ROOT
-from contest.inputs import NORMAL_HOLD_FRAMES, NORMAL_RELEASE_FRAMES
+from contest.timing_profiles import load_profile, section
 
 
 HERE = Path(__file__).resolve().parent
 INPUT_SLOT, OUTPUT_SLOT = 10, 2
 SCARVES = {260: "Red Scarf", 261: "Blue Scarf", 262: "Pink Scarf", 263: "Green Scarf", 264: "Yellow Scarf"}
-BAG_DOWN_RELEASE_FRAMES = 30
+BAG_DOWN_RELEASE_FRAMES = section(None, "stage2_preparation")["bag_down_release_frames"]
 
 
-def prep_plan(snapshot, *, bag_state, cursor=1, target=None):
+def prep_plan(snapshot, *, bag_state, cursor=1, target=None, timing_profile=None):
+    profile = load_profile() if timing_profile is None else timing_profile
+    values = section(profile, "stage2_preparation")
     party, entries = snapshot["party"], snapshot["bag"]["items"]
     target = party.get("next_target") if target is None else dict(target)
     required = target["required_scarf_id"] if target else None
@@ -49,20 +51,19 @@ def prep_plan(snapshot, *, bag_state, cursor=1, target=None):
 
         def press(button, release=None):
             if release is None:
-                release = BAG_DOWN_RELEASE_FRAMES if button == "down" else NORMAL_RELEASE_FRAMES
-            return f"{button}:{NORMAL_HOLD_FRAMES}:{release}"
+                release = values["bag_down_release_frames"] if button == "down" else values["menu_release_frames"]
+            return f"{button}:{values['menu_hold_frames']}:{release}"
 
         inputs = [press(button) for button in bag_state.opening_buttons()]
         inputs += [press("down" if delta > 0 else "up")] * abs(delta)
-        # The passed scarf test uses the same two-second wait after A2.
-        inputs += [press("A"), press("A", 120)]
+        inputs += [press("A"), press("A", values["give_confirmation_release_frames"])]
         inputs += [press("A")] * (4 if held else 2) + [press("B")] * 2
         after = scarf["position"]
         if scarf["quantity"] == 1 and after == len(entries):
             old_stack = any(item["item_id"] == held for item in entries)
             if not held or old_stack:
                 after = max(1, after - 1)
-    return {"stage": 2, "mode": mode, "target": target, "source_species_id": party["species_id"],
+    return {"stage": 2, "timing_profile_source": profile["source"], "mode": mode, "target": target, "source_species_id": party["species_id"],
         "expected_item_id": required if inputs else held, "required_scarf_id": required,
         "bag_opened_before": bag_state.opened_once, "cursor_before": cursor,
         "target_position": scarf["position"] if scarf else None,
@@ -74,13 +75,14 @@ def prep_plan(snapshot, *, bag_state, cursor=1, target=None):
 
 
 def run(*, run_name, source_checkpoint, host_timeout, deadline=None,
-        keep_uncapped=False, bag_state=None, cursor=1):
+        keep_uncapped=False, bag_state=None, cursor=1, timing_profile=None):
     started = time.monotonic()
     if isinstance(host_timeout, bool) or not math.isfinite(host_timeout) or host_timeout <= 0:
         raise ValueError("The Stage 2 host timeout must be positive seconds.")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", run_name):
         raise ValueError("Use a run name containing letters, digits, underscores, or hyphens.")
     receipt_path, source, previous = accepted_source(source_checkpoint)
+    timing_profile = load_profile() if timing_profile is None else timing_profile
     bag_state = bag_state if bag_state is not None else Stage2BagState()
     work = ROOT / "tmp" / "contest" / run_name
     work.mkdir(parents=True, exist_ok=False)
@@ -136,11 +138,11 @@ def run(*, run_name, source_checkpoint, host_timeout, deadline=None,
         if initial["frame"] != previous["frame"] or snapshot["party"]["is_egg"]:
             raise RuntimeError(f"Stage 2 source mismatch: expected frame {previous['frame']}; actual {initial['frame']}; "
                                f"first-party eligible: {not snapshot['party']['is_egg']}.")
-        plan = prep_plan(snapshot, bag_state=bag_state, cursor=cursor)
+        plan = prep_plan(snapshot, bag_state=bag_state, cursor=cursor, timing_profile=timing_profile)
         result.update(target=plan["target"], mode=plan["mode"], bag_context=plan["bag_context"])
         write_json(work / "runner-setup.json", {**result, **plan, "shared_host_deadline": deadline})
         plan_path = work / "plan.lua"
-        plan_path.write_text("return " + lua_value(plan) + "\n", encoding="utf-8")
+        plan_path.write_text("return " + lua_value(plan) + "\n", encoding="utf-8", newline="\n")
         client.command("init", run_name, (work / "checkpoint-events.jsonl").as_posix(), plan_path.as_posix())
         result["speed_setup"].update(emulator.set_frame_limit(False))
         record("preparing", mode=plan["mode"], target=plan["target"], emulator_frames=plan["emulator_frames"])

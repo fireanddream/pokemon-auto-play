@@ -1,9 +1,10 @@
--- Master read-only Japanese Platinum memory snapshot (CPUJ / Lua 5.1 / DeSmuME).
+-- Master read-only regional Platinum memory snapshot (Lua 5.1 / DeSmuME).
 -- Adapted from Real96 / SexyMalasada's references/Pt_RNG_DeSmuMe_SM.lua.
 -- Direct calls read the current memory without emulator, input, or history operations.
 local source = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/")
 local directory = assert(source:match("^(.*)/"), "Cannot locate the Platinum reader folder")
 local common = dofile(directory .. "/pt_rng_common.lua")
+local platinum = dofile(directory .. "/platinum.lua")
 local M = {}
 -- Ordinary Continue prediction from the supplied Platinum reference.
 M.load_delay_offset = 21
@@ -12,11 +13,6 @@ local array_metatable = {__json_array = true}
 local header_address, rtc_address = 0x02FFFE0C, 0x023FFDE8
 local party_stride, box_stride, record_size = 0xEC, 0xFF0, 0x88
 local roamer_memory_slots = {0, 1, 3, 4, 5}
-local fixed_addresses = {
-    mt_index = 0x020FFC28, data_pointer = 0x0210112C, delay = 0x021BEAA8,
-    rng = 0x021BEF14, mt_state = 0x021BEF18, trainer_pointer = 0x021BFB94,
-    battle_temp_rng = 0x027E3634,
-}
 local data_offsets = {
     party_count = 0xD090, party = 0xD094, weather = 0xE2DA, bike = 0xE304,
     roamers = 0x14FE8, flute = 0x15069, current_box = 0x19F20, boxes = 0x19F24,
@@ -58,7 +54,7 @@ function M.limitations()
         {code = "menu_selection_only", message = "Selection bytes do not establish a menu or game phase."},
         {code = "raw_encounter_fields_only", message = "Tile, cooldown, bike, weather and flute values do not predict the next encounter."},
         {code = "rtc_field_ranges_only", message = "BCD and numeric range checks do not validate the full calendar date."},
-        {code = "profile_live_unverified", message = "The CPUJ layout is adapted from the supplied Platinum reference; native verification is pending."},
+        {code = "profile_live_unverified", message = "Regional layouts are adapted from the Platinum references; native verification is required for the selected game and fields."},
     })
 end
 
@@ -153,26 +149,25 @@ function M.new(memory_api, options)
             bytes[index + 1] = string.char(byte)
             printable = printable and byte >= 32 and byte <= 126
         end
-        local supported = header == 0x4A555043
+        local code = printable and table.concat(bytes) or "Unknown"
+        local supported = platinum.supported(code)
         return {
-            code = printable and table.concat(bytes) or "Unknown", header = string.format("%08X", header),
-            version = supported and "Platinum" or "Unknown", language = supported and "JPN" or "Unknown",
-            supported = supported, required_code = "CPUJ",
+            code = code, header = string.format("%08X", header),
+            version = supported and "Platinum" or "Unknown", language = supported and platinum.game(code).language or "Unknown",
+            supported = supported, tested = code == "CPUJ", required_code = "CPU",
             identity_source = options.game_code and "emulator_rom_header" or "memory_header",
             memory_header = options.game_code and string.format("%08X", memory_header) or nil,
-            profile_source = "references/Pt_RNG_DeSmuMe_SM.lua",
+            profile_source = "lua/platinum.lua",
         }
     end
 
     local function profile(game)
-        assert(game.supported, "Japanese Platinum (CPUJ) required; observed " .. game.code)
-        local addresses = {}
-        for name, address in pairs(fixed_addresses) do addresses[name] = address end
-        return addresses
+        assert(game.supported, "Pokemon Platinum is required; observed " .. game.code)
+        return platinum.profile(game.code)
     end
 
     local function context(game)
-        local addresses = profile(game)
+        local addresses, regional_offset = profile(game)
         local data_base, trainer_base = read32(addresses.data_pointer), read32(addresses.trainer_pointer)
         local data_size = data_offsets.opponents + party_stride + record_size
         local pointers = {
@@ -180,7 +175,9 @@ function M.new(memory_api, options)
             trainer = {address = addresses.trainer_pointer, value = trainer_base, in_range = ram_span(trainer_base, 0x1296, 4)},
         }
         if pointers.data.in_range then
-            for name, offset in pairs(data_offsets) do addresses[name] = data_base + offset end
+            for name, offset in pairs(data_offsets) do
+                addresses[name] = data_base + offset + (offset >= 0x2E834 and regional_offset or 0)
+            end
         end
         if pointers.trainer.in_range then
             addresses.trainer_ids, addresses.player_map = trainer_base + 0x8C, trainer_base + 0x1294

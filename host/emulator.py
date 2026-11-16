@@ -69,8 +69,10 @@ class DeSmuME:
 
     def configuration(self) -> configparser.ConfigParser:
         settings = configparser.ConfigParser(interpolation=None, strict=False)
-        with (self.controller.EMULATOR / "desmume.ini").open(encoding="utf-8-sig") as stream:
-            settings.read_file(stream)
+        path = self.controller.EMULATOR / "desmume.ini"
+        if path.is_file():
+            with path.open(encoding="utf-8-sig") as stream:
+                settings.read_file(stream)
         return settings
 
     def restore_normal_speed(self, *, frame_limit: bool = True) -> dict:
@@ -105,7 +107,7 @@ class DeSmuME:
         deadline = time.monotonic() + 5 if getattr(self.controller, "timeouts_enabled", True) else None
         while self.configuration().getint("Video", "FPS Scaler Index", fallback=-1) != 5:
             if deadline is not None and time.monotonic() >= deadline:
-                raise RuntimeError("The emulator did not confirm the 100% speed setting.")
+                raise TimeoutError("timeout")
             time.sleep(0.05)
         limited = self.set_frame_limit(frame_limit)
         return {**limited, "speed_percent": 100, "fast_forward": False}

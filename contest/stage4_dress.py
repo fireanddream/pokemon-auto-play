@@ -19,8 +19,8 @@ import time
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from contest.dance_master import HALF_FRAMES, lua_value
-from contest.dance_timings import POINTER_CALIBRATION_FRAMES, calibrated_timing, pointer_calibration
+from contest.dance_master import lua_value
+from contest.dance_timings import calibrated_timing, fixed_timing, pointer_calibration
 from contest.pt_dance_read import native_top, read_pointer, read_progress
 from contest.runtime import ROM, TimedController, TimedSlots, setup_speed, finish_speed
 from contest.stage3_enter import accepted_source
@@ -28,35 +28,49 @@ from host.checkpoints import CheckpointClient, CheckpointStopped, write_json
 from host.controller import ControllerConfig
 from host.emulator import DeSmuME
 from host.paths import ROOT, project_path
-from contest.inputs import MASH_HOLD_FRAMES, MASH_RELEASE_FRAMES, whole
+from contest.inputs import whole
+from contest.timing_profiles import FRAME_RATE, load_profile, section, setting
 
 
 HERE = Path(__file__).resolve().parent
 INPUT_SLOT, OUTPUT_SLOT = 10, 4
-FRAME_RATE = 67027965 / 1120380
-TRANSITION_SECONDS = 40
-POLL_SECONDS = 1
-AUTO_SECONDS = 50
-DRESS_GRID = 6
-PICKUP_FRAMES, DRAG_FRAMES, DRAG_RELEASE_FRAMES = 4, 12, 5
-PAGE_WAIT_FRAMES = 30
-ENTRY_RENDER_FRAMES = 10
+_DRESS = section(None, "stage4_dress_up")
+TRANSITION_SECONDS = _DRESS["dance_transition_a_mash_game_seconds"]
+POLL_SECONDS = _DRESS["dance_entry_poll_game_seconds"]
+AUTO_SECONDS = _DRESS["accessory_budget_game_seconds"]
+DRESS_GRID = 8
+PICKUP_FRAMES = _DRESS["accessory_pickup_hold_frames"]
+DRAG_FRAMES = _DRESS["accessory_drag_frames"]
+DRAG_RELEASE_FRAMES = _DRESS["accessory_release_frames"]
+PAGE_WAIT_FRAMES = _DRESS["page_render_wait_frames"]
+ENTRY_RENDER_FRAMES = _DRESS["loaded_entry_render_frames"]
 INITIAL_PAGE_TAPS = (0, 7)
+PAGE_FLIP_LIMIT = 14
 
 
 class Stage4Controller(TimedController):
     def remaining(self):
         if self.live_deadline is not None and time.monotonic() >= self.live_deadline:
-            raise TimeoutError("The Stage 4 host deadline expired.")
+            raise TimeoutError("timeout")
         return super().remaining()
 
 
 def dress_plan(*, host_timeout,
-                transition_seconds=TRANSITION_SECONDS,
-                stylus_x=230, stylus_y=173, stylus_hold_frames=2, stylus_release_frames=1,
-                from_stage3=False, dress_grid=DRESS_GRID, dress_seconds=AUTO_SECONDS,
-                pickup_frames=PICKUP_FRAMES, drag_frames=DRAG_FRAMES,
-                drag_release_frames=DRAG_RELEASE_FRAMES, page_wait_frames=PAGE_WAIT_FRAMES):
+                transition_seconds=None,
+                stylus_x=230, stylus_y=173, stylus_hold_frames=None, stylus_release_frames=None,
+                from_stage3=False, dress_grid=DRESS_GRID, dress_seconds=None,
+                pickup_frames=None, drag_frames=None,
+                drag_release_frames=None, page_wait_frames=None, timing_profile=None):
+    profile = load_profile() if timing_profile is None else timing_profile
+    values = section(profile, "stage4_dress_up")
+    transition_seconds = setting(transition_seconds, values, "dance_transition_a_mash_game_seconds")
+    stylus_hold_frames = setting(stylus_hold_frames, values, "finish_tap_hold_frames")
+    stylus_release_frames = setting(stylus_release_frames, values, "finish_tap_release_frames")
+    dress_seconds = setting(dress_seconds, values, "accessory_budget_game_seconds")
+    pickup_frames = setting(pickup_frames, values, "accessory_pickup_hold_frames")
+    drag_frames = setting(drag_frames, values, "accessory_drag_frames")
+    drag_release_frames = setting(drag_release_frames, values, "accessory_release_frames")
+    page_wait_frames = setting(page_wait_frames, values, "page_render_wait_frames")
     for value, label in ((host_timeout, "host timeout"), (transition_seconds, "A-mashing duration")):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"The {label} must be positive seconds.")
@@ -69,17 +83,17 @@ def dress_plan(*, host_timeout,
     if not isinstance(from_stage3, bool):
         raise ValueError("from_stage3 must be a boolean.")
     whole(dress_grid, 1, "Dress-up grid size")
-    if dress_grid not in (6, 7):
-        raise ValueError("The accessory grid must be 6 by 6 or 7 by 7.")
+    if dress_grid not in (6, 7, 8):
+        raise ValueError("The accessory grid must be 6 by 6, 7 by 7, or 8 by 8.")
     if isinstance(dress_seconds, bool) or not math.isfinite(dress_seconds) or dress_seconds <= 0:
         raise ValueError("The automatic dress-up duration must be positive game seconds.")
     for value, label in ((pickup_frames, "Accessory pickup frames"), (drag_frames, "Accessory drag frames"),
                          (drag_release_frames, "Accessory release frames")):
         whole(value, 1, label)
     whole(page_wait_frames, 0, "Accessory page render frames")
-    render_frames = 0 if from_stage3 else ENTRY_RENDER_FRAMES
+    render_frames = 0 if from_stage3 else values["loaded_entry_render_frames"]
     dress_frames = round(dress_seconds * FRAME_RATE)
-    initial_page_frames = 2 + 1 + page_wait_frames
+    initial_page_frames = values["page_tap_hold_frames"] + values["page_tap_release_frames"] + page_wait_frames
     if dress_frames < render_frames + INITIAL_PAGE_TAPS[1] * initial_page_frames + drag_release_frames:
         raise ValueError("The dressing window must cover entry rendering, initial page navigation, and the released-input tail.")
     automatic = {"enabled": True, "game_seconds": dress_seconds, "budget_frames": dress_frames,
@@ -94,11 +108,13 @@ def dress_plan(*, host_timeout,
         "motion": {"pickup_frames": pickup_frames, "drag_frames": drag_frames,
                    "release_frames": drag_release_frames,
                    "cycle_frames": pickup_frames + drag_frames + drag_release_frames},
-        "next_page": {"x": 66, "y": 160, "hold_frames": 2, "release_frames": 1,
-                       "wait_frames": page_wait_frames},
+        "next_page": {"x": 66, "y": 160, "hold_frames": values["page_tap_hold_frames"], "release_frames": values["page_tap_release_frames"],
+                        "wait_frames": page_wait_frames},
+        "page_flip_limit": PAGE_FLIP_LIMIT,
         "initial_navigation": {"tap_range": list(INITIAL_PAGE_TAPS), "selection": "fresh_random_integer_per_entry",
             "frames_per_tap": initial_page_frames, "maximum_frames": INITIAL_PAGE_TAPS[1] * initial_page_frames,
-            "ordering": "all_initial_taps_before_first_accessory_capture_or_drag", "counts_toward_budget": True},
+            "ordering": "all_initial_taps_before_first_accessory_capture_or_drag", "counts_toward_budget": True,
+            "counts_toward_page_flip_limit": False},
         "full_checks": {"Normal": {"limit": 5, "x": 118, "y": 110},
                         "Super": {"limit": 10, "x": 208, "y": 110},
                         "Hyper": {"limit": 15, "x": 118, "y": 136,
@@ -106,22 +122,22 @@ def dress_plan(*, host_timeout,
                         "Master": {"limit": 20, "x": 208, "y": 128}},
         "indicator_rgb": {"pearl": [8, 189, 239], "heart": [231, 0, 115]},
         "scan_policy": "one center sample per cell, once per page, from one fresh paused framebuffer",
-        "deadline_policy": "count emulator frames from Stage 3; Finish immediately when full, otherwise at the frame-budget deadline",
+        "deadline_policy": f"count emulator frames from Stage 3; Finish when full or after {PAGE_FLIP_LIMIT} collection page flips, otherwise at the frame-budget deadline",
         "drag_success_checks": False}
     mash_frames = round(transition_seconds * FRAME_RATE)
     if mash_frames < 1:
         raise ValueError("The A-mashing duration must cover at least one emulator frame.")
-    return {"stage": 4, "host_timeout_seconds": host_timeout,
+    return {"stage": 4, "timing_profile_source": profile["source"], "host_timeout_seconds": host_timeout,
             "entry_mode": "stage3_handoff" if from_stage3 else "load_stage3_checkpoint",
             "entry_render_frames": render_frames, "automatic_dressing": automatic,
             "dressing_speed_percent": 100, "accelerated_frame_limit": False,
             "timing": {"transition_game_seconds": transition_seconds, "mash_frames": mash_frames,
-                       "mash_hold_frames": MASH_HOLD_FRAMES, "mash_release_frames": MASH_RELEASE_FRAMES,
-                       "poll_game_seconds": POLL_SECONDS, "frame_rate": FRAME_RATE,
+                       "mash_hold_frames": values["transition_mash_hold_frames"], "mash_release_frames": values["transition_mash_release_frames"],
+                       "poll_game_seconds": values["dance_entry_poll_game_seconds"], "frame_rate": FRAME_RATE,
                        "frame_conversion": "nearest frame at 67027965 / 1120380 frames per second"},
             "stylus": {"x": stylus_x, "y": stylus_y, "hold_frames": stylus_hold_frames,
                        "release_frames": stylus_release_frames, "button": "Finish"},
-            "dance": 1, "ideal_demo_frame_range": [0, HALF_FRAMES // 2],
+             "dance": 1, "ideal_demo_frame_range": [0, fixed_timing("Cool", "Master", timing_profile=profile)["response_frames"] // 2],
             "dance_check": {"tip_x": 8, "tip_rows": [155, 156, 157, 158],
                             "source": "fresh_zero_frame_left_tip_pixels"},
             "checkpoint_slot": OUTPUT_SLOT, "attempts": 1,
@@ -183,10 +199,10 @@ def stacked_gd(path):
     return Image.merge("RGB", channels[1:])
 
 
-def pointer_timing(image, *, rank_timing=None):
+def pointer_timing(image, *, rank_timing=None, timing_profile=None):
     pointer = read_pointer(native_top(image))
     progress = read_progress({"status": "unreadable", "position_bounds": None, "first_empty_x": None}, pointer,
-        frames_per_pixel=rank_timing["frames_per_pixel"] if rank_timing else 9 / 5)
+        frames_per_pixel=(rank_timing or fixed_timing("Cool", "Master", timing_profile=timing_profile))["frames_per_pixel"])
     return {"source": "pt_dance_read_jigglypuff_pixels", "pointer": pointer, "progress": progress,
             "memory_proven": False}
 
@@ -195,7 +211,7 @@ def place_accessories(emulator, client, plan, work, source_frame, initial_page_t
     """Shared automatic section; its caller supplies save ownership and speed policy."""
     controller = emulator.controller
     automatic, pages = plan["automatic_dressing"], []
-    summary = {key: automatic[key] for key in ("enabled", "grid_size", "game_seconds", "budget_frames", "motion", "speed_percent")}
+    summary = {key: automatic[key] for key in ("enabled", "grid_size", "game_seconds", "budget_frames", "motion", "speed_percent", "page_flip_limit")}
     pages_path = work / "dress-pages.json"
     summary["pages_manifest"] = str(pages_path)
     navigation = {"chosen_taps": initial_page_taps, "executed_taps": 0, "executed_frames": 0,
@@ -234,7 +250,8 @@ def place_accessories(emulator, client, plan, work, source_frame, initial_page_t
         summary.update({key: value for key, value in progress.items() if key != "page"})
         save_pages()
         record("dress_page_check", page=page["index"], frame=page["frame"], full=page["full"],
-               readable=page["readable"], queued_drags=len(page["items"]), remaining_emulator_frames=progress["remaining_frames"])
+               readable=page["readable"], queued_drags=len(page["items"]), remaining_emulator_frames=progress["remaining_frames"],
+               page_flips=progress["collection_page_taps"])
         accepted = acknowledge(pending)
         branch = accepted["checkpoint"]["branch"]
         item.update(checkpoint=accepted["host_receipt"], branch=branch)
@@ -262,7 +279,21 @@ def place_accessories(emulator, client, plan, work, source_frame, initial_page_t
                     or progress.get("complete") is not True):
                 raise RuntimeError("The dressing window did not end at its exact counted deadline.")
             record("dress_countdown_complete", frame=progress["end_frame"], emulator_frames=progress["elapsed_frames"],
-                   attempted_drags=progress["attempted_drags"], completed_drag_inputs=progress["completed_drag_inputs"])
+                    attempted_drags=progress["attempted_drags"], completed_drag_inputs=progress["completed_drag_inputs"])
+            break
+        if inputs.get("stop_reason") == "dress_page_flip_limit_reached":
+            if (progress.get("complete") is not True or progress.get("page_flip_limit_reached") is not True
+                    or progress["end_reason"] != "page_flip_limit" or progress["start_frame"] != source_frame
+                    or progress["end_frame"] != inputs["command_end_frame"]
+                    or progress["end_frame"] != source_frame + progress["elapsed_frames"]
+                    or not 0 <= progress["elapsed_frames"] < automatic["budget_frames"]
+                    or progress["collection_page_taps"] != automatic["page_flip_limit"]
+                    or progress["page_taps"] != navigation["executed_taps"] + progress["collection_page_taps"]
+                    or progress["last_input"]["executed_frames"] != progress["last_input"]["planned_frames"]):
+                raise RuntimeError("The collection page-flip limit did not authorize an immediate Finish.")
+            record("dress_page_flip_limit", frame=progress["end_frame"], page_flips=progress["collection_page_taps"],
+                   initial_page_flips=navigation["executed_taps"], elapsed_emulator_frames=progress["elapsed_frames"],
+                   finish="immediate")
             break
         if inputs.get("stop_reason") != "dress_page_complete":
             raise RuntimeError("The accessory page input section did not complete.")
@@ -270,13 +301,15 @@ def place_accessories(emulator, client, plan, work, source_frame, initial_page_t
     write_json(work / "stylus-result.json", touch)
     if (touch.get("stop_reason") != "finish_tap_complete" or touch["command_start_frame"] != summary["end_frame"]
             or touch["command_end_frame"] != summary["end_frame"] + plan["stylus"]["hold_frames"] + plan["stylus"]["release_frames"]):
-        raise RuntimeError("The Finish tap must immediately follow the full indicator or dressing deadline.")
+        raise RuntimeError("The Finish tap must immediately follow the dressing stop.")
     return summary
 
 
-def locate_dance_entry(emulator, client, plan, work, *, record, rank_timing=None):
+def locate_dance_entry(emulator, client, plan, work, *, record, rank_timing=None, timing_profile=None):
     """Find the green entry and complete any configured counted pointer calibration."""
     controller = emulator.controller
+    motion = rank_timing or fixed_timing("Cool", "Master", timing_profile=timing_profile)
+    poll_seconds = plan["timing"]["poll_game_seconds"]
     record("transition", game_seconds=plan["timing"]["transition_game_seconds"], emulator_frames=plan["timing"]["mash_frames"])
     inputs = emulator.command("dress-transition", timeout=None, deadline=controller.live_deadline)
     write_json(work / "input-result.json", inputs)
@@ -286,25 +319,26 @@ def locate_dance_entry(emulator, client, plan, work, *, record, rank_timing=None
     while True:
         controller.remaining()
         poll += 1
-        target_wait_frames = round(poll * POLL_SECONDS * FRAME_RATE)
+        target_wait_frames = round(poll * poll_seconds * FRAME_RATE)
         advance = emulator.command("observe-frames", target_wait_frames - wait_frames, timeout=None, deadline=controller.live_deadline)
         if advance.get("stop_reason") != "observation_interval_complete":
-            raise RuntimeError("The one-second observation interval did not complete.")
+            raise RuntimeError("The configured observation interval did not complete.")
         wait_frames = target_wait_frames
         checked = client.command("check-dance")
         tip = checked["observation"]["tip"]
         checks.append({"poll": poll, "frame": checked["frame"], "epoch": checked["epoch"],
             "wait_emulator_frames": wait_frames, "wait_game_seconds": wait_frames / FRAME_RATE, "tip": tip})
-        write_json(work / "dance-checks.json", {"interval_game_seconds": POLL_SECONDS, "checks": checks})
+        write_json(work / "dance-checks.json", {"interval_game_seconds": poll_seconds, "checks": checks})
         record("dance_check", poll=poll, frame=checked["frame"], green=tip["green"])
         if tip["green"]:
             break
     capture = client.command("capture")
-    reading = pointer_timing(stacked_gd(work / "stage4.gd"), rank_timing=rank_timing)
+    reading = pointer_timing(stacked_gd(work / "stage4.gd"), rank_timing=rank_timing, timing_profile=timing_profile)
     calibration = None
     if plan.get("pointer_calibration_frames"):
-        if plan["pointer_calibration_frames"] != POINTER_CALIBRATION_FRAMES or rank_timing is None:
-            raise ValueError("Per-contest calibration requires the selected rank and exactly 60 emulator frames.")
+        calibration_frames = plan["pointer_calibration_frames"]
+        if rank_timing is None:
+            raise ValueError("Per-contest calibration requires the selected category/rank metrics.")
 
         def sample(captured, reading, path):
             pointer = reading["pointer"]
@@ -319,21 +353,22 @@ def locate_dance_entry(emulator, client, plan, work, *, record, rank_timing=None
         start = sample(capture, reading, start_path)
         write_json(work / "pointer-calibration-start.json", start)
         start_context = work / "pointer-calibration-start.lua"
-        start_context.write_text("return " + lua_value(start) + "\n", encoding="utf-8")
+        start_context.write_text("return " + lua_value(start) + "\n", encoding="utf-8", newline="\n")
         client.command("calibration-start", start_context.as_posix())
         advance = emulator.command("calibrate-pointer", timeout=None, deadline=controller.live_deadline)
         write_json(work / "pointer-calibration-inputs.json", advance)
         if (advance.get("stop_reason") != "pointer_calibration_complete"
                 or advance["command_start_frame"] != start["frame"]
-                or advance["command_end_frame"] != start["frame"] + POINTER_CALIBRATION_FRAMES):
-            raise RuntimeError("The input-free pointer calibration did not complete its exact 60-frame window.")
+                or advance["command_end_frame"] != start["frame"] + calibration_frames):
+            raise RuntimeError("The input-free pointer calibration did not complete its configured frame window.")
         capture = client.command("capture")
         image = stacked_gd(work / "stage4.gd")
         reading = pointer_timing(image, rank_timing=rank_timing)
         end = sample(capture, reading, work / "stage4.gd")
         write_json(work / "pointer-calibration-end.json", end)
-        calibration = pointer_calibration(start, end)
-        rank_timing = calibrated_timing(rank_timing["rank"], calibration)
+        calibration = pointer_calibration(start, end, calibration_frames=calibration_frames)
+        rank_timing = calibrated_timing(rank_timing["rank"], calibration,
+            category=rank_timing.get("category", "Cool"), timing_profile=timing_profile)
         reading = pointer_timing(image, rank_timing=rank_timing)
         write_json(work / "pointer-calibration.json", {**calibration, "rank_timing": rank_timing})
         record("pointer_calibrated", emulator_frames=calibration["emulator_frames"],
@@ -346,7 +381,7 @@ def locate_dance_entry(emulator, client, plan, work, *, record, rank_timing=None
         "transition_emulator_frames": capture["observation"]["transition"]["total_frames"],
         "dance_entry_poll_frames": wait_frames,
         "no_input_wait_frames": wait_frames + (calibration["emulator_frames"] if calibration else 0)}
-    half_frames = rank_timing["visible_half_frames"] if rank_timing else HALF_FRAMES
+    half_frames = (rank_timing or motion)["visible_half_frames"]
     progress, bounds = reading["progress"], reading["progress"]["frame_range"]
     evidence = {"frame": capture["frame"], "epoch": capture["epoch"], "dance": 1,
         "source": "fresh_zero_frame_left_tip_pixels", "path": (work / "stage4.gd").as_posix(),
@@ -355,7 +390,7 @@ def locate_dance_entry(emulator, client, plan, work, *, record, rank_timing=None
         "pointer_calibration": calibration}
     write_json(work / "endpoint-reading.json", {**evidence, "reading": reading})
     endpoint_path = work / "endpoint.lua"
-    endpoint_path.write_text("return " + lua_value(evidence) + "\n", encoding="utf-8")
+    endpoint_path.write_text("return " + lua_value(evidence) + "\n", encoding="utf-8", newline="\n")
     anchor = {"source": reading["source"], "exact": False, "demo_start_frame": None,
         "demo_start_frame_range": None, "response_start_frame": None, "response_start_frame_range": None}
     if rank_timing:
@@ -378,6 +413,8 @@ def locate_dance_entry(emulator, client, plan, work, *, record, rank_timing=None
 
 def run(*, run_name, source_checkpoint, deadline=None, keep_uncapped=False, from_stage3=False, **options):
     started = time.monotonic()
+    if options.get("timing_profile") is None:
+        options["timing_profile"] = load_profile()
     plan = dress_plan(from_stage3=from_stage3, **options)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", run_name):
         raise ValueError("Use a run name containing letters, digits, underscores, or hyphens.")
@@ -396,9 +433,10 @@ def run(*, run_name, source_checkpoint, deadline=None, keep_uncapped=False, from
     write_json(work / "runner-setup.json", setup)
     attachment = work / ("handoff-config.lua" if from_stage3 else "attach.lua")
     if from_stage3:
-        attachment.write_text("return " + lua_value(config) + "\n", encoding="utf-8")
+        attachment.write_text("return " + lua_value(config) + "\n", encoding="utf-8", newline="\n")
     else:
-        attachment.write_text(f"assert(loadfile({lua_value((HERE / 'stage4_dress.lua').as_posix())}))({lua_value(config)})\n", encoding="utf-8")
+        attachment.write_text(f"assert(loadfile({lua_value((HERE / 'stage4_dress.lua').as_posix())}))({lua_value(config)})\n",
+            encoding="utf-8", newline="\n")
     result = {"outcome": "fail", "stage": 4, "run_id": run_name, "work_dir": str(work),
                "source_context": source_context, "source_kind": setup["source_kind"],
                 "host_timeout_seconds": plan["host_timeout_seconds"], "initial_page_taps": config["initial_page_taps"],
@@ -466,7 +504,7 @@ def run(*, run_name, source_checkpoint, deadline=None, keep_uncapped=False, from
             record("dress_render_preparation", emulator_frames=plan["entry_render_frames"], inputs="released")
             render = emulator.command("prepare-dress-render", timeout=None, deadline=controller.live_deadline)
             if render.get("stop_reason") != "dress_render_preparation_complete":
-                raise RuntimeError("The ten-frame Stage 3 load render advance did not complete.")
+                raise RuntimeError("The configured Stage 3 load render advance did not complete.")
             prepared = client.command("dress-render-prepared")
             write_json(work / "render-preparation.json", {"entry_mode": plan["entry_mode"],
                 "emulator_frames": plan["entry_render_frames"], "command": render, "confirmation": prepared,
@@ -480,7 +518,10 @@ def run(*, run_name, source_checkpoint, deadline=None, keep_uncapped=False, from
         result["automatic_dressing"] = place_accessories(emulator, client, plan, work, previous["frame"],
             config["initial_page_taps"], acknowledge=acknowledge_page, record=record)
         result["transition_speed_setup"] = emulator.set_frame_limit(False)
-        landing, pending = locate_dance_entry(emulator, client, plan, work, record=record)
+        target = config["target"] or {"category": "Cool", "rank": "Master"}
+        timing = fixed_timing(target["category"], target["rank"], timing_profile=options["timing_profile"])
+        landing, pending = locate_dance_entry(emulator, client, plan, work, record=record,
+            rank_timing=timing, timing_profile=options["timing_profile"])
         result.update(landing)
         touched.add(OUTPUT_SLOT)
         accepted = client.acknowledge(pending, slot=OUTPUT_SLOT,
@@ -492,7 +533,8 @@ def run(*, run_name, source_checkpoint, deadline=None, keep_uncapped=False, from
                    "source_state": accepted["host_savestate"]["retained_path"], "source_frame": landing["frame"],
                    "source_epoch": landing["landing"]["epoch"], "run_id": run_name, "dance": 1, "phase": landing["landing"]["phase"],
                    "target": config["target"], "runner_result": str(work / "runner-result.json"),
-                   "demo_frames": HALF_FRAMES, "response_frames": HALF_FRAMES, "timing_anchor": landing["timing_anchor"]}
+                    "demo_frames": timing["visible_half_frames"], "response_frames": timing["response_frames"],
+                    "rank_timing": timing, "timing_anchor": landing["timing_anchor"]}
         write_json(work / "dance-handoff.json", handoff)
         result.update(outcome="pass", stage4_accepted=True, checkpoint=accepted["checkpoint"],
                       save_state=accepted["host_savestate"], dance_handoff=str(work / "dance-handoff.json"))
@@ -582,17 +624,17 @@ def main():
     parser.add_argument("--source-checkpoint")
     parser.add_argument("--host-timeout", type=float)
     parser.add_argument("--from-stage3", action="store_true", help="Use the current accepted paused Stage 3 handoff without loading.")
-    parser.add_argument("--dress-grid", type=int, choices=(6, 7), default=DRESS_GRID)
-    parser.add_argument("--dress-seconds", type=float, default=AUTO_SECONDS, help="Automatic dressing window in emulator game seconds.")
-    parser.add_argument("--pickup-frames", type=int, default=PICKUP_FRAMES)
-    parser.add_argument("--drag-frames", type=int, default=DRAG_FRAMES)
-    parser.add_argument("--drag-release-frames", type=int, default=DRAG_RELEASE_FRAMES)
-    parser.add_argument("--page-wait-frames", type=int, default=PAGE_WAIT_FRAMES)
-    parser.add_argument("--transition-seconds", type=float, default=TRANSITION_SECONDS)
+    parser.add_argument("--dress-grid", type=int, choices=(6, 7, 8), default=DRESS_GRID)
+    parser.add_argument("--dress-seconds", type=float, help="Override profile dressing game seconds.")
+    parser.add_argument("--pickup-frames", type=int)
+    parser.add_argument("--drag-frames", type=int)
+    parser.add_argument("--drag-release-frames", type=int)
+    parser.add_argument("--page-wait-frames", type=int)
+    parser.add_argument("--transition-seconds", type=float)
     parser.add_argument("--stylus-x", type=int, default=230)
     parser.add_argument("--stylus-y", type=int, default=173)
-    parser.add_argument("--stylus-hold-frames", type=int, default=2)
-    parser.add_argument("--stylus-release-frames", type=int, default=1)
+    parser.add_argument("--stylus-hold-frames", type=int)
+    parser.add_argument("--stylus-release-frames", type=int)
     args = parser.parse_args()
     if args.check:
         check()

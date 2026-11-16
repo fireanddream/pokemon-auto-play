@@ -65,7 +65,7 @@ def start_recording(controller, when: datetime, movie: Path, sram: Path | None) 
         dialog = 0
         time.sleep(0.05)
     if not dialog:
-        raise RuntimeError("Record movie dialog did not become ready.")
+        raise TimeoutError("timeout")
 
     if controller.send(controls[981], 0xF0) == 0:
         controller.send(controls[981], 0xF5)  # Power-on rather than current state.
@@ -87,4 +87,4 @@ def start_recording(controller, when: datetime, movie: Path, sram: Path | None) 
         if not controller.USER32.IsWindow(dialog):
             return
         time.sleep(0.05)
-    raise RuntimeError("Record movie dialog did not close.")
+    raise TimeoutError("timeout")

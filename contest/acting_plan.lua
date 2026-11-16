@@ -12,21 +12,33 @@ end
 local function choose_move(config, number, move_cursor, stars, move_categories)
     local fallback = config.rounds[number].move
     local last_move = number > 1 and move_cursor or nil
+    local blocked, available = {}, {}
+    for _, slot in ipairs(config.unavailable_move_slots or {}) do
+        move_slot(slot)
+        blocked[slot] = true
+    end
+    for slot = 1, 4 do if not blocked[slot] then available[#available + 1] = slot end end
+    assert(#available >= 2, "The first Pokemon needs at least two available moves for Acting")
     move_slot(fallback)
     if move_categories then
         assert(type(move_categories) == "table" and #move_categories == 4,
             "Supply all four move categories from the Acting-entry capture")
         assert(config.target and categories[config.target.category], "A supported contest category is required")
-        for _, category in ipairs(move_categories) do
-            assert(categories[category], "Every move slot needs a recognized contest category")
+        for slot, category in ipairs(move_categories) do
+            assert(blocked[slot] or categories[category], "Every available move needs a recognized contest category")
         end
         if stars.counts[stars.selected_judge] == 4 then
             for slot, category in ipairs(move_categories) do
-                if slot ~= last_move and category == config.target.category then return slot, true end
+                if not blocked[slot] and slot ~= last_move and category == config.target.category then return slot, true end
             end
         end
     end
-    if fallback == last_move then fallback = fallback == 1 and 2 or 1 end
+    if blocked[fallback] or fallback == last_move then
+        fallback = available[(number - 1) % 2 + 1]
+        if fallback == last_move then
+            for _, slot in ipairs(available) do if slot ~= last_move then fallback = slot; break end end
+        end
+    end
     return fallback, false
 end
 
@@ -63,14 +75,19 @@ function M.round(config, number, move_cursor, judge_cursor, frame, stars, move_c
         steps[#steps + 1] = "wait:" .. tail
     end
     local menu_frames = #menu * (timing.hold_frames + timing.release_frames)
+    local total = menu_frames + mash
+    if number == 4 then
+        steps[#steps + 1] = "X:" .. timing.hold_frames .. ":" .. timing.release_frames
+        total = total + timing.hold_frames + timing.release_frames
+    end
     return {round = number, move = move, judge = judge, previous_move = move_cursor,
         fallback_move = config.rounds[number].move, matching_category_override = override,
         move_category = move_categories and move_categories[move] or nil,
         move_policy = override and "four_star_category_match"
             or move ~= config.rounds[number].move and "alternate_fallback" or "round_1_2_1_2",
         previous_judge = judge_cursor, menu_buttons = menu, steps = steps,
-        start_frame = frame, end_frame = frame + menu_frames + mash,
-        menu_frames = menu_frames, mash_frames = mash, total_frames = menu_frames + mash,
+        start_frame = frame, end_frame = frame + total,
+        menu_frames = menu_frames, mash_frames = mash, total_frames = total,
         judge_confirmed_before_mashing = true}
 end
 

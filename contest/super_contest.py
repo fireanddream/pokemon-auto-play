@@ -1,4 +1,4 @@
-"""Collect all first-party CPUJ contest ribbons under one shared host deadline."""
+"""Collect all first-party Platinum contest ribbons under one shared host deadline."""
 
 from __future__ import annotations
 
@@ -18,11 +18,16 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from contest import rank_dance, sections, stage1_load, stage2_prep, stage3_enter, stage4_dress, stage5_dance, stage6_act
-from contest.artifacts import OwnedArtifacts, cleanup_stale, inactive_runs
+from contest.artifacts import cleanup_run_folders
 from contest.dance_timings import all_fixed_timings
-from contest.runtime import ACTING_RETRY_SLOT, DIAGNOSTIC_SLOT, ContestRuntime, checkpoint_identity
+from contest.runtime import ACTING_ENTRY_SLOT, DIAGNOSTIC_SLOT, ContestRuntime, checkpoint_identity
 from host.checkpoints import write_json
 from host.paths import ROOT
+from contest.messages import ContestCallerActive, abort_message, is_timeout
+from contest.platinum import GAME_CODES, identify_rom
+from contest.runtime import ROM
+from contest.timing_profiles import check_profiles, load_profile, section, setting
+from host.paths import project_path
 
 
 HERE = Path(__file__).resolve().parent
@@ -32,27 +37,29 @@ dress_pickup_frames = stage4_dress.PICKUP_FRAMES
 dress_drag_frames = stage4_dress.DRAG_FRAMES
 dress_release_frames = stage4_dress.DRAG_RELEASE_FRAMES
 dress_page_wait_frames = stage4_dress.PAGE_WAIT_FRAMES
-debug = 0
-true_retry = 0
+debug = 1
 total_timeout_seconds = 120 * 60
 stage_timeout_seconds = 5 * 60
-acting_round_seconds = 64
-acting_final_seconds = 132
-OSD_SETTLE_SECONDS = 0
+acting_round_seconds = stage6_act.ROUND_SECONDS
+acting_final_seconds = stage6_act.FINAL_SECONDS
+OSD_SETTLE_SECONDS = section(None, "stage5_dancing")["native_overlay_settle_host_seconds"]
 STAGES = {1: stage1_load, 2: stage2_prep, 3: stage3_enter,
           4: stage4_dress, 5: stage5_dance, 6: stage6_act}
 
 
-def chain_plan(*, debug=debug, true_retry=true_retry,
-               total_timeout=total_timeout_seconds, stage_timeout=stage_timeout_seconds,
-               osd_settle_seconds=OSD_SETTLE_SECONDS, offset_frames=rank_dance.DEFAULT_OFFSET_FRAMES,
-               acting_round_seconds=acting_round_seconds, acting_final_seconds=acting_final_seconds,
-               dress_grid=dress_grid, dress_seconds=dress_seconds,
-               dress_pickup_frames=dress_pickup_frames, dress_drag_frames=dress_drag_frames,
-               dress_release_frames=dress_release_frames, dress_page_wait_frames=dress_page_wait_frames):
-    for name, value in (("debug", debug), ("true_retry", true_retry)):
-        if isinstance(value, bool) or not isinstance(value, int) or value not in (0, 1):
-            raise ValueError(f"{name} must be 0 or 1.")
+def chain_plan(*, debug=debug,
+                total_timeout=total_timeout_seconds, stage_timeout=stage_timeout_seconds,
+                osd_settle_seconds=None, offset_frames=None,
+                acting_round_seconds=None, acting_final_seconds=None,
+                dress_grid=dress_grid, dress_seconds=None,
+                dress_pickup_frames=None, dress_drag_frames=None,
+                dress_release_frames=None, dress_page_wait_frames=None, game_code="CPUJ", timing_profile=None):
+    profile = load_profile(game_code) if timing_profile is None else timing_profile
+    dance_values = section(profile, "stage5_dancing")
+    osd_settle_seconds = setting(osd_settle_seconds, dance_values, "native_overlay_settle_host_seconds")
+    offset_frames = setting(offset_frames, dance_values, "input_offset_frames")
+    if isinstance(debug, bool) or not isinstance(debug, int) or debug not in (0, 1):
+        raise ValueError("debug must be 0 or 1.")
     for name, value in (("total timeout", total_timeout), ("stage timeout", stage_timeout)):
         if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
             raise ValueError(f"The {name} must be positive finite host seconds.")
@@ -61,19 +68,21 @@ def chain_plan(*, debug=debug, true_retry=true_retry,
     if isinstance(offset_frames, bool) or not isinstance(offset_frames, int):
         raise ValueError("The dance input offset must be whole emulator frames.")
     acting = stage6_act.acting_plan(host_timeout=stage_timeout, round_seconds=acting_round_seconds,
-                                    final_seconds=acting_final_seconds, uncapped=True, source_slot=ACTING_RETRY_SLOT)
+        final_seconds=acting_final_seconds, from_stage5=True, uncapped=True, source_slot=ACTING_ENTRY_SLOT, timing_profile=profile)
     dressing = stage4_dress.dress_plan(host_timeout=stage_timeout, from_stage3=True,
         dress_grid=dress_grid, dress_seconds=dress_seconds, pickup_frames=dress_pickup_frames,
         drag_frames=dress_drag_frames, drag_release_frames=dress_release_frames,
-        page_wait_frames=dress_page_wait_frames)
+        page_wait_frames=dress_page_wait_frames, timing_profile=profile)
+    acting_round_seconds = acting["rounds"][0]["mash_game_seconds"]
+    acting_final_seconds = acting["rounds"][-1]["mash_game_seconds"]
     dressing["automatic_dressing"]["frame_limit"] = False
-    facts = {1: "Reviewed native contest-hall overworld pixels.",
+    facts = {1: "Twelve central player/receptionist pixels; one paused Options/Bag/party snapshot confirms Text Speed = Fast, HP > 0, Sheen > 0, at least two moves, and not an Egg.",
         2: "Validated first-party ribbon flags, ordered Items pocket, and required held-item result.",
-        3: "Dress-up Finish controls against the reviewed native reference.",
+        3: "All 5/10/15/20 rank-selected empty accessory slots on the native top screen; no button or text matching.",
         4: "Zero-frame Stage 3 handoff, fresh accessory grid/rank marker, counted dressing deadline, and a readable green Dance 1 demo pointer.",
         5: "Fixed category/rank metrics and cue spacing, early-targeted midpoints, non-fatal cue/input skips, one first-button feedback result, six counted responses, input-free lead dances, and the scripted B transition.",
-        6: "Counted direct-entry preparation or one input-free host second after an Acting-entry state reload, confirmed native pause, all 15 empty star slots and four move categories matched in the first capture, four fresh judge readings, overworld, and target ribbon."}
-    return {"game": "CPUJ", "debug": debug, "true_retry": true_retry,
+        6: "Profile-selected counted input-free entry frames, confirmed native pause, all 15 empty star slots and available move categories matched in the first capture, four fresh judge readings, completed contest, overworld, and target ribbon."}
+    return {"game": profile["game_code"], "timing_profile": profile, "debug": debug,
         "uncapped": True, "total_timeout_seconds": total_timeout, "stage_timeout_seconds": stage_timeout,
         "runtime": {"host_callers": 1, "lua_windows": 1, "lua_attachments": 1, "checkpoint_engines": 1,
                     "bridge": "contest/super_contest.lua", "terminal_native_cleanups": 1},
@@ -85,14 +94,13 @@ def chain_plan(*, debug=debug, true_retry=true_retry,
         "dance_pointer_calibration_frames": 0,
         "dance_observation_policy": "scheduled",
         "dance_first_feedback_policy": "warn_and_continue",
-        "dance_timings": all_fixed_timings(), "dance_rank_selection": "current accepted contest target.category and target.rank",
+        "dance_timings": all_fixed_timings(timing_profile=profile), "dance_rank_selection": "current accepted contest target.category and target.rank",
         "dance_midpoint_policy": "target x=127 with floored travel; correct early captures input-free, re-anchor at fresh midpoints, and skip unusable inputs locally",
-        "dance_feedback_policy": "check only Dance 1's first input with bounded recovery; report failure, unreadable/skipped feedback, or consecutive Good contests from the second onward and continue; non-Good results reset the streak",
+        "dance_feedback_policy": "check only Dance 1's first input with bounded recovery; recognize the Excellent bubble palette, count every other feedback outcome as Miss, warn and continue; skipped inputs remain separately accounted",
         "dance_failure_policy": "account for skipped inputs and continue through the counted response endpoints and Acting handoff",
         "dressing": dressing["automatic_dressing"], "stage4_entry_mode": dressing["entry_mode"],
         "stage4_entry_render_frames": dressing["entry_render_frames"],
         "stage4_transition": dressing["timing"],
-        "stage6_retry_render_host_seconds": acting["retry_render_host_seconds"],
         "stage6_direct_render_frames": acting["handoff_render_frames"],
         "acting_round_game_seconds": acting_round_seconds,
         "acting_final_game_seconds": acting_final_seconds,
@@ -102,22 +110,24 @@ def chain_plan(*, debug=debug, true_retry=true_retry,
         "target_selection": "first missing first-party Sinnoh contest ribbon; select the next missing ribbon after each win",
         "sections": [{"stage": stage, "callable": f"contest.sections.{sections.RUNNERS[stage].__name__}",
                       "reused_stage": str(Path(module.__file__).relative_to(ROOT)),
-                      "checkpoint_slot": ACTING_RETRY_SLOT if stage == 5 else stage if debug == 1 and stage in (2, 6) else None,
+                      "checkpoint_slot": stage if debug == 1 and stage in (2, 4, 5, 6) else None,
                       "checkpoint_facts": facts[stage]} for stage, module in STAGES.items()],
-        "ribbon_miss": {"source": "stage_6_overworld" if true_retry else f"accepted_slot_{ACTING_RETRY_SLOT}",
-                        "load_slot": None if true_retry else ACTING_RETRY_SLOT, "requires": "acknowledged_stage_6_ribbon_miss",
-                        "paired_context": "current ribbons and Bag opening/cursor" if true_retry else "target, prior ribbons, Bag opening/cursor, and Acting-entry tracking",
-                        "stages": [2, 3, 4, 5, 6] if true_retry else [6]},
+        "ribbon_miss": {"source": "stage_6_overworld", "load_slot": None,
+                        "requires": "completed_contest_and_acknowledged_stage_6_ribbon_miss",
+                        "preserve": "current ribbons, Bag opening/cursor, and initial empty-move-slot blacklist",
+                        "stages": [2, 3, 4, 5, 6]},
         "ribbon_success": {"source": "stage_6_overworld", "stages": [2, 3, 4, 5, 6],
                            "preserve": "acquired ribbons, Bag opening state, and Bag cursor"},
-        "handoff_policy": "all stages continue from the current accepted paused state through the persistent dispatcher; zero success-path loads or Lua restarts",
+        "handoff_policy": "all stages and ribbon-miss reentries continue from the current accepted paused state through the persistent dispatcher; zero quick-loads or Lua restarts",
         "checkpoint_policy": "pause, fresh zero-frame Lua checks, policy-selected state save, final log acknowledgement",
-        "save_policy": {"screen_checks": "log_only", "memory_check_slots": [2, 6] if debug == 1 else [],
-                         "required_retry_slot": ACTING_RETRY_SLOT, "temporary_slot": DIAGNOSTIC_SLOT,
+        "save_policy": {"enabled": debug == 1, "loads_enabled": False, "screen_checks": "log_only",
+                         "memory_check_slots": [2, 6] if debug == 1 else [],
+                         "handoff_slots": [4, ACTING_ENTRY_SLOT] if debug == 1 else [],
+                         "temporary_slot": DIAGNOSTIC_SLOT if debug == 1 else None,
                          "routine_dance_states": False, "diagnostic_states": debug == 1},
-        "transient_cleanup": {"hooks": ["fresh_run_startup", "every_acknowledged_ribbon_win"],
-            "ownership": "recorded runner-owned artifacts only", "references": "durable pixel points and paired context",
-            "abort_timeout": "retain current stopped evidence"},
+        "run_folder_cleanup": {"hook": "after_emulator_and_lua_ready", "parent": "tmp/contest",
+            "older_runs": "delete_all", "current_run": "retain_until_next_launch",
+            "persistent_evidence": "contest/debug"},
         "unknown_screen_policy": "abort paused with evidence for later review",
         "finish": "all 20 first-party Sinnoh contest ribbons owned, or paused abort/timeout; restore normal speed"}
 
@@ -126,52 +136,78 @@ def receipt_path(result):
     return Path(result["checkpoint_receipt"])
 
 
-def run(*, run_name, **options):
+def run(*, run_name, controller_config=None, fresh_start=False, game_code=None, **options):
     started = time.monotonic()
+    rom = controller_config.rom if controller_config is not None else ROM
+    actual_code = identify_rom(project_path(rom))["code"]
+    if game_code is not None and game_code != actual_code:
+        raise ValueError("The requested timing profile does not match the selected ROM game code.")
+    if options.get("timing_profile") is None:
+        options["timing_profile"] = load_profile(actual_code)
+    elif options["timing_profile"]["game_code"] != actual_code:
+        raise ValueError("The supplied timing profile does not match the selected ROM game code.")
     plan = chain_plan(**options)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", run_name):
         raise ValueError("Use a run name containing letters, digits, underscores, or hyphens.")
     parent = ROOT / "tmp" / "contest"
     parent.mkdir(parents=True, exist_ok=True)
     # The OS releases this one-caller lock even if its host process exits unexpectedly.
-    import msvcrt
-
     with (parent / "active-host.lock").open("a+b") as lock:
         if lock.tell() == 0:
             lock.write(b"0")
             lock.flush()
         lock.seek(0)
         try:
-            msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as error:
-            raise RuntimeError("Another contest-chain host caller is active.") from error
+            raise ContestCallerActive("Another contest script is already running. Stop the current run before starting another.") from error
         try:
-            return _run(run_name, plan, started)
+            return _run(run_name, plan, started, controller_config=controller_config, fresh_start=fresh_start)
         finally:
             lock.seek(0)
-            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            if os.name == "nt":
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
-def _run(run_name, plan, started):
+def _run(run_name, plan, started, *, controller_config=None, fresh_start=False):
     work = ROOT / "tmp" / "contest" / run_name
     if work.exists():
         raise FileExistsError("Use a fresh contest run name.")
-    runtime = ContestRuntime(run_name, work, plan, started)
-    session = runtime.confirm_ownership()
-    candidates = inactive_runs(work.parent, current_pid=os.getpid(), check=runtime.check)
+    if controller_config is not None and controller_config.mailbox_dir != (work / "mailbox").resolve():
+        raise ValueError("The main runner requires its mailbox inside the current run folder.")
+    if controller_config is None:
+        runtime = ContestRuntime(run_name, work, plan, started)
+    else:
+        from contest.runtime import TimedController
+        runtime = ContestRuntime(run_name, work, plan, started, controller=TimedController(controller_config))
+    if fresh_start:
+        runtime.validate_startup()
+        runtime.lifecycle["startup_guard"] = "active_script_lock"
+        runtime.lifecycle["closed_existing_pids"] = runtime.controller.close_existing()
+        session = None
+    else:
+        session = runtime.confirm_ownership()
     runtime.prepare_fresh_ownership(session)
-    protected = [Path(session["lua_script"])] if session and session.get("lua_script") else []
-    startup_cleanup = cleanup_stale(work.parent, current_pid=os.getpid(), protected=protected, check=runtime.check, candidates=candidates)
     work.mkdir(exist_ok=False)
     (work / "checkpoints").mkdir()
-    runtime.artifacts = OwnedArtifacts(work, run_name, os.getpid())
-    write_json(work / "startup-cleanup.json", startup_cleanup)
-    write_json(work / "run-owner.json", {"run_id": run_name, "host_pid": os.getpid(), "runtime": "pt-super-contest"})
+    (work / "mailbox").mkdir()
+    owner = {"run_id": run_name, "host_pid": os.getpid(), "runtime": "pt-super-contest", "temporary_run": True}
+    write_json(work / "run-owner.json", owner)
     result = {"outcome": "fail", "run_id": run_name, "host_pid": os.getpid(), "work_dir": str(work),
         "settings": plan, "visits": [], "active_stage": None, "completed_acting_attempts": 0,
         "contest_entries": 0, "ribbon_acquired": False, "ribbons_acquired": [],
+        "consecutive_ribbon_misses": 0,
         "all_ribbons_owned": False, "owned_ribbon_count": None, "initial_owned_ribbon_count": None,
-        "cleanup_manifests": [str(work / "startup-cleanup.json")]}
+        "cleanup_manifests": []}
     write_json(work / "runner-setup.json", {**result, "whole_run_deadline": runtime.total_deadline})
     counts = Counter()
 
@@ -200,7 +236,7 @@ def _run(run_name, plan, started):
                 result["ribbons_acquired"].append({**{key: child["target"][key] for key in ("category", "rank", "ribbon_bit")},
                     "checkpoint": str(accepted)})
 
-    def visit(stage, *, retry_slot=None, **inputs):
+    def visit(stage, **inputs):
         counts[stage] += 1
         folder = runtime.begin_visit(stage, counts[stage])
         item = {"stage": stage, "visit": counts[stage], "run_id": run_name, "work_dir": str(folder),
@@ -210,8 +246,6 @@ def _run(run_name, plan, started):
         record("stage_start", stage=stage, visit=counts[stage], host_budget_seconds=item["host_budget_seconds"])
         child = None
         try:
-            if retry_slot is not None:
-                runtime.retry(retry_slot)
             child = sections.RUNNERS[stage](runtime, **inputs)
             retain_progress(child)
             item.update(outcome=child["outcome"], result_path=str(folder / "runner-result.json"), frame=child["frame"],
@@ -223,8 +257,8 @@ def _run(run_name, plan, started):
             runtime.json("runner-result.json", child)
             runtime.check()
         except (Exception, SystemExit, KeyboardInterrupt) as error:
-            item.update(outcome="timeout" if isinstance(error, TimeoutError) else "fail",
-                        error=str(error) or type(error).__name__)
+            item.update(outcome="timeout" if is_timeout(error) else "fail",
+                        error=abort_message(error, stage=stage))
             stopped = {**(child or {}), "stage": stage, "run_id": run_name, "work_dir": str(folder),
                 "outcome": item["outcome"], "error": item["error"]}
             runtime.json("runner-result.json", stopped)
@@ -232,15 +266,24 @@ def _run(run_name, plan, started):
             raise
         finally:
             item["host_elapsed_seconds"] = time.monotonic() - runtime.stage_started
-            runtime.artifacts.register_tree(folder)
         runtime.controller.live_deadline = runtime.total_deadline
         record("stage_end", stage=stage, visit=counts[stage], outcome=child["outcome"], frame=child.get("frame"))
         return child
 
     try:
         record("ownership")
-        runtime.setup()
+        if fresh_start:
+            runtime.setup(fresh_start=True)
+        else:
+            runtime.setup()
         result["emulator_pid"] = runtime.controller.session()["pid"]
+        runtime.controller.log_lua("Cleaning up previous run folders...")
+        record("startup_cleanup_start")
+        result["cleanup_manifests"].append(str(work / "startup-cleanup.json"))
+        startup_cleanup = cleanup_run_folders(work, check=runtime.check)
+        removed = len(startup_cleanup["removed_folders"])
+        runtime.controller.log_lua(f"Startup cleanup complete: removed {removed} old run folders. Starting the contest.")
+        record("startup_cleanup_complete", removed_folders=removed)
         visit(1)
         while True:
             prepared = visit(2)
@@ -254,31 +297,31 @@ def _run(run_name, plan, started):
             visit(3)
             visit(4)
             visit(5)
-            acting_retry = None
-            while True:
-                acted = visit(6, retry_slot=acting_retry, attempt=result["completed_acting_attempts"] + 1)
-                acting_retry = None
-                record("ribbon_result", acquired=acted["ribbon_acquired"], true_retry=plan["true_retry"],
+            acted = visit(6, attempt=result["completed_acting_attempts"] + 1)
+            if acted["ribbon_acquired"]:
+                result["consecutive_ribbon_misses"] = 0
+            else:
+                result["consecutive_ribbon_misses"] += 1
+            record("ribbon_result", acquired=acted["ribbon_acquired"],
+                completed_acting_attempts=result["completed_acting_attempts"],
+                consecutive_ribbon_misses=result["consecutive_ribbon_misses"],
+                owned_ribbon_count=result["owned_ribbon_count"], ribbons_acquired=len(result["ribbons_acquired"]))
+            if result["consecutive_ribbon_misses"] == 5:
+                message = (f"Contest: WARN - No ribbon earned in {result['consecutive_ribbon_misses']} consecutive contests. "
+                    "Does the first Pokemon have good contest stats and suitable moves? Retrying automatically.")
+                runtime.controller.log_lua(message)
+                record("ribbon_miss_warning", message=message, category=target["category"], rank=target["rank"],
                     completed_acting_attempts=result["completed_acting_attempts"],
-                    owned_ribbon_count=result["owned_ribbon_count"], ribbons_acquired=len(result["ribbons_acquired"]))
-                if acted["ribbon_acquired"]:
-                    write_json(work / "collection-context.json", {"source_context": checkpoint_identity(runtime.boundary["checkpoint"]),
-                        "source_checkpoint": runtime.boundary["receipt"], "save_state": runtime.boundary["save_state"],
-                        "next_target": runtime.party.get("next_target"), "party": runtime.party,
-                        "bag_context": runtime.bag_context, "ribbons_acquired": result["ribbons_acquired"]})
-                    for slot, backup in runtime.originals.items():
-                        if slot != plan["save_policy"]["temporary_slot"] and backup is not None and slot in runtime.accepted_slots:
-                            runtime.artifacts.unprotect(backup)
-                    manifest = runtime.artifacts.cleanup(f"win-{len(result['ribbons_acquired']):02d}", check=runtime.check)
-                    result["cleanup_manifests"].append(str(manifest))
-                    record("ribbon_cleanup", manifest=str(manifest), next_target=runtime.party.get("next_target"))
-                    break
-                if plan["true_retry"]:
-                    record("retry_contest", source="stage_6_overworld", source_checkpoint=result["last_checkpoint"],
-                        stages=[2, 3, 4, 5, 6], category=target["category"], rank=target["rank"], bag_context=dict(runtime.bag_context))
-                    break
-                acting_retry = ACTING_RETRY_SLOT
-                record("retry_acting", source_slot=ACTING_RETRY_SLOT, stages=[6])
+                    consecutive_ribbon_misses=result["consecutive_ribbon_misses"])
+            write_json(work / "collection-context.json", {"source_context": checkpoint_identity(runtime.boundary["checkpoint"]),
+                "source_checkpoint": runtime.boundary["receipt"], "save_state": runtime.boundary["save_state"],
+                "next_target": runtime.party.get("next_target"), "party": runtime.party,
+                "bag_context": runtime.bag_context, "unavailable_move_slots": runtime.unavailable_move_slots,
+                "consecutive_ribbon_misses": result["consecutive_ribbon_misses"],
+                "ribbons_acquired": result["ribbons_acquired"]})
+            if not acted["ribbon_acquired"]:
+                record("retry_contest", source="stage_6_overworld", source_checkpoint=result["last_checkpoint"],
+                    stages=[2, 3, 4, 5, 6], category=target["category"], rank=target["rank"], bag_context=dict(runtime.bag_context))
             if result["all_ribbons_owned"]:
                 result.update(outcome="pass", finish_reason="all_ribbons_owned")
                 break
@@ -286,21 +329,24 @@ def _run(run_name, plan, started):
                 record("next_ribbon", source_checkpoint=result["last_checkpoint"], stages=[2, 3, 4, 5, 6],
                     bag_context=result["bag_context"])
     except (Exception, SystemExit, KeyboardInterrupt) as error:
-        if isinstance(error, TimeoutError) or time.monotonic() >= runtime.total_deadline:
+        if is_timeout(error) or time.monotonic() >= runtime.total_deadline:
             result["outcome"] = "timeout"
         elif result["outcome"] != "timeout":
             result["outcome"] = "fail"
-        result["error"] = str(error) or type(error).__name__
+        result["error"] = "timeout" if result["outcome"] == "timeout" else abort_message(error, stage=result["active_stage"])
+        result["message"] = result["error"]
         record("abort", outcome=result["outcome"], stage=result["active_stage"], error=result["error"])
     finally:
         final = runtime.finalize(error=result.get("error"))
         result.update({key: value for key, value in final.items() if key != "errors"})
-        runtime.artifacts.register_tree(runtime.active_work)
         if final["errors"]:
-            result["outcome"] = "fail"
-            result.setdefault("error", "; ".join(final["errors"]))
+            if result["outcome"] != "timeout":
+                result["outcome"] = "timeout" if any(is_timeout(item) for item in final["errors"]) else "fail"
+            result.setdefault("error", "timeout" if result["outcome"] == "timeout" else abort_message("; ".join(final["errors"])))
         elif result["outcome"] == "pass" and time.monotonic() >= runtime.total_deadline:
-            result.update(outcome="timeout", error="The whole-run host deadline expired during finalization.")
+            result.update(outcome="timeout", error="timeout")
+        if result["outcome"] != "pass":
+            result["message"] = result["error"] = "timeout" if result["outcome"] == "timeout" else result["error"]
         result["cleanup_errors"] = final["errors"]
         result["total_host_seconds"] = time.monotonic() - started
         write_json(work / "runner-result.json", result)
@@ -359,16 +405,20 @@ def wait(run_name):
 def check():
     from tests.support.lua51 import Lua51, literal
 
-    from contest import artifacts, dance_timings, rank_dance, runtime
+    from contest import artifacts, dance_timings, messages, platinum, rank_dance, runtime, timing_profiles
+    from host import controller, dialogs
 
-    for module in (*STAGES.values(), sections, artifacts, dance_timings, rank_dance, runtime):
+    for module in (*STAGES.values(), sections, artifacts, dance_timings, messages, platinum, rank_dance, runtime, timing_profiles, controller, dialogs):
         ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
     ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    ast.parse((ROOT / "run_contest.py").read_text(encoding="utf-8"))
+    check_profiles()
     lua = Lua51()
     try:
-        names = ("super_contest.lua", "sections.lua", "acting_plan.lua", "stage1_load.lua", "stage2_prep.lua", "bag_contest.lua", "party_contest.lua",
+        names = ("resource_root.lua", "super_contest.lua", "sections.lua", "acting_plan.lua", "stage1_load.lua", "stage2_prep.lua", "bag_contest.lua", "party_contest.lua",
                    "stage3_enter.lua", "stage4_dress.lua", "dress_pixels.lua", "dance_master.lua", "rank_dance.lua", "dance_pixels.lua", "stage6_act.lua", "screen_checks.lua")
         code = "; ".join(f"assert(loadfile({literal((HERE / name).as_posix())}))" for name in names)
+        code += f"; assert(loadfile({literal((ROOT / 'lua/platinum.lua').as_posix())}))"
         print(lua.run(code + "; return 'Persistent contest Python/Lua syntax OK'"))
     finally:
         lua.close()
@@ -383,26 +433,27 @@ def main():
     mode.add_argument("--background", action="store_true")
     mode.add_argument("--wait", action="store_true")
     parser.add_argument("--run-name")
-    parser.add_argument("--dress-grid", type=int, choices=(6, 7), default=dress_grid)
-    parser.add_argument("--dress-seconds", type=float, default=dress_seconds, help="Automatic dressing window in emulator game seconds.")
-    parser.add_argument("--dress-pickup-frames", type=int, default=dress_pickup_frames)
-    parser.add_argument("--dress-drag-frames", type=int, default=dress_drag_frames)
-    parser.add_argument("--dress-release-frames", type=int, default=dress_release_frames)
-    parser.add_argument("--dress-page-wait-frames", type=int, default=dress_page_wait_frames)
+    parser.add_argument("--game-code", choices=sorted(GAME_CODES),
+                        help="Preview a regional timing profile; execution verifies it against the selected ROM.")
+    parser.add_argument("--dress-grid", type=int, choices=(6, 7, 8), default=dress_grid)
+    parser.add_argument("--dress-seconds", type=float, help="Override profile dressing game seconds.")
+    parser.add_argument("--dress-pickup-frames", type=int)
+    parser.add_argument("--dress-drag-frames", type=int)
+    parser.add_argument("--dress-release-frames", type=int)
+    parser.add_argument("--dress-page-wait-frames", type=int)
     parser.add_argument("--debug", type=int, choices=(0, 1), default=debug,
-                        help="Enable memory-check and diagnostic states; the Acting-entry state always uses the final slot (10).")
-    parser.add_argument("--true-retry", type=int, choices=(0, 1), default=true_retry)
+                        help="0 writes no quick saves; 1 saves checkpoints in slots 2, 4, 5, 6 and stopped diagnostics in slot 9.")
     parser.add_argument("--total-timeout", type=float, default=total_timeout_seconds)
     parser.add_argument("--stage-timeout", type=float, default=stage_timeout_seconds)
-    parser.add_argument("--osd-settle-seconds", type=float, default=OSD_SETTLE_SECONDS)
-    parser.add_argument("--offset-frames", type=int, default=rank_dance.DEFAULT_OFFSET_FRAMES)
-    parser.add_argument("--acting-round-seconds", type=float, default=acting_round_seconds)
-    parser.add_argument("--acting-final-seconds", type=float, default=acting_final_seconds)
+    parser.add_argument("--osd-settle-seconds", type=float)
+    parser.add_argument("--offset-frames", type=int)
+    parser.add_argument("--acting-round-seconds", type=float)
+    parser.add_argument("--acting-final-seconds", type=float)
     args = parser.parse_args()
     if args.check:
         check()
         return 0
-    options = {"debug": args.debug, "true_retry": args.true_retry,
+    options = {"debug": args.debug,
         "total_timeout": args.total_timeout, "stage_timeout": args.stage_timeout,
         "osd_settle_seconds": args.osd_settle_seconds, "offset_frames": args.offset_frames,
         "acting_round_seconds": args.acting_round_seconds, "acting_final_seconds": args.acting_final_seconds,
@@ -411,15 +462,17 @@ def main():
         "dress_release_frames": args.dress_release_frames, "dress_page_wait_frames": args.dress_page_wait_frames}
     try:
         if args.plan_only:
-            print(json.dumps(chain_plan(**options), indent=2))
+            print(json.dumps(chain_plan(game_code=args.game_code or "CPUJ", **options), indent=2))
             return 0
         if not args.run_name:
             parser.error("Supply a fresh --run-name.")
         if args.wait:
             return wait(args.run_name)
         if args.background:
+            if args.game_code is not None:
+                options["game_code"] = args.game_code
             return background(args.run_name, options)
-        result = run(run_name=args.run_name, **options)
+        result = run(run_name=args.run_name, game_code=args.game_code, **options)
         return 0 if result["outcome"] == "pass" else 1
     except (ValueError, OSError, KeyError, RuntimeError) as error:
         parser.error(str(error))

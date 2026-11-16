@@ -18,30 +18,37 @@ from host.checkpoints import CheckpointClient, CheckpointStopped, write_json
 from host.controller import ControllerConfig
 from host.emulator import DeSmuME
 from host.paths import ROOT, project_path
-from contest.inputs import NORMAL_HOLD_FRAMES
 from contest.runtime import TimedController, TimedSlots, automatic_review, finish_speed
+from contest.timing_profiles import load_profile, section, setting
 
 
 HERE = Path(__file__).resolve().parent
 ROM = ROOT / "desmume-0.9.13-win64/Roms/Pocket Monsters - Platinum (Japan).nds"
-START_WAIT_FRAMES = 180
+START_WAIT_FRAMES = section(None, "stage1_loading")["start_release_frames"]
 
 
-def load_plan(*, boot_wait_frames=600, hold_frames=NORMAL_HOLD_FRAMES, start_wait_frames=START_WAIT_FRAMES,
-              a_wait_frames=180, b_wait_frames=180):
+def load_plan(*, boot_wait_frames=None, hold_frames=None, start_wait_frames=None,
+              a_wait_frames=None, b_wait_frames=None, timing_profile=None):
+    profile = load_profile() if timing_profile is None else timing_profile
+    values = section(profile, "stage1_loading")
+    boot_wait_frames = setting(boot_wait_frames, values, "boot_wait_frames")
+    hold_frames = setting(hold_frames, values, "button_hold_frames")
+    start_wait_frames = setting(start_wait_frames, values, "start_release_frames")
+    a_wait_frames = setting(a_wait_frames, values, "load_save_a_release_frames")
+    b_wait_frames = setting(b_wait_frames, values, "dismiss_prompt_b_release_frames")
     timing = {"boot_wait_frames": boot_wait_frames, "hold_frames": hold_frames,
               "start_wait_frames": start_wait_frames, "a_wait_frames": a_wait_frames,
               "b_wait_frames": b_wait_frames}
     for name, value in timing.items():
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError(f"{name} must be a positive whole emulator-frame count.")
-    return {"stage": 1, "timing": timing, "inputs": [f"wait:{boot_wait_frames}",
+    return {"stage": 1, "timing_profile_source": profile["source"], "timing": timing, "inputs": [f"wait:{boot_wait_frames}",
         f"start:{hold_frames}:{start_wait_frames}", f"start:{hold_frames}:{start_wait_frames}",
         f"A:{hold_frames}:{a_wait_frames}", f"B:{hold_frames}:{b_wait_frames}"],
         "total_emulator_frames": boot_wait_frames + 4 * hold_frames + 2 * start_wait_frames
             + a_wait_frames + b_wait_frames,
         "uncapped": True, "attempts": 1, "guards": {}, "checkpoint_slot": 1,
-        "acceptance": "Loaded overworld, confirmed by the screenshot after B and its full released wait.",
+        "acceptance": "Loaded contest-hall overworld facing the middle receptionist.",
         "review_source": "visual_review", "memory_proven_phase": False}
 
 
@@ -262,9 +269,8 @@ def main():
     mode.add_argument("--execute", action="store_true")
     parser.add_argument("--run-name")
     parser.add_argument("--rom", default=str(ROM))
-    for name, default in (("boot-wait-frames", 600), ("hold-frames", NORMAL_HOLD_FRAMES),
-                          ("start-wait-frames", START_WAIT_FRAMES), ("a-wait-frames", 180), ("b-wait-frames", 180)):
-        parser.add_argument(f"--{name}", type=int, default=default)
+    for name in ("boot-wait-frames", "hold-frames", "start-wait-frames", "a-wait-frames", "b-wait-frames"):
+        parser.add_argument(f"--{name}", type=int, help="Override the JPN timing profile (emulator frames).")
     args = parser.parse_args()
     timing = {key: value for key, value in vars(args).items() if key.endswith("_frames")}
     try:

@@ -1,0 +1,38 @@
+Random scarf equip test
+Scope: twenty cycles on the first party Pokemon; exclude its currently held scarf from every random draw.
+Each cycle: equip, close menu, read and verify held scarf, acknowledge, continue from current state.
+Bag menu selection and item cursor persist across cycles.
+Outcome: pass; completed 20/20; failed 0; unreadable 0; skipped 0.
+Guards: 7200 whole-run / 300 per-visit host seconds; no retries.
+Inputs: shared Stage 2 defaults; frame costs are counted emulator frames.
+Cycle | Category | Expected | Before | After | Menu closed | Frames | Bag cursor before -> after | Status
+1 | Beauty | Blue Scarf | Red Scarf | Blue Scarf | True | 2268 | 1 -> 28 | pass
+2 | Cute | Pink Scarf | Blue Scarf | Pink Scarf | True | 1356 | 28 -> 25 | pass
+3 | Beauty | Blue Scarf | Pink Scarf | Blue Scarf | True | 1176 | 25 -> 28 | pass
+4 | Cute | Pink Scarf | Blue Scarf | Pink Scarf | True | 1356 | 28 -> 25 | pass
+5 | Smart | Green Scarf | Pink Scarf | Green Scarf | True | 1134 | 25 -> 27 | pass
+6 | Cute | Pink Scarf | Green Scarf | Pink Scarf | True | 1254 | 27 -> 25 | pass
+7 | Beauty | Blue Scarf | Pink Scarf | Blue Scarf | True | 1134 | 25 -> 27 | pass
+8 | Smart | Green Scarf | Blue Scarf | Green Scarf | True | 1134 | 27 -> 28 | pass
+9 | Cute | Pink Scarf | Green Scarf | Pink Scarf | True | 1356 | 28 -> 25 | pass
+10 | Beauty | Blue Scarf | Pink Scarf | Blue Scarf | True | 1134 | 25 -> 27 | pass
+11 | Tough | Yellow Scarf | Blue Scarf | Yellow Scarf | True | 1152 | 27 -> 26 | pass
+12 | Smart | Green Scarf | Yellow Scarf | Green Scarf | True | 1176 | 26 -> 28 | pass
+13 | Beauty | Blue Scarf | Green Scarf | Blue Scarf | True | 1152 | 28 -> 27 | pass
+14 | Smart | Green Scarf | Blue Scarf | Green Scarf | True | 1134 | 27 -> 28 | pass
+15 | Beauty | Blue Scarf | Green Scarf | Blue Scarf | True | 1152 | 28 -> 27 | pass
+16 | Cute | Pink Scarf | Blue Scarf | Pink Scarf | True | 1254 | 27 -> 25 | pass
+17 | Smart | Green Scarf | Pink Scarf | Green Scarf | True | 1218 | 25 -> 28 | pass
+18 | Cool | Red Scarf | Green Scarf | Red Scarf | True | 1050 | 28 -> 28 | pass
+19 | Beauty | Blue Scarf | Red Scarf | Blue Scarf | True | 1152 | 28 -> 27 | pass
+20 | Cool | Red Scarf | Blue Scarf | Red Scarf | True | 1134 | 27 -> 28 | pass
+Category totals: selected / passed / failed / unreadable
+Cool: 2 / 2 / 0 / 0
+Beauty: 7 / 7 / 0 / 0
+Cute: 5 / 5 / 0 / 0
+Smart: 5 / 5 / 0 / 0
+Tough: 1 / 1 / 0 / 0
+Final menu closed: True; paused: True; inputs released: True.
+Contest entries: 0; quick saves: 0; quick loads: 0.
+Live duration: 194.686 host seconds.
+Evidence and checkpoint receipts: tmp/contest/scarf-swaps-20261115-01

@@ -19,14 +19,19 @@ if __package__ in {None, ""}:
 from contest import debug_contest, sections, super_contest
 from host.checkpoints import write_json
 from host.paths import ROOT
+from contest.timing_profiles import load_profile, section
 
 
 TOTAL_TIMEOUT_SECONDS = 30 * 60
 SAMPLES_PER_TARGET = 10
-MIN_WAIT_FRAMES = 20
+MIN_WAIT_FRAMES = section(None, "diagnostics")["pointer_sample_min_wait_frames"]
 
 
-def measurement_plan(*, total_timeout=TOTAL_TIMEOUT_SECONDS, random_seed=None, tough_only=False):
+def measurement_plan(*, total_timeout=TOTAL_TIMEOUT_SECONDS, random_seed=None, tough_only=False, timing_profile=None):
+    timing_profile = load_profile() if timing_profile is None else timing_profile
+    diagnostic = section(timing_profile, "diagnostics")
+    minimum = diagnostic["pointer_sample_min_wait_frames"]
+    fraction = diagnostic["pointer_sample_max_dance_fraction"]
     if not isinstance(tough_only, bool):
         raise ValueError("The Tough-only selection must be a boolean.")
     categories = ("Tough",) if tough_only else ("Smart", "Tough")
@@ -35,28 +40,30 @@ def measurement_plan(*, total_timeout=TOTAL_TIMEOUT_SECONDS, random_seed=None, t
     if isinstance(random_seed, bool) or not isinstance(random_seed, int) or random_seed < 0:
         raise ValueError("The random seed must be a nonnegative integer.")
     plan = debug_contest.debug_plan(category=categories[0], rank="Master", measure_only=True,
-        total_timeout=total_timeout, stage_timeout=total_timeout)
+        total_timeout=total_timeout, stage_timeout=total_timeout, timing_profile=timing_profile)
     targets = [debug_contest.fixed_target("Master", category=category) for category in categories]
     rng, sampling_targets = random.Random(random_seed), []
     for target in targets:
-        profile = debug_contest.fixed_timing(target["category"], target["rank"])
+        profile = debug_contest.fixed_timing(target["category"], target["rank"], timing_profile=timing_profile)
         dance_frames = math.floor(240 / profile["pixels_per_frame"])
-        maximum = dance_frames * 3 // 5
+        maximum = math.floor(dance_frames * fraction)
+        if maximum - minimum + 1 < SAMPLES_PER_TARGET:
+            raise ValueError("The profile pointer-sampling window must contain ten distinct frame waits.")
         sampling_targets.append({"target": target, "reference_speed": profile["pixels_per_frame"],
             "dance_frames": dance_frames, "max_frames": maximum,
-            "wait_frames": rng.sample(range(MIN_WAIT_FRAMES, maximum + 1), SAMPLES_PER_TARGET)})
+            "wait_frames": rng.sample(range(minimum, maximum + 1), SAMPLES_PER_TARGET)})
     plan.update(runner="contest_pointer_speed_debug", mode="pointer_speed", target=targets[0], targets=targets, tough_only=tough_only,
         total_contests=len(targets), required_samples=len(targets) * SAMPLES_PER_TARGET,
         dance_observation_policy="pointer_speed", metrics=["pointer_pixels_per_emulator_frame"],
         target_selection="Tough Master only from fresh loading" if tough_only
             else "Smart Master then one ROM reset and fresh loading for Tough Master",
-        sampling={"samples_per_target": SAMPLES_PER_TARGET, "min_frames": MIN_WAIT_FRAMES,
-            "maximum_fraction": 0.6, "random_seed": random_seed, "distinct_waits": True,
+        sampling={"samples_per_target": SAMPLES_PER_TARGET, "min_frames": minimum,
+            "maximum_fraction": fraction, "random_seed": random_seed, "distinct_waits": True,
             "duration_definition": "demo plus response: x=8 through x=248; excludes inter-dance gaps",
             "targets": sampling_targets},
         calculation_policy="free-intercept linear fit of fresh endpoint pixels against actual counted emulator frames",
         capture_policy="one fresh saved entry and ten fresh endpoints per target; no extra post-load rendering frames",
-        save_policy={"baseline_and_entry": True, "temporary_slot": 10, "endpoint_states": False},
+        save_policy={"enabled": True, "loads_enabled": True, "baseline_and_entry": True, "temporary_slot": 10, "endpoint_states": False},
         finish="ten samples for each selected target, final Tough entry reloaded without frame advance; paused")
     plan["runtime"]["adapter"] = "contest/debug_pointer_speed.lua"
     plan["baseline"].update(reload_after_each_completed_combination=False, reset_between_targets=not tough_only)
@@ -66,7 +73,7 @@ def measurement_plan(*, total_timeout=TOTAL_TIMEOUT_SECONDS, random_seed=None, t
     return plan
 
 
-def fit_speed(start, samples, *, category):
+def fit_speed(start, samples, *, category, timing_profile=None):
     if len(samples) != SAMPLES_PER_TARGET:
         raise ValueError("Fit the complete ten-sample target.")
     frames = [item["elapsed_frames"] for item in samples]
@@ -94,10 +101,10 @@ def fit_speed(start, samples, *, category):
     for index, (a, x) in enumerate(points):
         for b, y in points[index + 1:]:
             lower, upper = max(lower, (y - x - 1) / (b - a)), min(upper, (y - x + 1) / (b - a))
-    current = debug_contest.fixed_timing(category, "Master")["pixels_per_frame"]
-    proposed = 7 / 12 if category == "Smart" else 5 / 8
+    current = debug_contest.fixed_timing(category, "Master", timing_profile=timing_profile)["pixels_per_frame"]
+    proposed = debug_contest.fixed_timing(category, "Master")["pixels_per_frame"]
     candidates = {"current": residual_metrics(current), "proposed": residual_metrics(proposed),
-        "5/9": residual_metrics(5 / 9)}
+        "5/9": residual_metrics(debug_contest.fixed_timing("Cool", "Master")["pixels_per_frame"])}
     for candidate in candidates.values():
         candidate["within_quantization_envelope"] = lower <= candidate["speed_pixels_per_frame"] <= upper
     return {"status": "estimated", "pixels_per_frame": speed, "frames_per_pixel": 1 / speed,
@@ -135,8 +142,9 @@ def reload_entry(runtime, source):
 def measure(runtime):
     start, source = runtime.dance_handoff, dict(runtime.boundary)
     selected = next(item for item in runtime.settings["sampling"]["targets"] if item["target"] == runtime.target)
-    runtime.start_section({"sampling": {"sample_count": SAMPLES_PER_TARGET, "min_frames": MIN_WAIT_FRAMES,
-        "max_frames": selected["max_frames"], "dance_frames": selected["dance_frames"], "wait_frames": selected["wait_frames"]},
+    runtime.start_section({"sampling": {"sample_count": SAMPLES_PER_TARGET, "min_frames": runtime.settings["sampling"]["min_frames"],
+        "max_frames": selected["max_frames"], "maximum_fraction": runtime.settings["sampling"]["maximum_fraction"],
+        "dance_frames": selected["dance_frames"], "wait_frames": selected["wait_frames"]},
         "pointer_templates": runtime.settings["pointer_templates"]})
     samples, last_reload, last_sample = [], None, None
     report = {"target": runtime.target, "entry_capture": start, "entry_state": source,
@@ -172,7 +180,8 @@ def measure(runtime):
         runtime.record("pointer_sample", category=runtime.target["category"], rank=runtime.target["rank"],
             sample=number, wait_frames=frames, start_x=sample["start_x"], endpoint_x=sample["endpoint_x"],
             pair_speed=sample["pair_speed"], image=endpoint["image"])
-    metrics = {"pointer_speed": fit_speed(start, samples, category=runtime.target["category"]),
+    metrics = {"pointer_speed": fit_speed(start, samples, category=runtime.target["category"],
+        timing_profile=runtime.settings.get("timing_profile")),
         "sample_count": len(samples), "frame_unit": "emulator_frames", "button_timing_calculated": False}
     runtime.json("measurements.json", metrics)
     return sections.accepted(runtime, target=runtime.target, measurement_complete=True, metrics=metrics,

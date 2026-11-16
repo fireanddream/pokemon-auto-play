@@ -19,16 +19,24 @@ USER32 = ctypes.WinDLL("user32", use_last_error=True)
 KERNEL32 = ctypes.WinDLL("kernel32", use_last_error=True)
 KERNEL32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
 KERNEL32.OpenProcess.restype = wintypes.HANDLE
+KERNEL32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+KERNEL32.QueryFullProcessImageNameW.restype = wintypes.BOOL
 KERNEL32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
 KERNEL32.GetExitCodeProcess.restype = wintypes.BOOL
 KERNEL32.CloseHandle.argtypes = [wintypes.HANDLE]
 KERNEL32.CloseHandle.restype = wintypes.BOOL
+KERNEL32.GetConsoleWindow.argtypes = []
+KERNEL32.GetConsoleWindow.restype = wintypes.HWND
+KERNEL32.GetConsoleProcessList.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD]
+KERNEL32.GetConsoleProcessList.restype = wintypes.DWORD
 KERNEL32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 KERNEL32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 KERNEL32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
 KERNEL32.Process32FirstW.restype = wintypes.BOOL
 KERNEL32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
 KERNEL32.Process32NextW.restype = wintypes.BOOL
+KERNEL32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+KERNEL32.TerminateProcess.restype = wintypes.BOOL
 ENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 USER32.EnumWindows.argtypes = [ENUMPROC, wintypes.LPARAM]
 USER32.EnumChildWindows.argtypes = [wintypes.HWND, ENUMPROC, wintypes.LPARAM]
@@ -127,9 +135,13 @@ def send(hwnd: int, message: int, wparam: int = 0, lparam: int = 0, *, timeout: 
     if timeout is None:
         return USER32.SendMessageW(hwnd, message, wparam, lparam)
     result = ctypes.c_size_t()
+    ctypes.set_last_error(0)
     ok = USER32.SendMessageTimeoutW(hwnd, message, wparam, lparam, 0x2, int(timeout * 1000), ctypes.byref(result))
     if not ok:
-        raise RuntimeError(f"Window command timed out or failed (Windows error {ctypes.get_last_error()}).")
+        error = ctypes.get_last_error()
+        if error in (0, 1460):
+            raise TimeoutError("timeout")
+        raise RuntimeError(f"The emulator window command failed (Windows error {error}).")
     return result.value
 
 
@@ -149,6 +161,32 @@ def process_alive(pid: int) -> bool:
         return code.value == 259  # STILL_ACTIVE; terminated processes can retain stale windows.
     finally:
         KERNEL32.CloseHandle(process)
+
+
+def hide_private_console() -> bool:
+    """Hide a direct Python launch's console when all attached clients are Python."""
+    console = KERNEL32.GetConsoleWindow()
+    if not console:
+        return False
+    identifiers = (wintypes.DWORD * 16)()
+    count = KERNEL32.GetConsoleProcessList(identifiers, len(identifiers))
+    if not 0 < count <= len(identifiers):
+        return False
+    for pid in identifiers[:count]:
+        process = KERNEL32.OpenProcess(0x1000, False, pid)
+        if not process:
+            return False
+        try:
+            image = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(image))
+            if not KERNEL32.QueryFullProcessImageNameW(process, 0, image, ctypes.byref(size)):
+                return False
+            if image.value.rsplit("\\", 1)[-1].lower() not in {"py.exe", "pyw.exe", "python.exe", "pythonw.exe"}:
+                return False
+        finally:
+            KERNEL32.CloseHandle(process)
+    USER32.ShowWindow(console, 0)
+    return True
 
 
 def emulator_process_ids() -> list[int]:
@@ -171,6 +209,19 @@ def emulator_process_ids() -> list[int]:
     finally:
         KERNEL32.CloseHandle(snapshot)
     return sorted(result)
+
+
+def terminate_process(pid: int) -> None:
+    process = KERNEL32.OpenProcess(0x1 | 0x1000, False, pid)
+    if not process:
+        if not process_alive(pid):
+            return
+        raise RuntimeError("Could not close an existing DeSmuME process. Close it manually and try again.")
+    try:
+        if not KERNEL32.TerminateProcess(process, 0) and process_alive(pid):
+            raise RuntimeError("Could not close an existing DeSmuME process. Close it manually and try again.")
+    finally:
+        KERNEL32.CloseHandle(process)
 
 
 def emulator_window_process_ids() -> list[int]:

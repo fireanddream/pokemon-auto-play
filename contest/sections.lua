@@ -1,13 +1,15 @@
 -- Callable load/prep/entry/Acting sections; the master owns native callbacks and saves.
 local directory = assert(debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("^(.*)/"))
+local root = dofile(directory .. "/resource_root.lua")
 local bag_reader = dofile(directory .. "/bag_contest.lua").new(memory, emu.gamecode)
 local party_reader = dofile(directory .. "/party_contest.lua").new(memory, emu.gamecode)
 local screen_checks = dofile(directory .. "/screen_checks.lua")
 local acting_pixels = dofile(directory .. "/acting_pixels.lua")
 local acting_plan = dofile(directory .. "/acting_plan.lua")
+local platinum = dofile(root .. "/lua/platinum.lua")
 local M = {}
 
-function M.definitions(retry_mode)
+function M.definitions()
     local function screen_rules(expected)
         return {
             {id = expected, field = "screen.confirmed", expected = true},
@@ -16,8 +18,25 @@ function M.definitions(retry_mode)
             {id = "review_epoch", field = "screen.epoch", context = "epoch"},
         }
     end
+    local readiness = screen_rules("loaded_overworld_screenshot")
+    for _, rule in ipairs({
+        {id = "validated_first_party", field = "party.read_valid", expected = true},
+        {id = "first_not_egg", field = "party.is_egg", expected = false},
+        {id = "first_hp", expected = "HP > 0", evaluate = function(snapshot)
+            local party = snapshot.party
+            return type(party.current_hp) == "number" and party.current_hp > 0,
+                {current = party.current_hp, maximum = party.max_hp}
+        end},
+        {id = "first_sheen", field = "party.sheen", op = "range", expected = {1, 255}},
+        {id = "first_moves", field = "party.move_count", op = "range", expected = {2, 4}},
+        {id = "readable_text_speed", field = "options.read_valid", expected = true},
+        {id = "fast_text_speed", expected = "Fast", evaluate = function(snapshot)
+            local options = snapshot.options or {}
+            return options.read_valid ~= true or options.text_speed == "Fast", options.text_speed or "Unreadable"
+        end},
+    }) do readiness[#readiness + 1] = rule end
     return {
-        ["stage-1-load"] = {checks = screen_rules("loaded_overworld_screenshot"), branches = {pass = "finish"}},
+        ["stage-1-load"] = {checks = readiness, branches = {pass = "finish"}},
         ["stage-2-prep"] = {checks = {
             {id = "validated_first_party", field = "party.read_valid", expected = true},
             {id = "same_first_party", field = "party.species_id", context = "source_species_id"},
@@ -27,7 +46,7 @@ function M.definitions(retry_mode)
         }, branches = {pass = "finish"}},
         ["stage-3-enter"] = {checks = screen_rules("dress_up_entry_screenshot"), branches = {pass = "finish"}},
         ["stage-6-round"] = {checks = {
-            {id = "cpuj", field = "game.code", expected = "CPUJ"},
+            {id = "platinum", field = "game.supported", expected = true},
             {id = "released", field = "trial.released", expected = true},
             {id = "round", field = "trial.round", context = "round"},
             {id = "three_readable_judges", field = "stars.readable", expected = true},
@@ -47,7 +66,7 @@ function M.definitions(retry_mode)
             {id = "capture_epoch", field = "image.epoch", context = "epoch"},
         }, branches = {pass = "perform-round"}},
         ["stage-6-act"] = {checks = {
-            {id = "cpuj", field = "game.code", expected = "CPUJ"},
+            {id = "platinum", field = "game.supported", expected = true},
             {id = "four_rounds_complete", field = "trial.completed_rounds", expected = 4},
             {id = "released", field = "trial.released", expected = true},
             {id = "overworld", field = "screen.confirmed", expected = true},
@@ -56,7 +75,7 @@ function M.definitions(retry_mode)
             {id = "capture_frame", field = "image.frame", context = "frame"},
             {id = "capture_epoch", field = "image.epoch", context = "epoch"},
         }, target = {{id = "target_ribbon", field = "target_acquired", expected = true}},
-            branches = {hit = "success", miss = retry_mode == 1 and "retry-contest" or "retry-acting"}},
+            branches = {hit = "success", miss = "retry-contest"}},
         stopped = {checks = {{id = "host_stop", expected = "continue",
             evaluate = function(_, context) return false, context.reason end}}, branches = {pass = "finish"}},
     }
@@ -65,22 +84,21 @@ end
 function M.new(config, runtime)
     local api, adapter, engine = runtime.api, runtime.adapter, runtime.engine
     local stage = config.stage == 6 and "setup" or config.stage == 2 and "inspect" or "inputs"
-    local latest, pending, captured, screen, initial, prep, current_plan, source_party, entry_moves
+    local latest, pending, captured, screen, initial, prep, current_plan, source_party, entry_moves, result_party
     local round_index, completed_rounds, move_cursor, judge_cursor = 0, 0, 1, 1
-    local render_prepared, render_end_frame, render_host_seconds = false, nil, nil
+    local render_prepared, render_end_frame = false, nil
     local render_epoch, capture_kind = adapter.epoch(), "source"
     local section = {}
 
     local function game()
-        local code = emu.gamecode()
-        return {code = code, supported = code == "CPUJ", identity_source = "emu.gamecode"}
+        return platinum.game(emu.gamecode())
     end
 
     local function trial()
         return {stage = stage, attempt = config.attempt, round = round_index,
             completed_rounds = completed_rounds, move_cursor = move_cursor, judge_cursor = judge_cursor,
             render_preparation_frames = render_prepared and render_end_frame - config.source_frame or 0,
-            render_preparation_mode = config.entry_mode, render_preparation_host_seconds = render_host_seconds,
+            render_preparation_mode = config.entry_mode,
             released = api.state.command_done and api.state.buttons == "" and not api.state.stylus_touch}
     end
 
@@ -110,7 +128,7 @@ function M.new(config, runtime)
             if capture_kind == "round" then
                 result.stars = acting_pixels.read_stars(raw)
                 if round_index == 1 and not entry_moves then
-                    entry_moves = acting_pixels.read_move_categories(raw)
+                    entry_moves = acting_pixels.read_move_categories(raw, config.unavailable_move_slots)
                     entry_moves.frame, entry_moves.epoch, entry_moves.path = frame, result.image.epoch, result.image.path
                 end
                 result.move_categories = entry_moves
@@ -121,7 +139,7 @@ function M.new(config, runtime)
             elseif capture_kind == "result" then
                 result.screen = acting_pixels.match_points(raw, config.overworld.points)
                 result.screen.expected, result.screen.reference = "loaded_overworld", config.overworld.reference
-                result.party = party_reader.read_first(frame)
+                result.party = result_party
                 result.same_first_party = result.party.species_id == source_party.species_id and not result.party.is_egg
                 result.target_acquired = result.party.ribbon_flags[config.target.ribbon_bit + 1]
             end
@@ -130,11 +148,17 @@ function M.new(config, runtime)
                 screen.fresh_visual_binding = captured.frame == frame and captured.epoch == adapter.epoch()
                     and captured.raw == gui.gdscreenshot()
                 if screen.source == "local_reference_pixels" then
-                    screen.pixel_check = screen_checks.read(captured.raw, screen.expected)
+                    screen.pixel_check = captured.check
                     screen.confirmed = screen.confirmed and screen.fresh_visual_binding and screen.pixel_check.confirmed
                 end
             end
             result.screen = screen or {source = "unreviewed", memory_proven = false}
+            if config.stage == 1 and screen and screen.confirmed then
+                local readiness = initial
+                result.party, result.bag, result.access = readiness.party, readiness.bag, readiness.access
+                result.options = readiness.options
+                result.image = captured.image
+            end
         end
         return result
     end
@@ -153,6 +177,7 @@ function M.new(config, runtime)
         if pending or not api.state.command_done then return false end
         if action == "combo" then
             return stage == "inputs" or stage == "prepare" or stage == "perform-round"
+                or config.stage == 6 and stage == "ready" and completed_rounds == 4
         end
         return action == "advance" and config.stage == 6 and stage == "prepare-render"
             and config.entry_mode == "stage5_handoff"
@@ -160,9 +185,24 @@ function M.new(config, runtime)
 
     function section.checkpoint(action, args)
         local observation
-        if action == "inspect" then
+        if action == "inspect" and config.stage == 1 then
+            initial = bag_reader.snapshot(adapter.frame(), true)
+            observation = initial
+        elseif action == "inspect" and config.stage == 6 then
+            finish_round()
+            result_party = party_reader.read_first(adapter.frame())
+            observation = {frame = adapter.frame(), party = result_party}
+        elseif action == "inspect" then
             assert(config.stage == 2 and stage == "inspect", "Inspect the current Stage 2 source once")
-            initial = bag_reader.snapshot(adapter.frame())
+            if config.accepted_readiness then
+                initial = config.accepted_readiness
+                assert(initial.frame == adapter.frame() and initial.image.epoch == adapter.epoch(),
+                    "The shared readiness snapshot no longer matches the paused game")
+            else
+                local image = runtime.image(config.work .. "/stage2-source.gd", adapter.frame())
+                initial = bag_reader.snapshot(adapter.frame())
+                initial.image = image
+            end
             initial.epoch = adapter.epoch()
             observation = initial
         elseif action == "init-prep" then
@@ -179,9 +219,11 @@ function M.new(config, runtime)
                 and adapter.frame() == config.source_frame + config.total_emulator_frames,
                 "Complete the counted section before reviewing its endpoint")
             local image, raw = runtime.image(config.work .. "/stage" .. config.stage .. ".gd", adapter.frame())
-            captured = {frame = image.frame, epoch = image.epoch, raw = raw}
+            captured = {frame = image.frame, epoch = image.epoch, raw = raw, image = image,
+                check = screen_checks.read(raw, config.stage == 1 and "loaded_overworld" or "dress_up_entry",
+                    config.target and config.target.rank)}
             observation = section.observation(adapter.frame())
-            observation.automatic_check = screen_checks.read(raw, config.stage == 1 and "loaded_overworld" or "dress_up_entry")
+            observation.automatic_check = captured.check
             stage = "review"
         elseif action == "visit" then
             local context = {frame = adapter.frame(), epoch = adapter.epoch()}
@@ -206,39 +248,28 @@ function M.new(config, runtime)
             pending = (latest.status == "awaiting_save" or latest.status == "awaiting_ack") and latest or nil
             observation, stage = latest.snapshot, "checkpoint"
         elseif action == "begin-attempt" then
-            assert(config.stage == 6 and stage == "setup" and adapter.frame() == config.source_frame,
-                "Begin Acting at the accepted Stage 5 handoff or restored retry-state frame")
+            assert(config.stage == 6 and stage == "setup" and config.entry_mode == "stage5_handoff"
+                and type(config.handoff_render_frames) == "number" and config.handoff_render_frames >= 1
+                and config.handoff_render_frames == math.floor(config.handoff_render_frames) and adapter.frame() == config.source_frame,
+                "Begin Acting at the current accepted Stage 5 handoff")
             source_party = party_reader.read_first(adapter.frame())
             assert(source_party.read_valid and not source_party.is_egg
                 and source_party.ribbon_flags[config.target.ribbon_bit + 1] == false,
                 "The Acting source must have an eligible first Pokemon missing the target ribbon")
+            config.unavailable_move_slots = config.unavailable_move_slots or source_party.unavailable_move_slots
             api.finish()
             stage = "prepare-render"
             observation = section.observation(adapter.frame())
             observation.source_party = source_party
-        elseif action == "render-retry-begin" then
-            assert(config.stage == 6 and stage == "prepare-render" and config.entry_mode == "load_retry_state"
-                and not render_prepared and adapter.frame() == config.source_frame and adapter.epoch() == render_epoch,
-                "Start the input-free host-timed window at the restored Acting source")
-            api.finish()
-            stage = "render-retry"
         elseif action == "render-prepared" then
             assert(config.stage == 6 and round_index == 0 and not render_prepared and adapter.epoch() == render_epoch
                 and api.state.command_done and api.state.error == "" and api.state.buttons == "" and not api.state.stylus_touch,
                 "Complete input-free rendering and confirm native pause before analysis")
-            if config.entry_mode == "load_retry_state" then
-                local seconds = tonumber(args[1])
-                assert(stage == "render-retry" and #args == 1 and seconds and seconds >= config.retry_render_host_seconds
-                    and seconds < math.huge and adapter.frame() > config.source_frame,
-                    "An Acting retry needs one full host second and measured frame progress")
-                render_host_seconds = seconds
-            else
-                assert(stage == "prepare-render" and #args == 0 and api.state.last_action == "advance"
-                    and api.state.command_start_frame == config.source_frame
-                    and api.state.command_end_frame == config.source_frame + config.handoff_render_frames
-                    and adapter.frame() == config.source_frame + config.handoff_render_frames,
-                    "A direct Acting handoff needs the agreed ten counted input-free frames")
-            end
+            assert(stage == "prepare-render" and config.entry_mode == "stage5_handoff" and #args == 0
+                and api.state.last_action == "advance" and api.state.command_start_frame == config.source_frame
+                and api.state.command_end_frame == config.source_frame + config.handoff_render_frames
+                and adapter.frame() == config.source_frame + config.handoff_render_frames,
+                "A direct Acting handoff needs its configured counted input-free frames")
             render_prepared, render_end_frame, stage = true, adapter.frame(), "ready"
             observation = section.observation(adapter.frame())
         elseif action == "round-visit" or action == "result-visit" then

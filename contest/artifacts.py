@@ -1,11 +1,13 @@
-"""Recorded contest transient ownership and cleanup, independent of emulator controls."""
+"""Run-folder cleanup and per-file artifact ownership for prepared component tools."""
 
 import json
 from pathlib import Path
 import re
+import shutil
 
 from host.checkpoints import write_json
 from host.paths import ROOT
+from contest.platinum import GAME_CODES
 
 
 PURPOSE = "contest_runner_owned_transients"
@@ -13,6 +15,7 @@ CONFIG_NAMES = {"attach.lua", "handoff-config.lua", "section-config.lua", "prep-
     "response-plan.lua", "rank-dance-start-context.lua", "rank-dance-offset-context.lua", "rank-dance-finish-context.lua",
     "pointer-calibration-start.lua", "midpoint-adjustment.lua"}
 CAPTURE_NAMES = {"source.png", "source-stage4.gd", "failure.png", "failure.gd", "stopped.png", "non-excellent.gd",
+                 "stage2-source.gd", "stage2-source.png",
                  "boundary.gd", "start.png", "finish.png", "offset-check.png", "midpoint.gd", "midpoint.png", "response-end.gd",
                  "pointer-calibration-start.gd", "feedback-before.gd"}
 SEQUENCE_NAMES = {"demo-frames.bin", "frames.bin", "rest-frames.bin", "demo-frames.jsonl", "frames.jsonl", "rest-frames.jsonl",
@@ -196,13 +199,37 @@ class OwnedArtifacts:
                 write_json(path, value)
 
 
-def inactive_runs(parent, *, current_pid, check=None, process_alive=None):
-    """Read ownership/liveness without touching the emulator or deleting files."""
-    parent = scratch_root(parent)
-    if process_alive is None:
-        from host.windows import process_alive
+def cleanup_run_folders(work, *, check=None):
+    """Remove older folders in the main runner's disposable namespace after Lua is ready."""
+    parent = ROOT.resolve() / "tmp" / "contest"
+    work = Path(work).absolute()
+    if (parent.resolve() != parent or work.parent != parent or work.resolve() != work
+            or not work.is_dir()):
+        raise RuntimeError("Run-folder cleanup requires the current folder inside project tmp/contest.")
+    record = {"status": "running", "hook": "after_emulator_and_lua_ready", "removed_folders": []}
+    try:
+        for folder in sorted(parent.iterdir()):
+            if check:
+                check()
+            if folder == work or not folder.is_dir() or folder.is_symlink() or folder.resolve() != folder:
+                continue
+            shutil.rmtree(folder)
+            record["removed_folders"].append(folder.name)
+        if check:
+            check()
+        record["status"] = "complete"
+    except BaseException as error:
+        record.update(status="interrupted", error=str(error) or type(error).__name__)
+        raise
+    finally:
+        write_json(work / "startup-cleanup.json", record)
+    return record
 
-    candidates, live = [], {}
+
+def previous_runs(parent, *, check=None):
+    """Read prior run ownership without touching the emulator or deleting files."""
+    parent = scratch_root(parent)
+    candidates = []
     for folder in parent.iterdir():
         if check:
             check()
@@ -220,38 +247,38 @@ def inactive_runs(parent, *, current_pid, check=None, process_alive=None):
             setup = json.loads(setup_path.read_text(encoding="utf-8"))
             run_id, pid = setup.get("run_id"), setup.get("host_pid")
             declared = setup.get("work_dir", setup.get("work"))
+            game = setup.get("settings", {}).get("game")
             if (run_id != folder.name or declared is None or Path(declared).resolve() != folder.resolve()
-                    or not (setup.get("stage") in range(1, 7) or setup.get("settings", {}).get("game") == "CPUJ")):
+                    or not (setup.get("stage") in range(1, 7) or isinstance(game, str) and game in GAME_CODES)):
                 continue
             data = None
         else:
             continue
         if not isinstance(run_id, str) or isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
             continue
-        if pid == current_pid:
-            continue
-        if pid not in live:
-            live[pid] = process_alive(pid)
-        if live[pid]:
-            raise RuntimeError(f"An earlier contest host caller is still active (PID {pid}).")
         candidates.append((folder, run_id, pid, data, setup))
     return candidates
 
 
-def cleanup_stale(parent, *, current_pid, protected=(), check=None, process_alive=None, candidates=None):
+def cleanup_stale(parent, *, protected=(), check=None, candidates=None):
     """Delete recorded inactive scratch after the master has settled initial ownership."""
     parent = scratch_root(parent)
     if candidates is None:
-        candidates = inactive_runs(parent, current_pid=current_pid, check=check, process_alive=process_alive)
+        candidates = previous_runs(parent, check=check)
     result = {"status": "complete", "hook": "fresh_run_startup", "inactive_runs": [], "removed_files": 0, "bytes_removed": 0}
     for folder, run_id, pid, data, setup in candidates:
         if check:
             check()
+        terminal = folder / "runner-result.json"
+        outcome = json.loads(terminal.read_text(encoding="utf-8")) if terminal.is_file() else None
+        owner_path = folder / "run-owner.json"
+        owner = json.loads(owner_path.read_text(encoding="utf-8")) if owner_path.is_file() else {}
+        if owner.get("temporary_run") is True and (not outcome or outcome.get("outcome") != "pass"):
+            result["inactive_runs"].append({"run_id": run_id, "retained_stopped_evidence": True, "removed_files": 0})
+            continue
         artifacts = OwnedArtifacts(folder, run_id, pid, existing=data)
         # A terminated host may not have indexed its last Lua-emitted captures yet.
         artifacts.register_tree(folder)
-        terminal = folder / "runner-result.json"
-        outcome = json.loads(terminal.read_text(encoding="utf-8")) if terminal.is_file() else None
         if outcome and (outcome.get("temporary_slot_9_restored") is True
                 or outcome.get("temporary_slot_10_restored") is True) and not outcome.get("cleanup_errors"):
             for item in artifacts.data["files"].values():

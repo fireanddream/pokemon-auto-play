@@ -313,13 +313,13 @@ def layout_for(dance):
             "preferred_side": ("left", "right", "right")[pair]}
 
 
-def read_side(image, side, layout):
+def read_side(image, side, layout, *, cue_side_offset_pixels=CUE_SIDE_OFFSET):
     px = image.load()
     result = []
     sprites = LEFT_SPRITES if side == "left" else RIGHT_SPRITES
     y = 168 if side == "left" else layout["right_marker_y"] - 8
     for demo_x in GRID_X:
-        center = demo_x if side == "left" else demo_x + CUE_SIDE_OFFSET
+        center = demo_x if side == "left" else demo_x + cue_side_offset_pixels
         candidates = []
         for button, sprite in sprites.items():
             match = _match(px, center - 8, y, sprite)
@@ -359,7 +359,11 @@ def merge_buttons(left, right, preferred_side, conflict_policy):
             "accepted": accepted, "conflicts": conflicts, "left": left, "right": right}
 
 
-def read_progress(bar, pointer, *, frames_per_pixel=9 / 5):
+def read_progress(bar, pointer, *, frames_per_pixel=None):
+    if frames_per_pixel is None:
+        from contest.dance_timings import fixed_timing
+
+        frames_per_pixel = fixed_timing("Cool", "Master")["frames_per_pixel"]
     bounds = bar["position_bounds"]
     point = pointer["position_bounds"]
     source = "bar" if bounds is not None else None
@@ -392,20 +396,27 @@ def read_progress(bar, pointer, *, frames_per_pixel=9 / 5):
             "timing_source": "pixel_position_with_measured_tempo_envelope"}
 
 
-def analyze(image, dance, *, conflict_policy="error"):
+def analyze(image, dance, *, conflict_policy="error", frames_per_pixel=None, cue_side_offset_pixels=None, expected_cues=4):
+    if cue_side_offset_pixels is None:
+        from contest.dance_timings import fixed_timing
+
+        cue_side_offset_pixels = fixed_timing("Cool", "Master")["cue_side_offset_pixels"]
+    if isinstance(expected_cues, bool) or not isinstance(expected_cues, int) or expected_cues not in (3, 4):
+        raise ValueError("Select the rank's three or four expected cues.")
     image = native_top(image)
     layout = layout_for(dance)
     bar, pointer = read_bar(image), read_pointer(image)
-    progress = read_progress(bar, pointer)
-    buttons = merge_buttons(read_side(image, "left", layout), read_side(image, "right", layout),
+    progress = read_progress(bar, pointer, frames_per_pixel=frames_per_pixel)
+    buttons = merge_buttons(read_side(image, "left", layout, cue_side_offset_pixels=cue_side_offset_pixels),
+                            read_side(image, "right", layout, cue_side_offset_pixels=cue_side_offset_pixels),
                             layout["preferred_side"], conflict_policy)
     errors = []
     if progress["status"] == "conflict":
         errors.append("Pointer and timing-strip evidence disagree")
     if buttons["conflicts"] and conflict_policy == "error":
         errors.append("The two button sources disagree")
-    if len(buttons["accepted"]) > 4:
-        errors.append("More than four demonstrated buttons were identified")
+    if len(buttons["accepted"]) > expected_cues:
+        errors.append(f"More than {expected_cues} demonstrated buttons were identified")
     if errors:
         status = "error"
     elif progress["status"] == "inactive":
@@ -413,9 +424,10 @@ def analyze(image, dance, *, conflict_policy="error"):
     elif progress["frame_range"] is None:
         status = "uncertain"
     else:
-        status = "ok" if len(buttons["accepted"]) == 4 else "partial"
+        status = "ok" if len(buttons["accepted"]) == expected_cues else "partial"
     return {"status": status, "errors": errors, "source": "offline_image_pixels", "layout": layout,
-            "progress": progress, "bar": bar, "pointer": pointer, "buttons": buttons}
+            "progress": progress, "bar": bar, "pointer": pointer, "buttons": buttons,
+            "expected_cues": expected_cues, "cue_side_offset_pixels": cue_side_offset_pixels}
 
 
 class ProgressTracker:
@@ -461,9 +473,12 @@ class DemoAccumulator:
     for each dance, including the second dance led by the same opponent.
     """
 
-    def __init__(self, dance):
+    def __init__(self, dance, *, expected_cues=4):
         layout_for(dance)
+        if isinstance(expected_cues, bool) or not isinstance(expected_cues, int) or expected_cues not in (3, 4):
+            raise ValueError("Select the rank's three or four expected cues.")
         self.dance = dance
+        self.expected_cues = expected_cues
         self.seen = {}
         self.last_position = None
 
@@ -484,12 +499,12 @@ class DemoAccumulator:
             if x in self.seen and self.seen[x]["button"] != cue["button"]:
                 raise ValueError(f"The demonstrated button at x={x} changed")
             self.seen[x] = cue
-        if len(self.seen) > 4:
-            raise ValueError("More than four demonstrated buttons accumulated")
+        if len(self.seen) > self.expected_cues:
+            raise ValueError(f"More than {self.expected_cues} demonstrated buttons accumulated")
         return self.result()
 
     def result(self):
-        return {"dance": self.dance, "complete": len(self.seen) == 4,
+        return {"dance": self.dance, "complete": len(self.seen) == self.expected_cues,
                 "buttons": [self.seen[x] for x in sorted(self.seen)]}
 
 
@@ -502,7 +517,7 @@ def annotate(image, reading):
         draw.rectangle((left, 153, right, 160), outline="red")
     for cue in reading["buttons"]["accepted"]:
         for side in cue["evidence"]:
-            x = cue["demo_x"] + (120 if side == "right" else 0)
+            x = cue["demo_x"] + (reading["cue_side_offset_pixels"] if side == "right" else 0)
             y = 168 if side == "left" else reading["layout"]["right_marker_y"] - 8
             draw.rectangle((x - 8, y, x + 7, y + 15), outline="lime" if side == cue["source_side"] else "cyan")
     return image
@@ -517,7 +532,7 @@ def summarize(reading):
         "phase": progress["phase"], "position_bounds": progress["position_bounds"],
         "frame_range": progress["frame_range"], "frame_unit": "emulator_frames_from_dance_sweep_start",
         "position_source": progress.get("position_source"), "master_side": buttons["master_side"],
-        "visible_buttons_complete": len(buttons["accepted"]) == 4,
+        "visible_buttons_complete": len(buttons["accepted"]) == reading["expected_cues"],
         "buttons": [{key: cue[key] for key in ("demo_x", "button", "source_side", "fallback", "cross_checked")}
                     for cue in buttons["accepted"]],
         "conflicts": buttons["conflicts"],

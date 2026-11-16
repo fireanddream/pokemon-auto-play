@@ -1,22 +1,27 @@
 -- Four pre-move judge captures, Acting inputs, and ribbon-driven slot-5 retries.
 local config = ...
 assert(type(config) == "table" and config.stage == 6, "Stage 6 configuration is required")
-assert(config.handoff_render_frames == 10 and config.retry_render_host_seconds == 1,
-    "Stage 6 requires ten-frame handoff preparation or one host second after a slot-5 load")
+assert(type(config.handoff_render_frames) == "number" and config.handoff_render_frames >= 1
+    and config.handoff_render_frames == math.floor(config.handoff_render_frames)
+    and type(config.retry_render_host_seconds) == "number" and config.retry_render_host_seconds > 0
+    and config.retry_render_host_seconds < math.huge,
+    "Stage 6 requires positive configured frame and host-second render windows")
 local source = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/")
-local root = assert(source:match("^(.*)/")) .. "/.."
+local directory = assert(source:match("^(.*)/"))
+local root = dofile(directory .. "/resource_root.lua")
 local master = dofile(root .. "/lua/checkpoint_master.lua")
 local bridge_io = dofile(root .. "/lua/bridge_io.lua")
-local pixels = dofile(root .. "/contest/acting_pixels.lua")
-local acting_plan = dofile(root .. "/contest/acting_plan.lua")
-local party_reader = dofile(root .. "/contest/party_contest.lua").new(memory, emu.gamecode)
+local platinum = dofile(root .. "/lua/platinum.lua")
+local pixels = dofile(directory .. "/acting_pixels.lua")
+local acting_plan = dofile(directory .. "/acting_plan.lua")
+local party_reader = dofile(directory .. "/party_contest.lua").new(memory, emu.gamecode)
 local mailbox = bridge_io.new(root .. "/tmp", "checkpoint-")
 local command_id, idle = mailbox:previous_id(), false
 local adapter = dofile(root .. "/lua/checkpoint_desmume.lua").new({
     pause = function() assert(idle, "A host-confirmed native pause is required") end,
     is_paused = function() return idle end,
 })
-local api, engine, latest, pending, current_plan, source_party, entry_moves
+local api, engine, latest, pending, current_plan, source_party, entry_moves, result_party
 local stage, capture_kind = "setup", "source"
 local attempt, round_index, completed_rounds = 0, 0, 0
 local render_prepared, render_epoch = false, nil
@@ -25,8 +30,7 @@ local move_cursor, judge_cursor = 1, 1
 local observer = {name = "pt-contest-stage6", commands = {}}
 
 local function game()
-    local code = emu.gamecode()
-    return {code = code, supported = code == "CPUJ", identity_source = "emu.gamecode"}
+    return platinum.game(emu.gamecode())
 end
 
 local function release()
@@ -79,7 +83,7 @@ local function checkpoint_snapshot(frame)
     if capture_kind == "round" then
         result.stars = pixels.read_stars(raw)
         if round_index == 1 and not entry_moves then
-            entry_moves = pixels.read_move_categories(raw)
+            entry_moves = pixels.read_move_categories(raw, config.unavailable_move_slots)
             entry_moves.frame, entry_moves.epoch, entry_moves.path = frame, result.image.epoch, result.image.path
         end
         result.move_categories = entry_moves
@@ -88,7 +92,7 @@ local function checkpoint_snapshot(frame)
         result.screen = pixels.match_points(raw, config.overworld.points)
         result.screen.expected = "loaded_overworld"
         result.screen.reference = config.overworld.reference
-        result.party = party_reader.read_first(frame)
+        result.party = result_party
         result.same_first_party = result.party.species_id == source_party.species_id and not result.party.is_egg
         result.target_acquired = result.party.ribbon_flags[config.target.ribbon_bit + 1]
     end
@@ -100,7 +104,7 @@ local function initialize()
         reader = {snapshot = checkpoint_snapshot}, log = master.jsonl(config.work .. "/checkpoint-events.jsonl"),
         definitions = {
             ["stage-6-round"] = {checks = {
-                {id = "cpuj", field = "game.code", expected = "CPUJ"},
+                {id = "platinum", field = "game.supported", expected = true},
                 {id = "released", field = "trial.released", expected = true},
                 {id = "round", field = "trial.round", context = "round"},
                 {id = "three_readable_judges", field = "stars.readable", expected = true},
@@ -120,7 +124,7 @@ local function initialize()
                 {id = "capture_epoch", field = "image.epoch", context = "epoch"},
             }, branches = {pass = "perform-round"}},
             ["stage-6-act"] = {checks = {
-                {id = "cpuj", field = "game.code", expected = "CPUJ"},
+                {id = "platinum", field = "game.supported", expected = true},
                 {id = "four_rounds_complete", field = "trial.completed_rounds", expected = 4},
                 {id = "released", field = "trial.released", expected = true},
                 {id = "overworld", field = "screen.confirmed", expected = true},
@@ -165,7 +169,7 @@ local function dispatch(action, args)
         round_index, completed_rounds, move_cursor, judge_cursor = 0, 0, 1, 1
         render_prepared, render_epoch = false, nil
         render_mode, render_end_frame, render_host_seconds = nil, nil, nil
-        current_plan, source_party, entry_moves, stage = nil, nil, nil, "loaded"
+        current_plan, source_party, entry_moves, result_party, stage = nil, nil, nil, nil, "loaded"
     elseif action == "begin-attempt" then
         assert((stage == "loaded" or (stage == "setup" and config.entry_mode == "stage5_handoff"))
             and adapter.frame() == config.source_frame,
@@ -175,6 +179,7 @@ local function dispatch(action, args)
         assert(source_party.read_valid and not source_party.is_egg
             and source_party.ribbon_flags[config.target.ribbon_bit + 1] == false,
             "The accepted Acting source must have an eligible first Pokemon missing the target ribbon")
+        config.unavailable_move_slots = config.unavailable_move_slots or source_party.unavailable_move_slots
         release()
         if not engine then initialize() end
         render_prepared, render_epoch = false, adapter.epoch()
@@ -213,6 +218,10 @@ local function dispatch(action, args)
         render_end_frame = adapter.frame()
         render_prepared, stage = true, "ready"
         observation = observer.snapshot(adapter.frame())
+    elseif action == "inspect" then
+        finish_round()
+        result_party = party_reader.read_first(adapter.frame())
+        observation = {frame = adapter.frame(), party = result_party}
     elseif action == "round-visit" or action == "result-visit" then
         assert(engine and not pending, "Expected one active Stage 6 attempt")
         if stage == "perform-round" then finish_round() end

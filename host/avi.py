@@ -94,7 +94,7 @@ class AviRecording:
                 return {"avi_path": str(self.path), "avi_active": True,
                     "codec": self.CODEC, "native_auto_resume": True}
             time.sleep(0.01)
-        raise TimeoutError("AVI setup exceeded the dance-run host deadline.")
+        raise TimeoutError("timeout")
 
     def cancel_setup(self):
         if self.requested:

@@ -1,10 +1,11 @@
 -- Contest entry: one input sequence, then one screenshot-reviewed checkpoint.
 local source = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/")
-local root = assert(source:match("^(.*)/")) .. "/.."
+local directory = assert(source:match("^(.*)/"))
+local root = dofile(directory .. "/resource_root.lua")
 local master = dofile(root .. "/lua/checkpoint_master.lua")
 local bridge_io = dofile(root .. "/lua/bridge_io.lua")
-local party_reader = dofile(root .. "/contest/party_contest.lua").new(memory, emu.gamecode)
-local screen_checks = dofile(root .. "/contest/screen_checks.lua")
+local party_reader = dofile(directory .. "/party_contest.lua").new(memory, emu.gamecode)
+local screen_checks = dofile(directory .. "/screen_checks.lua")
 local mailbox = bridge_io.new(root .. "/tmp", "checkpoint-")
 local command_id = mailbox:previous_id()
 local idle = false
@@ -24,7 +25,7 @@ function observer.snapshot(frame)
         screen.fresh_visual_binding = captured.frame == frame and captured.epoch == adapter.epoch()
             and captured.raw == gui.gdscreenshot()
         if screen.source == "local_reference_pixels" then
-            screen.pixel_check = screen_checks.read(captured.raw, "dress_up_entry")
+            screen.pixel_check = screen_checks.read(captured.raw, "dress_up_entry", target.rank)
             screen.confirmed = screen.confirmed and screen.fresh_visual_binding and screen.pixel_check.confirmed
         end
     end
@@ -139,7 +140,7 @@ local function dispatch(action, args)
         api.capture()
         captured = {frame = adapter.frame(), epoch = adapter.epoch(), raw = gui.gdscreenshot()}
         observation = observer.snapshot(adapter.frame())
-        observation.automatic_check = screen_checks.read(captured.raw, "dress_up_entry")
+        observation.automatic_check = screen_checks.read(captured.raw, "dress_up_entry", target.rank)
         stage = "review"
     elseif action == "visit" then
         assert(stage == "review" and not pending and #args == (enrollment_check and 9 or 6),
@@ -186,7 +187,7 @@ local function dispatch(action, args)
             assert(config.target[key] == latest.snapshot.target[key], "The Stage 4 target differs from Stage 3")
         end
         -- Replace callbacks inside this paused RPC; native Lua restart can advance a frame.
-        assert(loadfile(root .. "/contest/stage4_dress.lua"))(config, true)
+        assert(loadfile(directory .. "/stage4_dress.lua"))(config, true)
         assert(adapter.frame() == latest.frame, "The direct dressing handoff advanced emulation")
         stage = "stage4_handoff"
         return {frame = adapter.frame(), epoch = adapter.epoch(), next_section = stage,

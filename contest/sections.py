@@ -5,8 +5,9 @@ import shutil
 
 from contest import rank_dance, stage1_load, stage2_prep, stage3_enter, stage4_dress, stage6_act
 from contest.dance_timings import fixed_timing
-from contest.runtime import ACTING_RETRY_SLOT
+from contest.runtime import ACTING_ENTRY_SLOT
 from contest.stage2_bag import Stage2BagState
+from contest.timing_profiles import section
 from host.checkpoints import write_json
 
 
@@ -20,8 +21,17 @@ def accepted(runtime, **facts):
 
 
 def reviewed_inputs(runtime, plan, expected, filename):
+    if plan["stage"] == 1:
+        timing = section(runtime.settings.get("timing_profile"), "stage2_preparation")
+        x_tap = f"X:{timing['menu_hold_frames']}:{timing['menu_release_frames']}"
+        plan = {**plan, "total_emulator_frames": plan["total_emulator_frames"]
+            + 2 * (timing["menu_hold_frames"] + timing["menu_release_frames"])}
     runtime.start_section(plan)
     inputs = runtime.action("combo", "inputs", *plan["inputs"], expected="combo_complete", name="input-result.json")
+    if plan["stage"] == 1:
+        runtime.action("combo", "inputs", x_tap, expected="combo_complete")
+        runtime.command("inspect")
+        runtime.action("combo", "inputs", x_tap, expected="combo_complete")
     capture = runtime.command("capture")
     review, image = runtime.review(capture, expected, filename=filename)
     pending = runtime.command("visit", review["verdict"], review["source"], image.as_posix(), review["note"],
@@ -32,10 +42,16 @@ def reviewed_inputs(runtime, plan, expected, filename):
 
 
 def load(runtime):
-    plan = stage1_load.load_plan()
+    plan = stage1_load.load_plan(timing_profile=runtime.settings.get("timing_profile"))
     facts = reviewed_inputs(runtime, plan, plan["acceptance"], "stage1.png")
     runtime.overworld = stage6_act.overworld_reference_from_checkpoint(runtime.boundary["receipt"], runtime.boundary["checkpoint"])
     write_json(runtime.work / "overworld-reference.json", runtime.overworld)
+    snapshot = runtime.boundary["checkpoint"]["snapshot"]
+    party = snapshot["party"]
+    runtime.unavailable_move_slots = list(party["unavailable_move_slots"])
+    runtime.record("readiness", hp=party["current_hp"], max_hp=party["max_hp"], sheen=party["sheen"],
+        move_count=party["move_count"], unavailable_move_slots=party["unavailable_move_slots"],
+        text_speed=snapshot["options"]["text_speed"], screenshot=facts["screenshot"])
     return accepted(runtime, **facts)
 
 
@@ -43,22 +59,27 @@ def prep(runtime, *, target=None):
     config, _ = runtime.start_section({"stage": 2})
     initial = runtime.command("inspect")
     runtime.json("source-snapshot.json", initial)
+    image = initial["observation"].get("image")
+    if image and image["path"].endswith("/stage2-source.gd"):
+        runtime.register(image["path"], kind="capture")
+        runtime.controller.screenshot(runtime.register(runtime.active_work / "stage2-source.png", kind="capture"))
     plan = stage2_prep.prep_plan(initial["observation"],
-        bag_state=Stage2BagState(runtime.bag_context["opened_once"]), cursor=runtime.bag_context["cursor_position"], target=target)
+        bag_state=Stage2BagState(runtime.bag_context["opened_once"]), cursor=runtime.bag_context["cursor_position"], target=target,
+        timing_profile=runtime.settings.get("timing_profile"))
     runtime.target = plan["target"]
     runtime.json("runner-setup.json", {**config, **plan, "shared_host_deadline": runtime.stage_deadline})
     runtime.command("init-prep", runtime.lua("prep-plan.lua", plan).as_posix())
     if plan["inputs"]:
         runtime.action("combo", "inputs", *plan["inputs"], expected="combo_complete", name="input-result.json")
     pending = runtime.command("visit")
+    if pending["checkpoint"]["decision"] == "abort":
+        runtime.acknowledge(pending, slot=2)
     actual = pending["checkpoint"]["snapshot"]["party"]
     if actual["held_item_id"] != plan["expected_item_id"]:
         expected = stage2_prep.SCARVES.get(plan["expected_item_id"], f"Item {plan['expected_item_id']}")
         raise RuntimeError(f"Scarf equip failed: expected {expected}; actual {actual['held_item']}.")
     runtime.acknowledge(pending, slot=2)
     runtime.party, runtime.bag_context = actual, dict(plan["bag_context"])
-    if runtime.target is not None:
-        runtime.retain_retry(2)
     return accepted(runtime, stage2_accepted=True, target=runtime.target, mode=plan["mode"],
         bag_context=runtime.bag_context, source_party=initial["observation"]["party"], final_party=actual,
         all_ribbons_owned=actual["all_ribbons_owned"])
@@ -66,7 +87,8 @@ def prep(runtime, *, target=None):
 
 def enter(runtime):
     target = runtime.target
-    plan = stage3_enter.entry_plan(target["category"], target["rank"], host_timeout=runtime.settings["stage_timeout_seconds"])
+    plan = stage3_enter.entry_plan(target["category"], target["rank"], host_timeout=runtime.settings["stage_timeout_seconds"],
+        timing_profile=runtime.settings.get("timing_profile"))
     facts = reviewed_inputs(runtime, plan, plan["acceptance"], "stage3.png")
     return accepted(runtime, stage3_accepted=True, target=target, **facts)
 
@@ -74,7 +96,8 @@ def enter(runtime):
 def custom_enter(runtime):
     """Inert continuous-enrollment helper for the current accepted contest target."""
     target = runtime.target
-    plan = stage3_enter.entry_plan(target["category"], target["rank"], host_timeout=runtime.settings["stage_timeout_seconds"])
+    plan = stage3_enter.entry_plan(target["category"], target["rank"], host_timeout=runtime.settings["stage_timeout_seconds"],
+        timing_profile=runtime.settings.get("timing_profile"))
     runtime.start_section(plan)
     inputs = runtime.action("combo", "inputs", *plan["inputs"], expected="combo_complete", name="input-result.json")
     capture = runtime.command("capture")
@@ -99,7 +122,8 @@ def dress(runtime):
     plan = stage4_dress.dress_plan(host_timeout=runtime.settings["stage_timeout_seconds"], from_stage3=True,
         dress_grid=settings["grid_size"], dress_seconds=settings["game_seconds"],
         pickup_frames=settings["motion"]["pickup_frames"], drag_frames=settings["motion"]["drag_frames"],
-        drag_release_frames=settings["motion"]["release_frames"], page_wait_frames=settings["next_page"]["wait_frames"])
+        drag_release_frames=settings["motion"]["release_frames"], page_wait_frames=settings["next_page"]["wait_frames"],
+        timing_profile=runtime.settings.get("timing_profile"))
     plan["automatic_dressing"]["frame_limit"] = settings["frame_limit"]
     plan["require_demo_pointer"] = True
     plan["acceptance"] = "Fresh green Dance 1 entry with a readable paused demonstration pointer."
@@ -112,9 +136,9 @@ def dress(runtime):
         acknowledge=lambda pending: runtime.acknowledge(pending, slot=runtime.settings["save_policy"]["temporary_slot"]),
         record=runtime.record)
     runtime.set_speed("run")
-    timing = fixed_timing(runtime.target["category"], runtime.target["rank"])
+    timing = fixed_timing(runtime.target["category"], runtime.target["rank"], timing_profile=runtime.settings.get("timing_profile"))
     landing, pending = stage4_dress.locate_dance_entry(runtime.emulator, runtime, plan, runtime.active_work,
-        record=runtime.record, rank_timing=timing)
+        record=runtime.record, rank_timing=timing, timing_profile=runtime.settings.get("timing_profile"))
     timing = landing["rank_timing"]
     runtime.acknowledge(pending, slot=4)
     checkpoint = runtime.boundary["checkpoint"]
@@ -145,45 +169,51 @@ def dance(runtime):
         entry_pointer_x=entry_pointer_x,
         fixed_timing=handoff["rank_timing"], observation_policy=runtime.settings["dance_observation_policy"],
         first_feedback_policy=runtime.settings["dance_first_feedback_policy"],
-        offset_frames=runtime.settings["dance_offset_frames"], osd_settle_seconds=runtime.settings["native_osd_settle_host_seconds"])
+        offset_frames=runtime.settings["dance_offset_frames"], osd_settle_seconds=runtime.settings["native_osd_settle_host_seconds"],
+        timing_profile=runtime.settings.get("timing_profile"))
     source_image = runtime.register(runtime.active_work / "source-stage4.gd", kind="capture")
     shutil.copy2(handoff["source_image"]["path"], source_image)
     runtime.start_section(plan, source_image={**handoff["source_image"], "path": source_image.as_posix()})
     dances, last = rank_dance.stage5_responses(runtime, plan)
-    runtime.action("lead-dances", expected="lead_dances_complete", name="lead-dances-result.json")
-    runtime.action("acting-transition", expected="B_transition_complete", name="transition-result.json")
-    runtime.acknowledge(runtime.command("visit", "stage-5-dance"), slot=ACTING_RETRY_SLOT)
-    runtime.retain_retry(ACTING_RETRY_SLOT)
+    rank_dance.stage5_handoff(runtime, plan)
+    runtime.acknowledge(runtime.command("visit", "stage-5-dance"), slot=ACTING_ENTRY_SLOT)
     checkpoint = runtime.boundary["checkpoint"]
+    saved = runtime.boundary["save_state"]
     acting = {"source_stage": 5, "source_checkpoint": runtime.boundary["receipt"],
-        "source_state": runtime.boundary["save_state"]["retained_path"], "source_frame": checkpoint["frame"],
+        "source_state": saved["retained_path"] if saved else None, "source_frame": checkpoint["frame"],
         "source_epoch": checkpoint["epoch"], "run_id": runtime.run_id, "phase": "acting_entry", "target": runtime.target,
         "runner_result": str(runtime.active_work / "runner-result.json")}
     runtime.json("acting-handoff.json", acting)
     trial = last["checkpoint"]["snapshot"]["trial"]
     return accepted(runtime, stage5_accepted=True, dances=dances, completed_dances=len(dances),
         rank_timing=plan["rank_timing"], input_count=trial["total_input_count"], excellent_count=trial["total_excellent_count"],
-        skipped_input_count=trial["total_skipped_inputs"], unreadable_feedback=trial["total_unreadable_feedback"],
+        skipped_input_count=trial["total_skipped_inputs"], miss_count=trial["total_miss_count"],
         offset_check=last["checkpoint"]["snapshot"]["offset_check"], readiness_check="stage6_first_judge_capture",
         acting_handoff=str(runtime.active_work / "acting-handoff.json"))
 
 
 def act(runtime, *, attempt):
-    loaded = runtime.loaded_slot == ACTING_RETRY_SLOT
-    plan = stage6_act.acting_plan(host_timeout=runtime.settings["stage_timeout_seconds"], from_stage5=not loaded,
+    plan = stage6_act.acting_plan(host_timeout=runtime.settings["stage_timeout_seconds"], from_stage5=True,
         uncapped=True, round_seconds=runtime.settings["acting_round_game_seconds"], final_seconds=runtime.settings["acting_final_game_seconds"],
-        source_slot=ACTING_RETRY_SLOT)
+        source_slot=ACTING_ENTRY_SLOT, timing_profile=runtime.settings.get("timing_profile"))
     plan.update(checkpoint_slot=6 if runtime.settings["debug"] == 1 else None,
-        temporary_slot=runtime.settings["save_policy"]["temporary_slot"])
-    runtime.start_section(plan, attempt=attempt, overworld=runtime.overworld)
+        source_slot=ACTING_ENTRY_SLOT if runtime.settings["debug"] == 1 else None,
+        temporary_slot=runtime.settings["save_policy"]["temporary_slot"],
+        retry_policy="finish_contest_then_prepare_and_reenter_from_current_overworld")
+    plan.pop("retry_render_host_seconds")
+    runtime.start_section(plan, attempt=attempt, overworld=runtime.overworld,
+        unavailable_move_slots=runtime.unavailable_move_slots if runtime.unavailable_move_slots is not None
+            else runtime.party["unavailable_move_slots"])
     initial = runtime.command("begin-attempt")
     runtime.json("source-snapshot.json", initial)
-    preparation = stage6_act.prepare_render(runtime.emulator, runtime, initial, entry_mode=plan["entry_mode"])
+    preparation = stage6_act.prepare_render(runtime.emulator, runtime, initial, entry_mode=plan["entry_mode"], plan=plan)
     runtime.json("render-preparation.json", preparation)
     runtime.record("render_prepared", **preparation)
     rounds, images, move_categories = [], set(), None
     for number in range(1, 5):
         pending = runtime.command("round-visit", number)
+        if not pending["checkpoint"].get("snapshot"):
+            runtime.acknowledge(pending, slot=plan["temporary_slot"])
         snapshot = pending["checkpoint"]["snapshot"]
         capture = stage6_act.retain_capture(snapshot, runtime.active_work, images, judges=True)
         if number == 1:
@@ -198,7 +228,12 @@ def act(runtime, *, attempt):
             "checkpoint_visit": checked["checkpoint"]["visit"], "end_frame": inputs["frame"]}
         rounds.append(item)
         runtime.json(f"round-{number}.json", item)
+    runtime.command("inspect")
+    runtime.action("combo", "inputs", f"X:{plan['timing']['hold_frames']}:{plan['timing']['release_frames']}",
+        expected="combo_complete")
     pending = runtime.command("result-visit")
+    if not pending["checkpoint"].get("snapshot"):
+        runtime.acknowledge(pending, slot=6)
     snapshot = pending["checkpoint"]["snapshot"]
     result_image = stage6_act.retain_capture(snapshot, runtime.active_work, images)
     runtime.acknowledge(pending, slot=6)

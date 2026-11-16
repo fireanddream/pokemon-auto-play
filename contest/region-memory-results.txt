@@ -1,0 +1,45 @@
+Platinum regional memory-reader verification
+
+Scope: supplied JPN, USA, EU, and Korea ROMs; offline Lua 5.1 readers.
+Fields: first-slot HP, occupied/empty moves, 20 contest-ribbon bits, Bag scarves
+260-264 with one-based positions and quantities.
+Units: offline cases; HP points; zero emulator-frame advancement.
+
+Region  ROM code  Header revision  Passed cases  Expected rejections  Unexpected failures
+JPN     CPUJ      0                90            10                   0
+USA     CPUE      1                90            10                   0
+EU      CPUE      10               90            10                   0
+Korea   CPUK      0                90            10                   0
+Total                             360           40                   0
+
+Per-region cases:
+  1 trusted ROM-code/profile selection against a deliberately stale RAM header.
+  6 retained-record replays: two sources, each with flagged/unflagged plain HP
+    and PID-encrypted HP.
+  48 body-layout checks: all 24 block orders, encrypted and plaintext bodies.
+  22 ribbon masks: each of the 20 bits, none owned, all owned.
+  2 Bag checks: scarves at positions 3/7/40/120/165 with quantities 2/1/999/7/1,
+    and a Bag with no scarves.
+  3 existing Stage 1 boundaries: two moves accepted, HP zero stopped, one move
+    stopped; one snapshot and one state-free acknowledgement per visit.
+  8 stopped reads: corrupt body, bad stored-data flag, HP above 714,
+    conflicting HP interpretations, missing data/save pointers, bad Bag page,
+    and an unsupported trusted game code.
+
+Passed cases include all 40 expected rejections.
+USA/EU raw ARM9 programs are byte-identical; both select the CPUE profile.
+Korea's late-data 0x44 adjustment is preserved; first-party offsets stay common.
+Raw ARM9 trainer/save pointer literals are present in all four files. Data-pointer
+literals were not found by raw-byte inspection; offline fixtures do not prove
+live pointer contents or native layout correctness for every region.
+
+Existing checks: python -B -m tests passed (68 tests).
+Syntax: python -B contest/super_contest.py --check passed.
+Reproduce: python -B tmp/inspect_platinum_regions.py
+           python -B tmp/verify_platinum_regions.py
+
+Retained inputs: tmp/contest/contest-20261115-115237-405718/prepared-battery.dsv
+                tmp/contest/usa-party-debug-20261115-121536-018445/prepared-battery.dsv
+Prior live Stage 1 evidence: JPN and USA, paused frame 1368, HP 187/187.
+EU/Korea live reads and full regional contest runs remain unverified.
+This verification performed zero live attempts and advanced zero emulator frames.

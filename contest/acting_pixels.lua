@@ -98,28 +98,34 @@ local move_profiles = {
 local move_boxes = {{16, 216, 112, 284}, {144, 216, 240, 284},
                     {16, 308, 112, 376}, {144, 308, 240, 376}}
 
-function M.read_move_categories(raw)
+function M.read_move_categories(raw, unavailable_move_slots)
     assert(validate(raw) == 384, "Move categories require a native stacked 256 by 384 GD framebuffer")
+    local blocked = {}
+    for _, slot in ipairs(unavailable_move_slots or {}) do blocked[slot] = true end
     local result = {source = "native_move_button_fill_rgb", readable = true,
         categories = {}, slots = {}, total_pixels = 0, matched_pixels = 0,
-        memory_proven = false, direct_read_frames = 0}
+        memory_proven = false, direct_read_frames = 0, unavailable_move_slots = unavailable_move_slots}
     for slot, box in ipairs(move_boxes) do
         local item = {slot = slot, bounds = box, category = "unreadable", readable = false,
             probes = {}, matched_pixels = 0}
         -- Keep both columns outside the move names, category labels, and heart text.
-        for _, x in ipairs({box[1] + 2, box[3] - 4}) do
-            for _, y in ipairs({box[2] + 4, box[2] + 28, box[4] - 4}) do
-                item.probes[#item.probes + 1] = {x, y, rgb(raw, x, y)}
+        if blocked[slot] then
+            item.category, item.readable, item.unavailable = "unavailable", true, true
+        else
+            for _, x in ipairs({box[1] + 2, box[3] - 4}) do
+                for _, y in ipairs({box[2] + 4, box[2] + 28, box[4] - 4}) do
+                    item.probes[#item.probes + 1] = {x, y, rgb(raw, x, y)}
+                end
             end
-        end
-        for _, profile in ipairs(move_profiles) do
-            local matched = 0
-            for _, point in ipairs(item.probes) do
-                if same(point[3], point[4], point[5], profile.rgb) then matched = matched + 1 end
-            end
-            item.matched_pixels = math.max(item.matched_pixels, matched)
-            if matched == #item.probes then
-                item.category, item.readable = profile.category, true
+            for _, profile in ipairs(move_profiles) do
+                local matched = 0
+                for _, point in ipairs(item.probes) do
+                    if same(point[3], point[4], point[5], profile.rgb) then matched = matched + 1 end
+                end
+                item.matched_pixels = math.max(item.matched_pixels, matched)
+                if matched == #item.probes then
+                    item.category, item.readable = profile.category, true
+                end
             end
         end
         result.slots[slot], result.categories[slot] = item, item.category

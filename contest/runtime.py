@@ -8,12 +8,15 @@ import time
 from host.controller import Controller, ControllerConfig
 from host.checkpoints import CheckpointClient, write_json
 from host.emulator import DeSmuME
+from host.paths import ROOT
 from host.savestates import StateSlots
+from contest.platinum import identify_rom
+from contest.messages import CHECK_MESSAGES, abort_message
+from contest.timing_profiles import load_profile
 
 
-ROOT = Path(__file__).resolve().parents[1]
 ROM = ROOT / "desmume-0.9.13-win64/Roms/Pocket Monsters - Platinum (Japan).nds"
-ACTING_RETRY_SLOT = 10
+ACTING_ENTRY_SLOT = 5
 DIAGNOSTIC_SLOT = 9
 
 
@@ -30,7 +33,7 @@ class TimedController(Controller):
             return float("inf")
         value = self.live_deadline - time.monotonic()
         if value <= 0:
-            raise TimeoutError("The agreed contest-stage host deadline expired.")
+            raise TimeoutError("timeout")
         return value
 
     def deadline(self, seconds):
@@ -53,10 +56,21 @@ class TimedController(Controller):
 
 
 class TimedSlots(StateSlots):
+    def __init__(self, controller, *, saves_enabled=True, loads_enabled=True):
+        super().__init__(controller)
+        self.saves_enabled, self.loads_enabled = saves_enabled, loads_enabled
+
     def save(self, slot, *, expected=None, timeout=20):
+        if not self.saves_enabled:
+            raise RuntimeError("Quick saves are disabled for this run.")
         remaining = self.controller.remaining()
         limit = min(20 if timeout is None else timeout, remaining)
         return super().save(slot, expected=expected, timeout=limit)
+
+    def load(self, slot, refresh=True, timeout=45, *, checkpoint_visit=None):
+        if not self.loads_enabled:
+            raise RuntimeError("Quick-loads are disabled for this run; continue from the current game state.")
+        return super().load(slot, refresh=refresh, timeout=timeout, checkpoint_visit=checkpoint_visit)
 
 
 def setup_speed(emulator, *, inherited_uncapped=False):
@@ -89,19 +103,22 @@ class ContestRuntime:
         self.controller = controller or TimedController(ControllerConfig(rom=ROM))
         self.controller.live_deadline = self.total_deadline
         self.emulator = DeSmuME(self.controller)
-        self.emulator.states = TimedSlots(self.controller)
+        self.native_saves_enabled = settings["save_policy"].get("enabled", True)
+        self.emulator.states = TimedSlots(self.controller, saves_enabled=self.native_saves_enabled,
+            loads_enabled=settings["save_policy"].get("loads_enabled", True))
         self.client = CheckpointClient(self.emulator, self.work, run_id)
         self.owned = self.attached = self.finalized = False
-        self.originals, self.accepted_slots, self.retry_sources = {}, {}, {}
-        self.boundary, self.loaded_slot, self.position = None, None, None
+        self.originals, self.accepted_slots = {}, {}
+        self.boundary, self.position = None, None
         self.target, self.party, self.overworld = None, None, None
+        self.unavailable_move_slots = None
         self.bag_context = {"opened_once": False, "cursor_position": 1}
         self.dance_handoff = None
         self.active_work, self.stage, self.section_visit = self.work, None, None
         self.stage_started, self.stage_deadline = started, self.total_deadline
         self.rendering_before, self.speed_phase = None, None
         self.artifacts = None
-        self.lifecycle = {"lua_attachments": 0, "checkpoint_engines": 0, "retry_loads": [],
+        self.lifecycle = {"lua_attachments": 0, "checkpoint_engines": 0,
                           "speed_transitions": [], "terminal_cleanups": 0}
         self.on_progress = None
 
@@ -109,7 +126,7 @@ class ContestRuntime:
         owners = set(self.controller.emulator_process_ids()) | set(self.controller.emulator_window_process_ids())
         if owners:
             session = self.controller.session()
-            if owners != {session["pid"]} or Path(session["rom"]).resolve() != ROM.resolve():
+            if owners != {session["pid"]} or Path(session["rom"]).resolve() != self.controller.ROM.resolve():
                 raise RuntimeError("The master requires the sole controlled Platinum emulator.")
             self.owned = True
             self._one_lua_window(session)
@@ -159,29 +176,41 @@ class ContestRuntime:
         from contest.dance_master import lua_value
 
         path = self.active_work / name
-        path.write_text("return " + lua_value(value) + "\n", encoding="utf-8")
+        path.write_text("return " + lua_value(value) + "\n", encoding="utf-8", newline="\n")
         return self.register(path, kind="generated_configuration")
 
-    def setup(self, *, resume_measurement=False):
+    def validate_startup(self):
+        game = identify_rom(self.controller.ROM)
+        profile = self.settings.get("timing_profile")
+        if profile is None:
+            profile = self.settings["timing_profile"] = load_profile(game["code"])
+        if profile["game_code"] != game["code"]:
+            raise ValueError("The timing profile must match the selected ROM game code.")
+        battery = self.controller.EMULATOR / "Battery" / f"{self.controller.ROM.stem}.dsv"
+        if not battery.is_file() or not battery.stat().st_size:
+            raise ValueError(f"The game save is missing or empty. Place the matching .dsv save at: {battery}")
+        self.settings["game"] = game["code"]
+        self.settings["game_language_tested"] = game["tested"]
+        return game, battery
+
+    def setup(self, *, resume_measurement=False, fresh_start=False):
         from contest.dance_master import attach
 
         self.check()
-        with ROM.open("rb") as stream:
-            stream.seek(12)
-            if stream.read(4) != b"CPUJ":
-                raise ValueError("The integrated contest runner requires Japanese Platinum.")
-        battery = self.controller.EMULATOR / "Battery" / f"{ROM.stem}.dsv"
-        if not battery.is_file() or not battery.stat().st_size:
-            raise ValueError("The prepared Platinum battery save is missing or empty.")
-        existing = self.confirm_ownership()
+        game, battery = self.validate_startup()
+        existing = None if fresh_start else self.confirm_ownership()
         if resume_measurement and (existing is None or self.settings.get("mode") != "measurement"
                 or not self.settings.get("resume_paused")):
             raise RuntimeError("Paused continuation belongs to an existing measurement emulator.")
         if existing is None:
-            self.controller.launch(ROM)
+            if fresh_start:
+                self.controller.launch(self.controller.ROM, check_existing=False)
+            else:
+                self.controller.launch(self.controller.ROM)
             self.owned = True
         self.controller.live_session = self.controller.session()
         self.controller.set_pause(True)
+        (self.controller.EMULATOR / "StateSlots").mkdir(exist_ok=True)
         self.emulator.stop_movie()
         shutil.copy2(battery, self.work / "prepared-battery.dsv")
         self.lifecycle["speed_setup"] = self.emulator.restore_normal_speed(frame_limit=False)
@@ -197,7 +226,16 @@ class ContestRuntime:
             self.controller.send(window, 0x111, 191)
         if self.emulator.menu_state(221) & 0x8 or not self.emulator.menu_state(191) & 0x8:
             raise RuntimeError("Every-frame rendering was not confirmed at master setup.")
-        attach(self.controller, ROOT / "contest" / "super_contest.lua", bridge="pt-super-contest")
+        attachment = Path(__file__).resolve().with_name("super_contest.lua")
+        mailbox = self.controller.config.mailbox_dir
+        if mailbox != ROOT / "tmp":
+            from contest.dance_master import lua_value
+
+            wrapper = self.work / "attach.lua"
+            wrapper.write_text("CONTEST_MAILBOX_DIR = " + lua_value(mailbox.as_posix())
+                + "\ndofile(" + lua_value(attachment.as_posix()) + ")\n", encoding="utf-8", newline="\n")
+            attachment = self.register(wrapper, kind="generated_configuration")
+        attach(self.controller, attachment, bridge="pt-super-contest")
         self.attached = True
         self.lifecycle["lua_attachments"] += 1
         session = self.controller.session()
@@ -209,7 +247,8 @@ class ContestRuntime:
             self.emulator.command("reset", timeout=None, deadline=self.total_deadline)
             self.controller.state_changed("reset")
         self.position = self.client.command("init-run", self.run_id, self.work.as_posix(),
-            self.settings["true_retry"], self.settings["debug"], self.settings["dance_observation_policy"])
+            self.settings["debug"], self.settings["dance_observation_policy"],
+            self.lua("timing-profile.lua", self.settings["timing_profile"]).as_posix())
         self.lifecycle["checkpoint_engines"] += 1
         self.controller.USER32.SetForegroundWindow(window)
         self.check()
@@ -252,7 +291,6 @@ class ContestRuntime:
         if handoff["handoff"]["emulator_frames"] != 0 or handoff["frame"] != config["source_frame"]:
             raise RuntimeError("A normal section transition advanced emulator frames.")
         self.json("source-handoff.json", handoff)
-        self.loaded_slot = None
         self.check()
         return config, handoff
 
@@ -279,9 +317,14 @@ class ContestRuntime:
             self.originals[slot] = previous
 
     def acknowledge(self, response, *, slot):
-        saving = response["checkpoint"].get("save_required", True)
+        saving = response["checkpoint"].get("save_required")
+        if not isinstance(saving, bool):
+            raise RuntimeError("The contest checkpoint must declare its save policy.")
+        if saving and not self.native_saves_enabled:
+            raise RuntimeError("Quick saves are disabled for this run.")
         previous = None
         if saving:
+            StateSlots.validate_slot(slot)
             self.protect_slot(slot)
             previous = self.accepted_slots.get(slot) or self.originals[slot]
         accepted = self.client.acknowledge(response, slot=slot if saving else None,
@@ -304,42 +347,10 @@ class ContestRuntime:
         self.json("review-request.json", request)
         if not automatic_review(request, request["automatic_check"]):
             self.record("endpoint_unreadable", review_request=str(self.active_work / "review-request.json"), image=str(image))
-            raise RuntimeError(f"Stage {self.stage} screen check failed; stopped paused for review: {image}")
+            name = "loaded_overworld_screenshot" if self.stage == 1 else "dress_up_entry_screenshot"
+            raise RuntimeError(CHECK_MESSAGES[name])
         self.record("endpoint_review", review_request=str(self.active_work / "review-request.json"), image=str(image))
         return await_review(self.controller, request), image
-
-    def retain_retry(self, slot):
-        context = {"target": self.target, "bag_context": dict(self.bag_context), "source_party": self.party}
-        source = {**self.boundary, "context": context}
-        path = self.lua(f"retry-slot-{slot}.lua", context)
-        self.client.command("retain-context", slot, path.as_posix())
-        self.retry_sources[slot] = source
-        write_json(self.work / "retry-context.json", {str(key): {
-            "source_context": checkpoint_identity(value["checkpoint"]), "save_state": value["save_state"],
-            "source_checkpoint": value["receipt"], "context": value["context"]}
-            for key, value in self.retry_sources.items()})
-
-    def retry(self, slot):
-        if self.settings["true_retry"] != 0 or slot != ACTING_RETRY_SLOT:
-            raise ValueError(f"Only true_retry = 0 may reload the accepted slot {ACTING_RETRY_SLOT}.")
-        source = self.retry_sources[slot]
-        checkpoint = source["checkpoint"]
-        native, retained = self.emulator.states.path(slot), Path(source["save_state"]["retained_path"])
-        if not native.is_file() or not filecmp.cmp(native, retained, shallow=False):
-            raise RuntimeError(f"Native retry slot {slot} differs from its accepted paired checkpoint.")
-        armed = self.client.command("arm-retry", slot, checkpoint["visit"])
-        self.emulator.states.load(slot, refresh=False, timeout=None, checkpoint_visit=checkpoint["visit"])
-        self.position = self.controller.status()
-        if self.position["frame"] != checkpoint["frame"] or self.position["checkpoint_epoch"] != armed["epoch"] + 1:
-            raise RuntimeError("The retry did not restore its paired frame and create a new load epoch.")
-        self.boundary, self.loaded_slot = source, slot
-        context = source["context"]
-        self.target, self.party, self.bag_context = context["target"], context["source_party"], dict(context["bag_context"])
-        event = {"slot": slot, "source_visit": checkpoint["visit"], "frame": checkpoint["frame"],
-            "epoch": self.position["checkpoint_epoch"], "target": self.target}
-        self.lifecycle["retry_loads"].append(event)
-        self.record("retry_load", **event)
-        return source
 
     def finalize(self, *, error=None, emulator_closed=False):
         if self.finalized:
@@ -357,7 +368,7 @@ class ContestRuntime:
                 result[name] = action()
                 return True
             except (Exception, SystemExit, KeyboardInterrupt) as cleanup_error:
-                result["errors"].append(str(cleanup_error) or type(cleanup_error).__name__)
+                result["errors"].append(abort_message(cleanup_error, stage=self.stage))
                 return False
 
         if self.owned:
@@ -419,7 +430,7 @@ class ContestRuntime:
             try:
                 source = self.accepted_slots.get(slot) if slot != temporary_slot else original
                 source = source or original
-                native = self.emulator.states.path(slot, data={"rom": str(ROM)}) if emulator_closed else self.emulator.states.path(slot)
+                native = self.emulator.states.path(slot, data={"rom": str(self.controller.ROM)}) if emulator_closed else self.emulator.states.path(slot)
                 if source is not None:
                     if not native.is_file() or not filecmp.cmp(source, native, shallow=False):
                         shutil.copy2(source, native)
@@ -428,6 +439,6 @@ class ContestRuntime:
                 if slot == temporary_slot:
                     result[f"temporary_slot_{slot}_restored"] = True
             except (Exception, SystemExit) as cleanup_error:
-                result["errors"].append(str(cleanup_error))
+                result["errors"].append(abort_message(cleanup_error, stage=self.stage))
         result["lifecycle"] = self.lifecycle
         return result

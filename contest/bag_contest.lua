@@ -1,7 +1,9 @@
 -- Items-pocket reader promoted from the passed local scarf test.
 local directory = assert(debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("^(.*)/"))
-local core = dofile(directory .. "/../lua/pt_rng_readers.lua")
+local root = dofile(directory .. "/resource_root.lua")
+local core = dofile(root .. "/lua/pt_rng_readers.lua")
 local party = dofile(directory .. "/party_contest.lua")
+local platinum = dofile(root .. "/lua/platinum.lua")
 local names = {[0] = "None", [260] = "Red Scarf", [261] = "Blue Scarf",
     [262] = "Pink Scarf", [263] = "Green Scarf", [264] = "Yellow Scarf"}
 local M = {}
@@ -14,11 +16,11 @@ function M.new(memory_api, game_code)
     local function read32(address) return memory_api.readdwordunsigned(address) % 0x100000000 end
     local function span(address, size)
         assert(address % 4 == 0 and address >= 0x02000000 and address + size <= 0x02400000,
-            "Selected memory span is outside CPUJ main RAM")
+            "The Bag memory address could not be read reliably")
     end
-    return {snapshot = function(frame)
+    return {snapshot = function(frame, include_options)
         local _, game, pointers = reader:addresses()
-        assert(game.supported, "CPUJ Bag memory is unavailable")
+        assert(game.supported, "Pokemon Platinum Bag memory is unavailable")
         local pokemon = first.read_first(frame)
         pokemon.held_item = M.item_name(pokemon.held_item_id)
         local save = pointers.trainer.value
@@ -42,6 +44,7 @@ function M.new(memory_api, game_code)
         end
         return {frame = frame, game = {code = game.code, supported = game.supported,
             identity_source = game.identity_source}, party = pokemon,
+            options = include_options and platinum.read_options(memory_api, save, frame) or nil,
             bag = {pocket = "Items", items = items, count = #items, position_base = 1},
             access = {direct_read_frames = 0, injects_inputs = false},
             screen = {source = "prepared_save_and_scripted_inputs", memory_proven = false}}

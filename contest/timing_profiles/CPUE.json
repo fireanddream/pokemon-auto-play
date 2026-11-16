@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "game_code": "CPUE",
+  "name": "English / shared USA and EU (JPN defaults; live tuning pending)",
+  "sections": {
+    "stage1_loading": {
+      "_help": "ROM boot, two Start taps, A to load the save, then B to dismiss the connection prompt.",
+      "boot_wait_frames": 600,
+      "button_hold_frames": 12,
+      "start_release_frames": 180,
+      "load_save_a_release_frames": 180,
+      "dismiss_prompt_b_release_frames": 180
+    },
+    "stage2_preparation": {
+      "_help": "Bag navigation and giving or swapping the contest scarf.",
+      "menu_hold_frames": 12,
+      "menu_release_frames": 90,
+      "bag_down_release_frames": 30,
+      "give_confirmation_release_frames": 120
+    },
+    "stage3_entry": {
+      "_help": "Receptionist, rank/category/party menus, then repeated A through the introduction to dress-up.",
+      "menu_hold_frames": 12,
+      "menu_release_frames": 90,
+      "intro_a_mash_game_seconds": 60,
+      "intro_mash_hold_frames": 10,
+      "intro_mash_release_frames": 20
+    },
+    "stage4_dress_up": {
+      "_help": "Accessory placement, page rendering, Finish, and repeated A before input-free dance-entry checks.",
+      "accessory_budget_game_seconds": 15,
+      "accessory_pickup_hold_frames": 4,
+      "accessory_drag_frames": 12,
+      "accessory_release_frames": 5,
+      "page_tap_hold_frames": 2,
+      "page_tap_release_frames": 1,
+      "page_render_wait_frames": 30,
+      "finish_tap_hold_frames": 2,
+      "finish_tap_release_frames": 1,
+      "loaded_entry_render_frames": 10,
+      "dance_transition_a_mash_game_seconds": 40,
+      "transition_mash_hold_frames": 10,
+      "transition_mash_release_frames": 20,
+      "dance_entry_poll_game_seconds": 1
+    },
+    "stage5_dancing": {
+      "_help": "Response button timing, feedback wait, capture sampling, and repeated B into Acting. A negative offset presses early.",
+      "response_hold_frames": 2,
+      "feedback_release_frames": 10,
+      "input_offset_frames": -7,
+      "demo_sample_interval_frames": 6,
+      "native_overlay_settle_host_seconds": 3,
+      "acting_transition_b_mash_game_seconds": 18,
+      "transition_mash_hold_frames": 10,
+      "transition_mash_release_frames": 20
+    },
+    "stage6_acting": {
+      "_help": "Move/judge menus, repeated B between rounds and through results, and input-free render preparation. Main and standalone runners share this profile's durations.",
+      "menu_hold_frames": 12,
+      "menu_release_frames": 90,
+      "rounds_1_to_3_b_mash_game_seconds": 74,
+      "final_round_and_results_b_mash_game_seconds": 150,
+      "mash_hold_frames": 10,
+      "mash_release_frames": 20,
+      "handoff_render_frames": 10,
+      "loaded_state_render_host_seconds": 1
+    },
+    "standalone_dancing": {
+      "_help": "Prepared fixed-source demonstration anchor and display refresh. Motion and button timings come from the shared main-runner sections.",
+      "first_handoff_offset_frames": 193,
+      "loaded_source_refresh_frames": 2
+    },
+    "diagnostics": {
+      "_help": "Input-free measurement tools and optional entry/pointer probes; host seconds are actual wall-clock unpause time.",
+      "entry_probe_first_capture_game_seconds": 40,
+      "entry_probe_capture_interval_game_seconds": 5,
+      "dance_entry_poll_game_seconds": 1,
+      "dance_capture_interval_game_seconds": 2,
+      "rank_state_render_host_seconds": 0.5,
+      "rank_measurement_host_seconds": 1,
+      "pointer_calibration_frames": 60,
+      "pointer_sample_min_wait_frames": 20,
+      "pointer_sample_max_dance_fraction": 0.6
+    },
+    "fixed_dance_metrics": {
+      "_help": "Shared JPN main-runner motion baseline for every tool. Speed is numerator pixels / denominator emulator frames; gaps run from response x=248 to the next demo x=8; cue spacing is native pixels.",
+      "Normal/Super": {"pointer_speed_numerator": 8, "pointer_speed_denominator": 15, "same_leader_gap_frames": 30, "leader_change_gap_frames": 269, "cue_side_offset_pixels": 128},
+      "Cool": {"pointer_speed_numerator": 5, "pointer_speed_denominator": 9, "same_leader_gap_frames": 0, "leader_change_gap_frames": 216, "cue_side_offset_pixels": 120},
+      "Beauty": {"pointer_speed_numerator": 1, "pointer_speed_denominator": 3, "same_leader_gap_frames": 0, "leader_change_gap_frames": 357, "cue_side_offset_pixels": 120},
+      "Cute": {"pointer_speed_numerator": 2, "pointer_speed_denominator": 3, "same_leader_gap_frames": 24, "leader_change_gap_frames": 214, "cue_side_offset_pixels": 128},
+      "Smart": {"pointer_speed_numerator": 7, "pointer_speed_denominator": 12, "same_leader_gap_frames": 29, "leader_change_gap_frames": 245, "cue_side_offset_pixels": 128},
+      "Tough": {"pointer_speed_numerator": 5, "pointer_speed_denominator": 8, "same_leader_gap_frames": 28, "leader_change_gap_frames": 232, "cue_side_offset_pixels": 128}
+    }
+  }
+}

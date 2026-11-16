@@ -1,4 +1,4 @@
--- Screenshot-only strip, cue, and player-feedback helpers.
+-- Screenshot-only strip and player-feedback helpers.
 local M = {}
 
 local function color(raw, x, y)
@@ -59,74 +59,29 @@ function M.bar(raw)
         position_bounds = found and {last, first_empty - 1} or nil, source = "four_row_fill_and_empty_profiles"}
 end
 
-local function cue_color(r, g, b)
-    if r >= 192 and g >= 144 and b < 96 then return "A" end
-    if g >= 128 and g >= r + 40 and g >= b + 16 then return "Y" end
-    if r >= 48 and b >= 128 and b >= r + 32 and b >= g + 8 then return "B" end
-    if r >= 192 and r >= g + 80 and r >= b + 40 then return "X" end
-end
-
-function M.cues(raw)
-    local found = {}
-    for _, button in ipairs({"A", "B", "X", "Y"}) do
-        local first, last
-        local function complete()
-            if first and last - first + 1 == 14 then
-                found[#found + 1] = {button = button, x = math.floor((first + last + 1) / 2),
-                    left = first, right = last}
-            end
-            first, last = nil, nil
-        end
-        for x = 9, 126 do
-            local count = 0
-            for y = 170, 177 do
-                if cue_color(color(raw, x, y)) == button then count = count + 1 end
-            end
-            if count >= 2 then
-                if last and x ~= last + 1 then complete() end
-                first, last = first or x, x
-            elseif first then
-                complete()
+function M.feedback(raw, center)
+    -- The rainbow bubble's broad color groups survive different caption lettering.
+    local minimum, maximum = math.max(0, center - 36), math.min(255, center + 36)
+    local first_x, first_y, rows
+    rows = 0
+    for y = 0, 49 do
+        local cyan, yellow, pink, row_x = 0, 0, 0, nil
+        for x = minimum, maximum do
+            local r, g, b = color(raw, x, y)
+            if r <= 128 and g >= 176 and b >= 176 then
+                cyan, row_x = cyan + 1, row_x or x
+            elseif r >= 208 and g >= 176 and b <= 128 then
+                yellow, row_x = yellow + 1, row_x or x
+            elseif r >= 208 and b >= 176 and g <= 176 then
+                pink, row_x = pink + 1, row_x or x
             end
         end
-        complete()
-    end
-    table.sort(found, function(a, b) return a.x < b.x end)
-    return found
-end
-
-function M.feedback(raw, templates, center)
-    for _, template in ipairs(templates) do
-        local probes = {template.ink[1], template.ink[#template.ink], template.ink[math.floor(#template.ink / 2) + 1]}
-        local minimum = math.max(0, center - math.floor(template.width / 2) - 10)
-        local maximum = math.min(256 - template.width, center - math.floor(template.width / 2) + 10)
-        for y = 0, 50 - template.height do
-            for x = minimum, maximum do
-                local r, g, b = color(raw, x + probes[1][1], y + probes[1][2])
-                if r == g and g == b and r < 248 then
-                    local matches = true
-                    local function same(point)
-                        local a, c, d = color(raw, x + point[1], y + point[2])
-                        return a == r and c == r and d == r
-                    end
-                    for _, point in ipairs(probes) do
-                        if not same(point) then matches = false; break end
-                    end
-                    if matches then
-                        for _, point in ipairs(template.ink) do
-                            if not same(point) then matches = false; break end
-                        end
-                    end
-                    if matches then
-                        for _, point in ipairs(template.empty) do
-                            if same(point) then matches = false; break end
-                        end
-                    end
-                    if matches then
-                        return {label = template.label, x = x, y = y, text_intensity = r,
-                            source = "exact_text_pixel_shape"}
-                    end
-                end
+        if cyan >= 3 and yellow >= 3 and pink >= 3 then
+            first_x, first_y = first_x or row_x, first_y or y
+            rows = rows + 1
+            if rows >= 2 then
+                return {label = "Excellent", x = first_x, y = first_y, matched_rows = rows,
+                    source = "excellent_bubble_palette"}
             end
         end
     end

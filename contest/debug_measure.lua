@@ -1,10 +1,11 @@
 -- Debug enrollment/baseline adapter; optional measurement reads use framebuffer pixels.
 local directory = assert(debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("^(.*)/"))
-local bridge_io = dofile(directory .. "/../lua/bridge_io.lua")
-local combos = dofile(directory .. "/../lua/input_sequences.lua")
+local root = dofile(directory .. "/resource_root.lua")
+local bridge_io = dofile(root .. "/lua/bridge_io.lua")
+local combos = dofile(root .. "/lua/input_sequences.lua")
 local pixels = dofile(directory .. "/dance_pixels.lua")
 local screens = dofile(directory .. "/screen_checks.lua")
-local json = dofile(directory .. "/../lua/json.lua")
+local json = dofile(root .. "/lua/json.lua")
 local M = {}
 
 local function fresh_rules()

@@ -1,0 +1,52 @@
+English Dress-up immediate-finish check and main-path comparison
+
+Scope: CPUE (USA Rev 1), first-party Cool / Hyper, debug=1.
+Preparation: fresh English boot, shared Stages 1-3, verified Dress-up entry.
+Immediate-finish totals: 1 attempt; 1 success; 0 failures; 0 timeouts; 0 unreadable endpoints; 0 skipped attempts.
+
+Native slot 3: verified Dress-up entry at emulator frame 6080.
+Wait: exactly 60 input-free emulator frames; 0 accessory drags; 0 page taps.
+DONE: native bottom-screen (230, 173), 2 held / 1 released emulator frames.
+DONE input: emulator frames 6140-6143.
+A transition: 40 game seconds / 2393 emulator frames, using saved CPUE inputs.
+Post-transition polling: 16 checks; 957 input-free emulator frames (about 16 game seconds).
+Accepted endpoint: Dance 1 demo, exact pointer x=15, emulator frame 9493.
+Endpoint evidence: fresh zero-frame paused capture and acknowledged Stage 4 checkpoint.
+Finish: native pause confirmed; buttons/stylus released; 100% speed; frame limiter on; movie off.
+Duration: 76.946 host seconds.
+
+Script: tmp/debug_dress_finish.py
+Evidence: tmp/contest/english-dress-finish-20261115-223434-798175/runner-result.json
+
+Main-path comparison
+Normal-path sample: 1 attempt, interrupted by emulator closure before a completed Dance-entry endpoint.
+Both paths call the same place_accessories and locate_dance_entry helpers.
+Both use DONE (230, 173), 2 held / 1 released frames, 2393 A-mash frames, and one-game-second input-free entry polls.
+Normal preparation: 897 emulator frames, 3 accessory drags, 26 page taps.
+Final normal page cycle: starts at frame 6968; plans 33 frames; executes 9; deadline at frame 6977.
+Final page tap actually executes: 2 held + 1 released + 6 of the configured 30 render-wait frames.
+DONE starts at frame 6977; the full final page cycle would finish at frame 7001.
+Debug preparation: 60 input-free emulator frames, zero drags and zero page taps.
+Previous code gap: page_touch permitted a page tap based on the five-frame released tail, without requiring its full page/render cycle to fit.
+Guard: skip a new page tap when its complete held/released/render cycle cannot fit; wait released to the dressing deadline.
+Retained normal frame 9672 shows the Visual Competition opening dialogue after 40 A-mash game seconds plus five input-free polls.
+Normal screen: tmp/main-dress-poll-5-frame-9672.png (converted from the retained main-run GD capture).
+
+Validated guarded normal path
+Totals: 1 attempt; 1 success; 0 failures; 0 timeouts; 0 unreadable endpoints; 0 skipped attempts.
+Scope: CPUE Cool / Hyper, debug=1, normal 897-frame dressing budget, 6 initial page taps.
+Placement: 2 completed accessory drags; two filled accessory markers confirmed in the retained page image.
+Guard exercised: final page had 30 frames against a required 33; page-tap count stayed 25 before and after the released wait.
+DONE: frames 6977-6980; saved 40-game-second A transition; 16 subsequent input-free entry checks.
+Accepted endpoint: fresh paused Dance 1 demo at frame 10330, exact pointer x=12; native slot 4 saved.
+Finish: paused, inputs released, 100% speed, frame limiter on, movie off; 73.635 host seconds; no cleanup errors.
+Production: the passing guard is now in contest/stage4_dress.lua; regression coverage includes 9-, 32-, and 33-frame final page windows.
+Evidence: tmp/contest/english-dress-guard-20261115-233052-275460/runner-result.json
+Offline verification after the production port: python -B -m tests passed (74 tests).
+Syntax checks: main runner, contest debug, dance master, and Dress-up finish debug --check entries all passed.
+
+Collection-page Finish guard (offline host helper and persistent Lua)
+Limit: 14 collection page flips, excluding initial random navigation; Finish follows the full 33-frame page cycle.
+Totals: 5 cases; 5 passed; 0 failures, errors, or skipped cases. Three earlier-deadline cases cover 9/32/33-frame final windows.
+Guard cases: 0/7 initial flips plus 14 collection flips; stop at 462/693 emulator frames, followed immediately by the 3-frame DONE input.
+The new collection-page cutoff still needs live verification.

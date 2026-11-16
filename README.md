@@ -1,79 +1,107 @@
 # Pokémon Auto Play
 
-Standalone **Japanese Platinum (`CPUJ`) Super Contest automation** for Windows
-and DeSmuME. The six-stage master collects all 20 contest ribbons on the first
-party Pokémon. Prepared dancing runners, category/rank diagnostics, image readers,
-states, and retained findings live in [`contest/`](contest/README.md).
+Windows/DeSmuME automation that collects all **20 Platinum Super Contest ribbons**
+on the first party Pokémon. JPN (`CPUJ`) and English (`CPUE`, shared USA/EU) ROMs are accepted.
+See [regional memory readers](contest/README.md#regional-memory-readers) for verification coverage.
 
 ## Setup and ownership
 
-Requires **Python 3.10+**, Pillow, **DeSmuME 0.9.13 x64**, `lua51.dll`, and a local
-Japanese Platinum ROM with the prepared battery save. Run commands from this root:
+Requires **Python 3.10+**, Pillow, **DeSmuME 0.9.13 x64**, its matching `lua51.dll`,
+and a local Platinum ROM with an existing battery save.
+
+Run setup from the folder containing `requirements.txt` (`contest/` in a release):
 
 ```powershell
-python -m pip install -r requirements.txt
-python -B contest/super_contest.py --plan-only
+python -m venv .venv
+.venv/Scripts/python -m pip install -r requirements.txt
 ```
 
-Local runtime layout:
+- Put `lua51.dll`, `Battery/`, and `StateSlots/` beside the emulator executable.
+  The battery filename must match the ROM stem.
+- Set **Options → Text Speed → Fast**, then save on the blue mat facing the middle
+  receptionist. The first Pokémon needs
+  **HP > 0, Sheen > 0, at least two moves, and must not be an Egg**.
+- Double-click [`run_contest.py`](run_contest.py), or run `python -B run_contest.py`
+  from the folder containing that file.
+  Direct Windows launches hide the console and prefer `pythonw.exe`.
+  The launcher prefers the local `.venv` when present. Selected emulator/ROM paths
+  are saved in that file; `python -B run_contest.py --choose-paths` selects them again.
+- **One controlled emulator, one host caller.** The launcher rejects a second caller,
+  silently closes existing DeSmuME instances, and boots the selected ROM fresh.
+  Fresh launches use the script lock and bind controls to their newly launched emulator PID.
+  The emulator and Lua console open before cleanup removes older run folders and play begins.
+  Startup requires no warning acknowledgment; duplicate scripts exit without a popup.
+  Warnings, failures, and completion are messages in the Lua console; timeouts log `timeout`.
+- Edit gameplay defaults in `contest/timing_profiles/<ROM-code>.json`; see
+  [regional timing profiles](contest/README.md#regional-timing-profiles) for sections,
+  units, selection, and validation. USA/EU share `CPUE.json`.
+
+## Release layout
+
+Extraction produces two top-level items:
 
 ```text
-desmume-0.9.13-win64/
-  DeSmuME_0.9.13_x64.exe
-  lua51.dll
-  desmume.ini
-  Roms/Pocket Monsters - Platinum (Japan).nds
-  Battery/Pocket Monsters - Platinum (Japan).dsv
-  StateSlots/
+run_contest.py
+contest/
+  super_contest.py    # runner and other contest modules live directly here
+  timing_profiles/   # editable regional gameplay defaults
+  debug/             # persistent evidence moved here before another launch
+  host/
+  lua/
+  requirements.txt
+  README.md
+  DESIGN.md
+  .venv/          # created locally after extraction
+  tmp/           # created by the runner
 ```
 
-Keep emulator data paths in `desmume.ini` inside this project. The emulator,
-ROM, battery saves, native slots, and root recordings are local Git-ignored files.
-Prepared reference states under `contest/states/` and `contest/evidence/` are tracked.
-The standalone dancing demonstration has its own [slot-5 setup](contest/README.md#dancing-setup-and-run).
+The release launcher loads its modules and optional `.venv` from `contest/`.
+Create the environment after extraction; virtual environments contain local Python paths.
+Emulator/ROM selections are initially empty and are remembered in the top-level launcher.
+Each launch stores its mailbox, screenshots, receipts, and debug reads in
+`contest/tmp/contest/contest-<timestamp>/` in a release. Its whole folder remains through
+completion, failure, or interruption. Once the next launch has opened the emulator
+and attached Lua, it deletes all older subfolders under `tmp/contest/` before playing.
+Move evidence worth keeping into `contest/debug/` before starting another run.
+The working project uses the same persistent evidence location. This folder is outside
+temporary cleanup; release packaging includes the empty folder only.
 
-**One controlled emulator, one host caller.** Check processes and windows before
-launching. A running, hung, or terminating DeSmuME instance blocks a replacement;
-both its process and windows must disappear first. All runner scratch belongs
-under project `tmp/` or `.tmp/`.
+## Design
 
-## Runner entry points
+- `host/`: native emulator controls, ownership, save slots, and checkpoint client.
+- `lua/`: input bridge, game-independent checkpoint engine, and Platinum memory helpers.
+- `contest/`: persistent six-stage runner, game-specific adapters, image readers, and
+  timing profiles. See the [contest design](contest/README.md#integrated-runner-design).
 
-| Entry point | Purpose |
-| --- | --- |
-| [`contest/super_contest.py`](contest/super_contest.py) | Persistent six-stage, 20-ribbon collection loop. |
-| [`contest/debug_contest.py`](contest/debug_contest.py) | Category/rank dancing checks and input-free measurements. |
-| [`contest/debug_pointer_speed.py`](contest/debug_pointer_speed.py) | Saved-entry pointer-speed measurements. |
-| [`contest/dance_master.py`](contest/dance_master.py) | Preserved six-response dancing demonstration and optional AVI recording. |
-| [`contest/rank_dance.py`](contest/rank_dance.py) | Prepared rank-selected six-response dancing. |
-| [`contest/pt_dance_read.py`](contest/pt_dance_read.py) | Standalone screenshot reader. |
-
-Stage runners, settings, execution commands, and retry contracts are documented
-in the [contest guide](contest/README.md#six-stage-chain).
-
-## Paused screenshots
-
-A paused state load can leave the display grey. Cached `tmp/screen.gd` pixels
-and their frame number do not prove a fresh render. For fresh evidence, finish
-the agreed advance, confirm native pause, request a new `gui.gdscreenshot()`
-through the paused Lua callback, and convert that capture. The capture adds
-zero emulator frames; any render-preparation advance remains explicit and counted.
-See [Acting entry and retry rendering](contest/README.md#stage-6-retry-render-preparation).
+Adapters own targets, timing, slots, and screen policy; shared control code stays
+game-independent. Regional JSON profiles own timing defaults; `contest/inputs.py`
+provides shared input helpers and JPN compatibility constants. Dependencies and
+scratch stay project-local (`tmp/` or `.tmp/`); prepared states live in
+`contest/states/` and `contest/evidence/`.
+See [Poffin plans](buyable-poffin-guide.md) for contest-stat preparation.
 
 ## Runner planning and checkpoints
 
-Agree on inputs, actions, readable checkpoint facts, branches, guards with units,
-the live attempt, and the finish point before new gameplay work. Prepared runs
-use their saved defaults unless overrides are requested. Keep timings explicit
-and distinguish emulator frames, game seconds, and host seconds.
+Agree on actions, readable checkpoints, branches, guards with units, the live attempt,
+and finish point. Prepared runs use saved defaults; ask before changing shared timings
+or retry limits. Distinguish **emulator frames**, **game seconds**, and **host seconds**.
 
-Use [`lua/checkpoint_master.lua`](lua/checkpoint_master.lua), its adapters, and
-[`host/checkpoints.py`](host/checkpoints.py): **pause → fresh zero-frame snapshot
-and Lua checks → save when required → acknowledge the final log → proceed or abort**.
-Evaluate each boundary once per visit. Screen-only receipts stay state-free;
-retry states retain their paired frame/epoch/context. Unreadable boundaries stay
-paused with retained evidence. The [integrated contracts](contest/README.md#integrated-runner-design)
-and [save policy](contest/README.md#stage-checkpoints-and-resume) own the details.
+[`lua/checkpoint_master.lua`](lua/checkpoint_master.lua) and
+[`host/checkpoints.py`](host/checkpoints.py) enforce:
+**pause → fresh zero-frame snapshot → Lua checks → save when required → acknowledge
+the final log → proceed/abort**. Evaluate once per visit and share accepted boundaries.
+Unreadable checks stay paused with their actual evidence source recorded.
+
+## Paused screenshots
+
+After explicit render preparation, confirm native pause and request a new
+`gui.gdscreenshot()` through the paused Lua callback. Capturing adds zero emulator
+frames; preparation advances are counted separately. Cached `screen.gd` cannot prove
+freshness. See [Acting render preparation](contest/README.md#stage-6-retry-render-preparation).
+
+Host-time save-overlay settling keeps native pause and released inputs. Its fresh
+before/after captures must retain the same emulator frame and epoch; see
+[dance save policy](contest/README.md#stage-checkpoints-and-resume).
 
 ## Verification
 
@@ -84,16 +112,18 @@ python -B contest/debug_contest.py --check
 python -B contest/dance_master.py --check
 ```
 
-The offline suite executes real Lua through the local 64-bit `lua51.dll`, using
-simulated emulator callbacks and memory. It covers contest integration, input
-validation, native-control contracts, and retained-state handling. Offline checks
-do not establish live gameplay behavior. New or expanded tests require an agreed
-reason; contest statistics follow the [retention policy](contest/README.md#test-statistics-and-retention).
+Offline checks use real Lua with simulated emulator callbacks; live behavior requires
+live verification. New or expanded tests require an agreed reason.
 
-## Shared code and attribution
+## Release packaging
 
-`host/` owns native controls, `lua/` owns local input/checkpoint and Platinum memory
-helpers, and `contest/inputs.py` owns the contest input defaults. These dependencies
-are included in this repository. The Platinum memory helpers are adapted from
-scripts by **Real96**, with layout edits by **SexyMalasada**; their supplied
-[GPL v3 license](lua/PLATINUM-LICENSE.txt) is retained.
+Prepare a fresh review layout with `python -B tools/package_contest.py --stage tmp/release-stage`.
+At release time, create the archive with
+`python -B tools/package_contest.py --zip dist/contest-runner.zip`.
+Staging copies the contest modules, runtime resources, and prepared references into `contest/`;
+the release launcher starts with empty emulator/ROM selections.
+
+## Attribution
+
+Platinum memory helpers derive from **Real96**, with layout edits by **SexyMalasada**;
+the supplied [GPL v3 license](lua/PLATINUM-LICENSE.txt) is retained.

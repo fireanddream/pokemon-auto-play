@@ -1,6 +1,6 @@
 -- Ribbon/scarf preparation using the passed scarf test's selected reader and combo.
 local directory = assert(debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("^(.*)/"))
-local root = directory .. "/.."
+local root = dofile(directory .. "/resource_root.lua")
 local master = dofile(root .. "/lua/checkpoint_master.lua")
 local bridge_io = dofile(root .. "/lua/bridge_io.lua")
 local selected = dofile(directory .. "/bag_contest.lua")

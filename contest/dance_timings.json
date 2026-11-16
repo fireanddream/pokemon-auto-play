@@ -1,5 +1,6 @@
 {
   "schema": 1,
+  "purpose": "Historical prepared-rank evidence. Applied timings now come from the selected regional profile's shared main-runner metrics.",
   "units": "pixel displacement per emulator frame; all durations are emulator frames",
   "profiles": {
     "Normal": {

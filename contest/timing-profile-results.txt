@@ -1,0 +1,22 @@
+Regional timing profile verification — current offline results
+
+Scope: Regional defaults, pointer-based dance acceptance, counted continuation,
+checkpoint/save policy, and existing runner checks.
+Mode: Python planning and real Lua with simulated emulator callbacks.
+Units: Emulator frames; game seconds at 67027965 / 1120380 frames per second;
+host seconds are wall-clock time; cue spacing is native pixels.
+
+Profiles: 9 accepted ROM codes; all schemas passed. USA/EU share CPUE.
+Defaults: Dressing 15 game seconds / 897 frames in all profiles; introduction
+English/JPN 60/50 game seconds; Acting CPUE 69/144, CPUJ 64/140 game seconds.
+Other seeded Acting profiles remain 64/132 game seconds. Dance input offset: -7 frames.
+English Acting waits: 4128/4128/4128/8615 emulator frames.
+JPN/English post-Dance B-mashing: 18 game seconds / 1077 emulator frames.
+Dance checks: Byte-different paused captures accepted; existing input schedules,
+counted response endpoints, six-response accounting, and handoff waits passed.
+Injected analysis/plan/capture faults continued without repeating completed work.
+Existing suite: 74 passed; 0 failures, 0 errors, 0 skipped.
+CLI --check: super_contest.py passed, including all regional schemas and persistent runner syntax.
+
+The updated JPN/English timings still need live verification. These offline checks do
+not establish regional live behavior.

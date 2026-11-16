@@ -1,0 +1,24 @@
+Dress-up screen recognition
+
+Scope: rank-selected empty accessory slots on the native top screen.
+Settings: exact 5x5 pearl shapes; 20 candidate slots; 5/10/15/20 required
+for Normal/Super/Hyper/Master. Button and header text are outside the probes.
+Units: native pixels; each analysis advances zero emulator frames.
+
+Focused regressions: 4 methods passed; 33 reader checks.
+Accepted: 12. Expected rejections: 21. Unexpected results: 0. Skipped: 0.
+Coverage: all four ranks, changed bottom screen/header, top-only captures,
+filled/damaged required slots, missing/extra rank slots, and button-only images.
+
+Retained English capture: CPUE Rev 1, Cool/Hyper, frame 6080, epoch 0.
+Source: tmp/contest/english-full-20261115-172010-379604/visits/s3-001/stage3.gd
+Accepted: 15/15 empty slots; 375/375 required pixels; zero read frames.
+This is offline analysis of retained evidence.
+
+python -B -m tests: 72 passed.
+python -B contest/super_contest.py --check: regional schemas and syntax passed.
+Live USA English dress-up entry: 1/1 accepted, Cool/Hyper, frame 6080.
+Slots: 15/15 empty. Required pixels: 375/375. Read frames: 0.
+Source: tmp/contest/english-full-20261115-180040-061794/visits/s3-001/stage3.gd
+The full run reached Stage 6 and stopped at a black reception-result capture;
+full collection is not verified.

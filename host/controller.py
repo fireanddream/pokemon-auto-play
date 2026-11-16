@@ -20,12 +20,17 @@ class ControllerConfig:
     emulator: Path | None = None
     rom: Path | None = None
     mailbox_dir: Path | None = None
+    executable: Path | None = None
 
     def __post_init__(self):
         root = Path(self.root).resolve()
         emulator = project_path(self.emulator, root) if self.emulator is not None else root / "desmume-0.9.13-win64"
+        executable = project_path(self.executable, root) if self.executable is not None else emulator / "DeSmuME_0.9.13_x64.exe"
+        if self.executable is not None:
+            emulator = executable.parent
         object.__setattr__(self, "root", root)
         object.__setattr__(self, "emulator", emulator)
+        object.__setattr__(self, "executable", executable)
         object.__setattr__(self, "rom", project_path(self.rom, root) if self.rom is not None else emulator / "Roms" / "Pocket Monsters - Platinum (Japan).nds")
         object.__setattr__(self, "mailbox_dir", project_path(self.mailbox_dir, root) if self.mailbox_dir is not None else root / "tmp")
 
@@ -36,7 +41,7 @@ class Controller:
     def __init__(self, config: ControllerConfig | None = None, *, windows_api=None):
         self.config = config if config is not None else ControllerConfig()
         self.ROOT, self.EMULATOR, self.ROM = self.config.root, self.config.emulator, self.config.rom
-        self.EXE = self.EMULATOR / "DeSmuME_0.9.13_x64.exe"
+        self.EXE = self.config.executable
         self.SESSION = self.config.mailbox_dir / "session.json"
         self.STATUS = self.config.mailbox_dir / "status.json"
         self.COMMAND = self.config.mailbox_dir / "command.txt"
@@ -115,14 +120,15 @@ class Controller:
         self.send(console, 0xC2, 0, ctypes.addressof(buffer))  # EM_REPLACESEL.
         self.send(console, 0xB7)  # EM_SCROLLCARET: make the event visible.
 
-    def launch(self, rom: Path | None = None) -> dict:
+    def launch(self, rom: Path | None = None, *, check_existing: bool = True) -> dict:
         rom = (rom if rom is not None else self.ROM).resolve()
         if not self.EXE.is_file() or not rom.is_file() or not self.SESSION.parent.is_dir():
             raise SystemExit("Expected portable emulator, ROM, and project scratch directory.")
-        existing = sorted(set(self.emulator_process_ids()) | set(self.emulator_window_process_ids()))
-        if existing:
-            identifiers = ", ".join(str(pid) for pid in existing)
-            raise SystemExit(f"DeSmuME is still running or shutting down (PIDs {identifiers}). Complete shutdown before launching another instance.")
+        if check_existing:
+            existing = sorted(set(self.emulator_process_ids()) | set(self.emulator_window_process_ids()))
+            if existing:
+                identifiers = ", ".join(str(pid) for pid in existing)
+                raise SystemExit(f"DeSmuME is still running or shutting down (PIDs {identifiers}). Complete shutdown before launching another instance.")
         if self.SESSION.exists():
             try:
                 self.session()
@@ -145,7 +151,29 @@ class Controller:
                 self.SESSION.write_text(json.dumps(data, indent=2), encoding="utf-8")
                 return data
             time.sleep(0.2)
-        raise SystemExit("DeSmuME did not open its main window within 30 seconds.")
+        raise TimeoutError("timeout")
+
+    def close_existing(self) -> list[int]:
+        """End prior DeSmuME processes before a fresh ROM boot; caller owns the host lock."""
+        owners = sorted(set(self.emulator_process_ids()) | set(self.emulator_window_process_ids()))
+        deadline = self.deadline(None)  # The caller's existing whole-run deadline applies.
+        for pid in owners:
+            if not self.waiting(deadline):
+                raise TimeoutError("timeout")
+            for window in self.windows(pid):
+                if self.USER32.GetMenu(window["handle"]):
+                    try:
+                        self.send(window["handle"], 0x10)  # Request normal shutdown first.
+                    except (OSError, RuntimeError):
+                        pass
+            if self.process_alive(pid):
+                self.terminate_process(pid)
+        while self.emulator_process_ids() or self.emulator_window_process_ids():
+            if not self.waiting(deadline):
+                raise TimeoutError("timeout")
+            time.sleep(0.05)
+        self.SESSION.unlink(missing_ok=True)
+        return owners
 
     def load_lua(self, script: Path) -> dict:
         data = self.session()
@@ -171,7 +199,7 @@ class Controller:
                         self.set_pause(True)
                         return data
                     time.sleep(0.05)
-                raise SystemExit("The Lua bridge did not report ready. Inspect the Lua console.")
+                raise TimeoutError("timeout")
             return data
 
         existing = data.get("lua_window", 0)
@@ -192,7 +220,7 @@ class Controller:
                 if dialog not in before and path_box:
                     return attach(dialog)
             time.sleep(0.1)
-        raise SystemExit("Lua script window did not appear.")
+        raise TimeoutError("timeout")
 
     def paused(self, data: dict) -> bool:
         # DeSmuME refreshes pause check marks on WM_ENTERMENULOOP.
@@ -205,6 +233,31 @@ class Controller:
             raise RuntimeError("DeSmuME's pause menu item was not found.")
         return bool(state & 0x8)
 
+    def stop_lua(self) -> dict:
+        """Stop the controlled attachment at a native pause before removing its mailbox."""
+        data = self.session()
+        self.set_pause(True)
+        dialog = data.get("lua_window", 0)
+        process_id = wintypes.DWORD()
+        self.USER32.GetWindowThreadProcessId(dialog, ctypes.byref(process_id))
+        if not self.USER32.IsWindow(dialog) or process_id.value != data["pid"]:
+            raise RuntimeError("The controlled Lua script window is unavailable.")
+        stop = self.USER32.GetDlgItem(dialog, 312)
+        if not stop:
+            raise RuntimeError("The Lua Stop control was not found.")
+        if self.USER32.IsWindowEnabled(stop):
+            self.send(dialog, 0x111, 312, stop)
+            deadline = self.deadline(None)
+            while self.USER32.IsWindowEnabled(stop):
+                if not self.waiting(deadline):
+                    raise TimeoutError("timeout")
+                time.sleep(0.01)
+        if not self.paused(data):
+            raise RuntimeError("Native pause was lost while stopping the Lua script.")
+        data.pop("lua_script", None)
+        self.SESSION.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        return {"lua_stopped": True, "emulator_paused": True}
+
     def set_pause(self, wanted: bool) -> None:
         data = self.session()
         if self.paused(data) != wanted:
@@ -214,7 +267,7 @@ class Controller:
                 if self.paused(data) == wanted:
                     return
                 time.sleep(0.05)
-            raise RuntimeError("DeSmuME did not reach the requested pause state.")
+            raise TimeoutError("timeout")
 
     def checkpoint_command(self, action: str, arguments: list[str]) -> dict:
         """Synchronous paused Lua RPC through DeSmuME's menu-start callback."""
@@ -262,7 +315,7 @@ class Controller:
         data = self.session()
         self.set_pause(True)
         if not self.waiting(action_deadline):
-            raise TimeoutError("The action deadline expired before inputs started; the emulator is paused.")
+            raise TimeoutError("timeout")
         identifier = time.time_ns()
         temporary = self.COMMAND.with_suffix(".new")
         temporary.write_text("|".join([str(identifier), action, *arguments]) + "\n", encoding="ascii")
@@ -281,7 +334,7 @@ class Controller:
                 while not self.paused(data):
                     if not self.waiting(pause_deadline):
                         self.set_pause(True)
-                        raise RuntimeError("Lua reported completion without pausing the emulator.")
+                        raise TimeoutError("timeout")
                     time.sleep(0.02)
                 status["emulator_paused"] = True
                 if status.get("matched") and status.get("phase") == "target_hit":
@@ -290,9 +343,7 @@ class Controller:
                 return status
             time.sleep(0.05)
         self.set_pause(True)
-        if action_deadline is not None:
-            raise TimeoutError("The Lua action exceeded its wall-clock deadline; the emulator is paused.")
-        raise SystemExit("Lua command timed out; the emulator has been paused. Inspect status and the Lua console.")
+        raise TimeoutError("timeout")
 
     def combo(self, name: str, *arguments: object, timeout: float = 45) -> dict:
         """Execute a complete Lua-side input plan, pausing once at its endpoint."""

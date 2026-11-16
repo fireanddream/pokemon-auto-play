@@ -87,7 +87,7 @@ class StateSlots:
                         raise RuntimeError("The game changed while the state was saved.")
                     return {"slot": slot, "path": str(path), "bytes": written.st_size, "emulator_paused": True}
             time.sleep(0.05)
-        raise RuntimeError(f"State slot {slot} was not written.")
+        raise TimeoutError("timeout")
 
     def load(self, slot: int, refresh: bool = True, timeout: float | None = 45,
              *, checkpoint_visit: int | None = None) -> dict:

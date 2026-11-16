@@ -1,32 +1,17 @@
 -- Compact profiles from accepted native screenshots; no memory-proven menu claims.
 local directory = assert(debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("^(.*)/"))
 local pixels = dofile(directory .. "/acting_pixels.lua")
+local slot_counts = {Normal = 5, Super = 10, Hyper = 15, Master = 20}
+local empty_slot_rows = {"abbba", "bcdcb", "bdddb", "bcdcb", "abbba"}
+local empty_slot_rgb = {a = {132,82,198}, b = {8,189,239},
+    c = {90,231,255}, d = {255,214,255}}
 local profiles = {
-    loaded_overworld = {reference = "stage1-live-03/stage1.png", points = {
-        {88,44,77,81,142}, {92,44,97,101,174}, {96,44,97,101,174}, {100,44,97,101,174},
-        {88,48,81,85,150}, {92,48,97,101,174}, {96,48,97,101,174}, {100,48,97,101,174},
-        {184,44,77,81,142}, {188,44,97,101,174}, {192,44,97,101,174}, {196,44,97,101,174},
-        {184,48,81,85,150}, {188,48,97,101,174}, {192,48,97,101,174}, {196,48,97,101,174},
-        {24,128,0,0,0}, {28,128,0,0,0}, {32,128,0,0,0}, {36,128,0,0,0},
-        {24,132,255,199,207}, {28,132,255,199,207}, {32,132,255,199,207}, {36,132,255,199,207},
-        {200,128,239,142,158}, {204,128,239,142,158}, {208,128,239,142,158}, {212,128,239,142,158},
-        {200,132,239,142,158}, {204,132,239,142,158}, {208,132,239,142,158}, {212,132,239,142,158},
-        {72,170,239,142,158}, {76,170,239,142,158}, {80,170,239,142,158}, {84,170,239,142,158},
-        {72,174,239,142,158}, {76,174,247,174,190}, {80,174,247,174,190}, {84,174,247,174,190},
-    }},
-    dress_up_entry = {reference = "stage3-live-03/stage3.png", points = {
-        {194,350,239,239,239}, {202,350,255,142,174}, {210,350,255,142,174}, {218,350,255,142,174},
-        {226,350,255,142,174}, {234,350,255,142,174}, {242,350,255,142,174}, {248,350,125,85,117},
-        {194,355,255,101,150}, {202,355,255,101,150}, {210,355,255,101,150}, {218,355,255,101,150},
-        {226,355,255,101,150}, {234,355,255,101,150}, {242,355,255,101,150}, {248,355,125,85,117},
-        {194,360,255,101,150}, {202,360,239,182,182}, {210,360,255,255,255}, {218,360,239,182,182},
-        {226,360,255,101,150}, {234,360,255,101,150}, {242,360,255,101,150}, {248,360,125,85,117},
-        {194,365,255,101,150}, {202,365,255,101,150}, {210,365,255,255,255}, {218,365,255,101,150},
-        {226,365,255,101,150}, {234,365,207,77,109}, {242,365,255,101,150}, {248,365,125,85,117},
-        {194,370,255,101,150}, {202,370,255,101,150}, {210,370,255,101,150}, {218,370,255,101,150},
-        {226,370,255,101,150}, {234,370,255,101,150}, {242,370,255,101,150}, {248,370,125,85,117},
-        {194,375,109,69,93}, {202,375,255,142,174}, {210,375,255,142,174}, {218,375,255,142,174},
-        {226,375,255,142,174}, {234,375,255,142,174}, {242,375,255,142,174}, {248,375,125,85,117},
+    loaded_overworld = {reference = "Pocket Monsters - Platinum (Japan)__583.png", points = {
+        -- Six central receptionist pixels, then six player pixels; exact native RGB.
+        {124,54,158,93,109}, {130,54,158,93,109}, {124,60,231,134,158},
+        {130,60,158,93,109}, {124,66,142,174,239}, {130,66,142,174,239},
+        {124,78,223,109,125}, {130,78,223,109,125}, {124,84,190,60,77},
+        {130,84,190,60,77}, {124,94,207,207,223}, {130,94,207,207,223},
     }},
     acting_entry = {reference = "stage5-live-04/stage5.png", points = {
         {12,208,255,198,156}, {114,208,255,214,181}, {12,212,255,156,140}, {114,212,255,107,115},
@@ -40,11 +25,47 @@ local profiles = {
     }},
 }
 
+local function read_empty_slots(raw, rank)
+    local limit = assert(slot_counts[rank], "A supported contest rank is required for dress-up entry")
+    local result = {confirmed = true, rank = rank, expected_empty_slots = limit,
+        empty_slot_count = 0, expected_pixels = limit * 25, matched_pixels = 0,
+        memory_proven = false, slots = {},
+        template = {rows = empty_slot_rows, rgb = empty_slot_rgb}}
+    for slot = 1, 20 do
+        local x = 46 + ((slot - 1) % 10) * 18
+        local y = 112 + math.floor((slot - 1) / 10) * 18
+        local points = {}
+        for dy, row in ipairs(empty_slot_rows) do
+            for dx = 1, #row do
+                local color = empty_slot_rgb[row:sub(dx, dx)]
+                points[#points + 1] = {x + dx - 3, y + dy - 3, color[1], color[2], color[3]}
+            end
+        end
+        local checked = pixels.match_points(raw, points)
+        local required = slot <= limit
+        result.slots[slot] = {slot = slot, x = x, y = y, expected_empty = required,
+            empty = checked.confirmed, matched_pixels = checked.matched_pixels}
+        if checked.confirmed then result.empty_slot_count = result.empty_slot_count + 1 end
+        if required then
+            result.matched_pixels = result.matched_pixels + checked.matched_pixels
+            result.confirmed = result.confirmed and checked.confirmed
+        end
+    end
+    result.confirmed = result.confirmed and result.empty_slot_count == limit
+    return result
+end
+
 local M = {}
-function M.read(raw, expected)
-    local profile = assert(profiles[expected], "No reviewed profile for this boundary")
-    local result = pixels.match_points(raw, profile.points)
-    result.source, result.expected, result.reference = "local_reference_pixels", expected, profile.reference
+function M.read(raw, expected, rank)
+    local result, reference
+    if expected == "dress_up_entry" then
+        result, reference = read_empty_slots(raw, rank), "native_top_screen_empty_accessory_slots"
+    else
+        local profile = assert(profiles[expected], "No reviewed profile for this boundary")
+        result, reference = pixels.match_points(raw, profile.points), profile.reference
+        result.points = profile.points
+    end
+    result.source, result.expected, result.reference = "local_reference_pixels", expected, reference
     result.direct_read_frames = 0
     return result
 end

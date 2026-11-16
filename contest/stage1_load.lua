@@ -1,7 +1,7 @@
 -- Contest Stage 1: shared inputs, then one screenshot-reviewed paused checkpoint.
 local source = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/")
 local directory = assert(source:match("^(.*)/"))
-local root = directory .. "/.."
+local root = dofile(directory .. "/resource_root.lua")
 local master = dofile(root .. "/lua/checkpoint_master.lua")
 local bridge_io = dofile(root .. "/lua/bridge_io.lua")
 local screen_checks = dofile(directory .. "/screen_checks.lua")

@@ -38,7 +38,7 @@ class SlotController:
                      + ("    30-Oct-2026 16:22:16" if self.state_file(slot).is_file() else "")
                      + f"\t{prefix}F{slot}"}
             for operation, base, prefix in (("Save", 100, "Shift+"), ("Load", 200, ""))
-            for slot in (1, 2, 3, 10)
+            for slot in (1, 2, 3, 4, 5, 6, 10)
         ]
 
     def state_file(self, slot):
