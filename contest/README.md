@@ -64,7 +64,7 @@ and persistent `super_contest.lua` dispatcher: **one host caller, controller, Lu
 attachment, and checkpoint engine**. `runtime.py` owns speed, deadlines, and cleanup.
 
 Run Stage 1 once, then repeat **2 → 3 → 4 → 5 → 6** for missing ribbons in order:
-**Cool → Beauty → Cute → Smart → Tough**, each **Normal → Super → Hyper → Master**.
+**Normal → Super → Hyper → Master**, each **Cool → Beauty → Cute → Smart → Tough**.
 After either completed result, acknowledge Stage 6 before continuing from the current
 overworld. Preserve ribbons, Bag opening/cursor state, the empty-move-slot blacklist,
 and the original deadline. Full runs use no quick-loads or stage-by-stage Lua restarts.

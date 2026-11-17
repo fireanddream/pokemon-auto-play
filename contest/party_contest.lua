@@ -91,12 +91,18 @@ function M.new(memory_api, game_code)
             if owned then
                 result.owned_count = result.owned_count + 1
                 result.owned_ribbon_bits[#result.owned_ribbon_bits + 1] = bit
-            elseif not result.next_target then
-                local category, rank = math.floor(bit / 4) + 1, bit % 4 + 1
-                result.next_target = {category = categories[category], rank = ranks[rank],
-                    ribbon_bit = bit, category_down_presses = category - 1, rank_down_presses = rank - 1,
-                    required_scarf_id = 259 + category, party_slot = 1,
-                    source = "first_party_missing_ribbon", enrollment_proven = false}
+            end
+        end
+        -- Select missing ribbons by rank, then category, independently of bit storage order.
+        for rank, rank_name in ipairs(ranks) do
+            for category, category_name in ipairs(categories) do
+                local bit = (category - 1) * 4 + rank - 1
+                if not result.next_target and not result.ribbon_flags[bit + 1] then
+                    result.next_target = {category = category_name, rank = rank_name,
+                        ribbon_bit = bit, category_down_presses = category - 1, rank_down_presses = rank - 1,
+                        required_scarf_id = 259 + category, party_slot = 1,
+                        source = "first_party_missing_ribbon", enrollment_proven = false}
+                end
             end
         end
         result.all_ribbons_owned = result.owned_count == 20
