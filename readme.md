@@ -14,7 +14,7 @@ Check out [buyable-poffin-guide.md](buyable-poffin-guide.md) for optimal contest
 ## Requirements
 
 - [Python](https://www.python.org/downloads/windows/) installed.
-- [DeSmuME](https://github.com/TASEmulators/desmume/releases/tag/release_0_9_13) installed.
+- [DeSmuME](https://github.com/TASEmulators/desmume/releases/) installed.
 - Pokemon Platinum (JPN, USA, EU, or CHN) ROM and save file ready.
 - Text speed set to FAST.
 - In your save file, your character must be standing directly across the counter, facing the contest receptionist.
