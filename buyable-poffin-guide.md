@@ -1,5 +1,7 @@
 # Buyable Poffin plans
 
+[简体中文](能买的宝芬攻略.md)
+
 For a fresh Pokémon with **0 contest stats / Fullness**. Feed Mild **last**.
 
 ## Nature guide

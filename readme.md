@@ -2,6 +2,8 @@
 
 # Summary
 
+[简体中文](中文说明.md)
+
 One night, I was watching TV while passively doing contests for a Flygon and kept getting stumped in dancing. I got fed up, so I set out to make this to have my revenge.
 
 This is a script that tries to get every contest ribbon in Pokemon Platinum for the Pokemon in your party's first slot.
