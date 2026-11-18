@@ -38,6 +38,28 @@ MOVE_PROBES = (((18, 220), (18, 244), (18, 280), (108, 220), (108, 244), (108, 2
                ((146, 220), (146, 244), (146, 280), (236, 220), (236, 244), (236, 280)),
                ((18, 312), (18, 336), (18, 372), (108, 312), (108, 336), (108, 372)),
                ((146, 312), (146, 336), (146, 372), (236, 312), (236, 336), (236, 372)))
+HEART_ROWS = (".dd.dd..", "dwydrrd.", "dyorrrd.", "dorrrrd.", ".drrrd..", "..drd...", "...d....")
+HEART_COLORS = {"d": (181, 0, 0), "w": (255, 255, 255), "y": (255, 132, 24),
+                "o": (255, 74, 24), "r": (255, 24, 24)}
+MOVE_HEART_ORIGINS = ((59, 240), (187, 240), (59, 336), (187, 336))
+PLAYER_PANEL_COLORS = ((255, 239, 134), (255, 207, 24))
+OPPONENT_PANEL_COLORS = ((0, 207, 255), (105, 215, 255))
+
+
+def paint_move_hearts(image, slot, category, hearts):
+    x, y = MOVE_HEART_ORIGINS[slot - 1]
+    image.paste(MOVE_FILLS[category], (x, y, x + 48, y + 7))
+    for cell in range(hearts):
+        for dy, row in enumerate(HEART_ROWS):
+            for dx, code in enumerate(row):
+                if code != ".":
+                    image.putpixel((x + cell * 8 + dx, y + dy), HEART_COLORS[code])
+
+
+def paint_acting_panel(image, position, colors):
+    for x in (4, 40, 72):
+        for dy, color in zip((36, 42), colors):
+            image.putpixel((x, (position - 1) * 48 + dy), color)
 
 
 class ContestClock:
@@ -59,20 +81,47 @@ class ContestClock:
         self.clock.lua.run(f"""
             local real_dofile, real_loadfile, old_open = dofile, loadfile, io.open
             configs, engine_count, registrations, stars_read, move_reads, page_reads = {{}}, 0, {{}}, 0, 0, 0
-            bag_snapshots, options_snapshots, options_save = 0, 0, 0x02040000
+            bag_snapshots, options_snapshots, accessory_snapshots, options_save = 0, 0, 0, 0x02040000
             memory_values[0x02060034], memory_values[0x02060038], memory_values[0x0206003C] = 1, 52, 0x64
+            memory_values[0x02060104], memory_values[0x02060108], memory_values[0x0206010C] = 14, 0x83C, 0x5000
+            memory_values[0x02045808] = 0x55
             memory_values[0x02040078] = 0x3402
-            target, held_item, won = {literal(self.target)}, 0, false
+            target, held_item, won, party_sheen = {literal(self.target)}, 0, false, 20
+            scarf_quantities = {{[260]=2,[261]=2,[262]=2,[263]=2,[264]=2}}
             native_raw = string.char(255,254,1,0,1,128,1,0,0,0,0)
                 .. string.rep(string.char(0,121,247,215), 256 * 384)
             function pixel(x, y, rgb)
                 local at = 13 + (y * 256 + x) * 4
                 native_raw = native_raw:sub(1, at - 1) .. string.char(unpack(rgb)) .. native_raw:sub(at + 3)
             end
-            function paint_acting_moves(categories)
-                local fills, points = {literal(MOVE_FILLS)}, {literal(MOVE_PROBES)}
+            function paint_acting_moves(categories, hearts)
+                local fills, points, origins = {literal(MOVE_FILLS)}, {literal(MOVE_PROBES)}, {literal(MOVE_HEART_ORIGINS)}
+                local rows, colors = {literal(HEART_ROWS)}, {literal(HEART_COLORS)}
+                hearts = hearts or {{2,2,2,2}}
                 for slot, probes in ipairs(points) do
-                    for _, point in ipairs(probes) do pixel(point[1], point[2], fills[categories[slot]]) end
+                    local fill, origin = fills[categories[slot]], origins[slot]
+                    for _, point in ipairs(probes) do pixel(point[1], point[2], fill) end
+                    for dy, row in ipairs(rows) do
+                        local parts = {{}}
+                        for cell = 1, 6 do
+                            for dx = 1, 8 do
+                                local code = cell <= hearts[slot] and row:sub(dx, dx) or '.'
+                                parts[#parts + 1] = string.char(0, unpack(colors[code] or fill))
+                            end
+                        end
+                        local painted = table.concat(parts)
+                        local at = 12 + ((origin[2] + dy - 1) * 256 + origin[1]) * 4
+                        native_raw = native_raw:sub(1, at - 1) .. painted .. native_raw:sub(at + #painted)
+                    end
+                end
+            end
+            function paint_acting_order(position)
+                for row = 1, 4 do
+                    local colors = row == position and {literal(PLAYER_PANEL_COLORS)} or {literal(OPPONENT_PANEL_COLORS)}
+                    for _, x in ipairs({{4,40,72}}) do
+                        pixel(x, (row - 1) * 48 + 36, colors[1])
+                        pixel(x, (row - 1) * 48 + 42, colors[2])
+                    end
                 end
             end
             pixel({self.full_check['x']}, {self.full_check['y']}, {literal(self.pearl)})
@@ -102,7 +151,7 @@ class ContestClock:
                     required_scarf_id=261, category_down_presses=1, rank_down_presses=0, party_slot=1}} or target
                 return {{frame=at, species_id=151, held_item_id=held_item, held_item='Red Scarf',
                     read_valid=true, data_validation_passed=true, is_egg=false, ribbon_flags=flags,
-                    current_hp=100, max_hp=100, sheen=20, move_count=4, moves={{1,2,3,4}}, unavailable_move_slots={{}},
+                    current_hp=100, max_hp=100, sheen=party_sheen, move_count=4, moves={{1,2,3,4}}, unavailable_move_slots={{}},
                     owned_ribbon_bits=bits, owned_count=count, all_ribbons_owned=false, next_target=next_target}}
             end
             dofile = function(path)
@@ -112,14 +161,20 @@ class ContestClock:
                         bag_snapshots = bag_snapshots + 1
                         local items = {{}}
                         for index=1,6 do items[index]={{position=index,item_id=index,quantity=2}} end
-                        for index=0,4 do items[7+index]={{position=7+index,item_id=260+index,quantity=2}} end
-                        local options
+                        for id=260,264 do
+                            if scarf_quantities[id] then
+                                items[#items+1]={{position=#items+1,item_id=id,quantity=scarf_quantities[id]}}
+                            end
+                        end
+                        local options, accessories
                         if include_options then
                             options_snapshots = options_snapshots + 1
                             options = options_reader.read_options(memory, options_save, at)
+                            accessory_snapshots = accessory_snapshots + 1
+                            accessories = options_reader.read_accessories(memory, options_save, at)
                         end
                         return {{frame=at,game={{code='CPUJ',supported=true}},party=party(at),bag={{items=items}},
-                            options=options,access={{direct_read_frames=0,injects_inputs=false}}}}
+                            options=options,accessories=accessories,access={{direct_read_frames=0,injects_inputs=false}}}}
                     end}} end}}
                 elseif path:match('/party_contest%.lua$') then
                     return {{new=function() return {{read_first=function(at) return party(at) end}} end}}
@@ -142,8 +197,9 @@ class ContestClock:
                         acting_read_index=(acting_read_index or 0)+1
                         local counts=acting_star_counts and acting_star_counts[acting_read_index]
                             or (empty and {{0,0,0}} or {{0,4,1}})
-                        return {{readable=true,all_empty=counts[1]==0 and counts[2]==0 and counts[3]==0,
-                            counts=counts,selected_judge=module.choose_judge(counts)}}
+                        local readable = acting_judge_unreadable ~= true
+                        return {{readable=readable,all_empty=counts[1]==0 and counts[2]==0 and counts[3]==0,
+                            counts=counts,selected_judge=readable and module.choose_judge(counts) or nil}}
                     end
                     module.match_points=function() return {{confirmed=true}} end
                     return module
@@ -340,8 +396,8 @@ class ContestClock:
             self.clock.lua.run("calibration_pointer_x=nil; return 'ready'")
         return config, handoff, progress
 
-    def act(self, *, win=False, rounds=4, move_categories=None, star_counts=None,
-            entry_change=None, after_entry=None):
+    def act(self, *, win=False, rounds=4, move_categories=None, move_hearts=None, star_counts=None,
+            acting_positions=None, entry_change=None, after_entry=None, before_round=None):
         plan = stage6_act.acting_plan(host_timeout=300, hold_frames=1, release_frames=1, from_stage5=True,
                                      round_seconds=1, final_seconds=1, source_slot=5)
         self.begin(6, plan, attempt=1, overworld={"points": [[1, 1, 0, 0, 0]], "reference": {"source": "native_fixture"}})
@@ -349,13 +405,20 @@ class ContestClock:
         self.clock.command("advance", 10)
         self.call("render-prepared")
         categories = move_categories or ["Beauty", "Tough", "Smart", "Cute"]
-        self.clock.lua.run(f"paint_acting_moves({literal(categories)}); first_judge_capture=true; "
+        hearts = [2, 2, 2, 2] if move_hearts is None else move_hearts
+        positions = [1, 1, 1, 1] if acting_positions is None else acting_positions
+        self.clock.lua.run(f"paint_acting_moves({literal(categories)}, {literal(hearts)}); "
+            f"paint_acting_order({positions[0]}); first_judge_capture=true; acting_judge_unreadable=false; "
             f"acting_star_counts={literal(star_counts)}; acting_read_index=0; return 'ready'")
         if entry_change:
             entry_change(self)
         self.act_records, self.act_snapshots = [], []
         plans = []
         for number in range(1, rounds + 1):
+            if number > 1:
+                self.clock.lua.run(f"paint_acting_order({positions[number - 1]}); return 'ready'")
+            if before_round:
+                before_round(self, number)
             pending = self.call("round-visit", number)
             self.act_records.append(pending["checkpoint"])
             self.act_snapshots.append(pending["checkpoint"]["snapshot"])
@@ -377,7 +440,7 @@ class ContestClock:
                       midpoint_diagnostics=False, midpoint_positions=None, post_fix_pointer_x=None,
                        selected_inputs=None, changed_cues=(), missed_inputs=None, unreadable_midpoints=(), missed_feedback=None,
                        transition_seconds=1 / stage4_dress.FRAME_RATE, changed_paused_framebuffer=False,
-                       rejected_plans=(), handoff_faults=()):
+                       rejected_plans=(), handoff_faults=(), counted_display_hold=False):
         recording = feedback_policy == "record_all_buttons"
         target = self.boundary["snapshot"]["target"]
         calibration = None if recording else self.boundary["snapshot"].get("pointer_calibration")
@@ -403,6 +466,7 @@ class ContestClock:
         self.rank_plans = []
         self.rank_captures = []
         for number in range(1, 7):
+            counted_anchor = None
             folder = f"{self.work}/rank-dance-{number}"
             gap = plan["leader_switch_gap_frames"] if number in (3, 5) else 0
             self.call("select-dance", number, folder, gap)
@@ -412,8 +476,9 @@ class ContestClock:
                 expected_midpoint = plan["midpoint_timing"]["frames"][0]
             elif scheduled_feedback:
                 previous = self.rank_plans[-1]
-                anchor = previous["fallback_midpoint_frame"] if previous.get("skip_reason") else previous["frame"] \
-                    + math.floor((127 - previous["pointer_x"]) / profile["pixels_per_frame"])
+                origin = previous.get("counted_midpoint_anchor") or previous
+                anchor = previous["fallback_midpoint_frame"] if previous.get("skip_reason") else origin["frame"] \
+                    + math.floor((127 - origin["pointer_x"]) / profile["pixels_per_frame"])
                 expected_midpoint = anchor + profile["cycle_frames"] + gap
             else:
                 first = self.rank_midpoints[0]["frame"]
@@ -430,6 +495,9 @@ class ContestClock:
                 delta = math.ceil((128 - early_midpoint_x) / profile["pixels_per_frame"])
                 adjustment = {"frame": midpoint["frame"], "epoch": midpoint["epoch"], "pointer_x": early_midpoint_x,
                     "next_frame": midpoint["frame"] + delta, "path": midpoint["observation"]["image"]["path"]}
+                if counted_display_hold:
+                    counted_anchor = {key: adjustment[key] for key in ("frame", "epoch", "pointer_x")}
+                    counted_anchor["source"] = "fresh_paused_midpoint_before_counted_correction"
                 if changed_paused_framebuffer:
                     self.clock.lua.run("pixel(240,180,{1,2,3}); return 'ready'")
                 self.call("retime-midpoint", self.config(adjustment))
@@ -458,7 +526,9 @@ class ContestClock:
                 accepted[2].update(source_side="left", fallback=True, cross_checked=False,
                                    position_source="mirrored_readable_left_cue")
                 visible_right = cues[:2] + cues[3:]
-            endpoint = midpoint["frame"] + math.floor((128 - pointer_x) / profile["pixels_per_frame"]
+            origin_frame = counted_anchor["frame"] if counted_anchor else midpoint["frame"]
+            origin_x = counted_anchor["pointer_x"] if counted_anchor else pointer_x
+            endpoint = origin_frame + math.floor((128 - origin_x) / profile["pixels_per_frame"]
                 + profile["response_frames"] + 0.5)
             resolved = {"dance": number, "rank": plan["rank"], "frame": midpoint["frame"], "epoch": midpoint["epoch"],
                 "pointer_x": pointer_x, "speed": plan["pointer_pixels_per_emulator_frame"],
@@ -468,9 +538,11 @@ class ContestClock:
                 "response_end_frame": endpoint,
                 "cues": {"right": visible_right, "accepted": accepted}, "pixel_points": [[1, 1, 121, 247, 215]],
                 "presses": [{"button": cue["button"], "response_x": cue["x"],
-                    "frame": midpoint["frame"] + math.floor((cue["x"] - pointer_x) / plan["pointer_pixels_per_emulator_frame"] + 0.5)
+                    "frame": origin_frame + math.floor((cue["x"] - origin_x) / plan["pointer_pixels_per_emulator_frame"] + 0.5)
                         + plan["offset_frames"]}
                     for cue in cues]}
+            if counted_anchor:
+                resolved["counted_midpoint_anchor"] = counted_anchor
             if tolerant:
                 offset = cue_side_offset_pixels or profile["cue_side_offset_pixels"]
                 for index, cue in enumerate(accepted, 1):
@@ -624,15 +696,73 @@ class PersistentLuaChecks(unittest.TestCase):
         self.assertEqual((options["frame"], snapshot["party"]["frame"], snapshot["image"]["frame"]),
             (loaded["frame"] + 102, loaded["frame"] + 102, loaded["frame"] + 204))
         self.assertEqual(options["direct_read_frames"], 0)
+        self.assertTrue(snapshot["accessories"]["read_valid"])
+        self.assertEqual(snapshot["accessories"]["total_owned"], 10)
+        self.assertEqual(snapshot["accessories"]["frame"], options["frame"])
         self.assertEqual(snapshot["access"]["direct_read_frames"], 0)
         self.assertEqual(harness.clock.trace(), (["X"] * 12 + [""] * 90) * 2)
         harness.clock.reset_measurement()
         harness.begin(2, {})
         initial = harness.call("inspect")["observation"]
         self.assertEqual(initial["options"], options)
+        self.assertEqual(initial["accessories"], snapshot["accessories"])
         self.assertEqual(initial["party"], snapshot["party"])
-        self.assertEqual(harness.clock.lua.run("return bag_snapshots .. ':' .. options_snapshots"), "1:1")
+        self.assertEqual(harness.clock.lua.run("return bag_snapshots .. ':' .. options_snapshots .. ':' .. accessory_snapshots"), "1:1:1")
         self.assertEqual(harness.clock.trace(), [])
+
+    def test_startup_warnings_print_once_and_continue_from_the_accepted_snapshot(self):
+        cases = (("low preparation", "party_sheen=254; memory_values[0x02045808]=9; scarf_quantities[264]=nil", 3),
+            ("fully prepared", "party_sheen=255", 0),
+            ("missing all scarves", "party_sheen=255; held_item=0; scarf_quantities={}", 1),
+            ("unreadable accessories", "party_sheen=255; memory_values[0x02060108]=0", 1))
+        for label, change, expected in cases:
+            with self.subTest(preparation=label), temporary_directory() as folder:
+                harness = self.harness(debug=0)
+                harness.clock.lua.run("held_item=260; scarf_quantities[260]=nil; " + change + "; return 'ready'")
+                loading = stage1_load.load_plan(boot_wait_frames=1, hold_frames=1, start_wait_frames=1,
+                    a_wait_frames=1, b_wait_frames=1)
+                harness.begin(1, loading)
+                harness.clock.command("combo", "inputs", *loading["inputs"])
+                harness.review()
+                snapshot = deepcopy(harness.boundary["snapshot"])
+                before = harness.clock.trace()
+                runtime = SimpleNamespace(settings=super_contest.chain_plan(debug=0), work=Path(folder),
+                    active_work=Path(folder), stage=1, section_visit=1, run_id="integrated-check",
+                    boundary={"checkpoint": harness.boundary, "save_state": None, "receipt": "startup.json"},
+                    controller=SimpleNamespace(log_lua=Mock()), record=Mock())
+                with patch("contest.sections.reviewed_inputs", return_value={"screenshot": "stage1.png"}), \
+                        patch("contest.stage6_act.overworld_reference_from_checkpoint", return_value={"points": []}):
+                    result = sections.load(runtime)
+                warnings = result["readiness_warnings"]
+                self.assertEqual(len(warnings), expected)
+                self.assertEqual([call.args[0] for call in runtime.controller.log_lua.call_args_list], warnings)
+                self.assertEqual(result["outcome"], "pass")
+                self.assertTrue(result["emulator_paused"] and result["inputs_released"])
+                self.assertEqual(harness.clock.trace(), before)
+                self.assertEqual(harness.clock.lua.run("return tostring(frame)"), str(harness.boundary["frame"]))
+                if label == "low preparation":
+                    self.assertIn("Only 9", warnings[0])
+                    self.assertIn("254/255", warnings[1])
+                    self.assertIn("Yellow Scarf", warnings[2])
+                    self.assertNotIn("Red Scarf", warnings[2])
+                elif label == "unreadable accessories":
+                    self.assertFalse(snapshot["accessories"]["read_valid"])
+                    self.assertTrue(snapshot["accessories"]["error"])
+                    self.assertIn("could not be read reliably", warnings[0])
+                elif label == "missing all scarves":
+                    for name in stage2_prep.SCARVES.values():
+                        self.assertIn(name, warnings[0])
+                initial, prep = harness.prepare(opened_once=False, cursor=1)
+                self.assertEqual(initial["accessories"], snapshot["accessories"])
+                self.assertEqual(initial["party"], snapshot["party"])
+                self.assertEqual(prep["mode"], "scarf_unavailable" if label == "missing all scarves" else "correct_scarf_held")
+                self.assertEqual(prep["target"], snapshot["party"]["next_target"])
+                self.assertTrue(harness.boundary["proceed"])
+                self.assertEqual(runtime.controller.log_lua.call_count, expected)
+                self.assertEqual(harness.clock.lua.run("return options_snapshots .. ':' .. accessory_snapshots"), "1:1")
+                recorded = [call.kwargs["message"] for call in runtime.record.call_args_list
+                    if call.args[0] == "readiness_warning"]
+                self.assertEqual(recorded, warnings)
 
     def test_startup_stops_non_fast_or_unreadable_options_at_the_paused_boundary(self):
         cases = (
@@ -813,6 +943,28 @@ class PersistentLuaChecks(unittest.TestCase):
                     self.assertTrue(Path(request["image"]).is_file())
                 self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
 
+    def test_held_midpoint_executes_counted_inputs_and_preserves_the_next_dance_anchor(self):
+        harness = self.harness(rank="Hyper", debug=0)
+        harness.target.update(category="Beauty", ribbon_bit=6, required_scarf_id=261, category_down_presses=1)
+        harness.clock.lua.run(f"target={literal(harness.target)}; return 'ready'")
+        harness.prepare_entry()
+        harness.dress(0, finish=True)
+        harness.ranked_dance(early_midpoint_x=127, post_fix_pointer_x=127, counted_display_hold=True)
+        trial = harness.boundary["snapshot"]["trial"]
+        self.assertEqual((trial["total_input_count"], trial["total_skipped_inputs"]), (24, 0))
+        first = harness.rank_plans[0]
+        anchor = first["counted_midpoint_anchor"]
+        self.assertEqual((first["frame"] - anchor["frame"], first["pointer_x"]), (3, 127))
+        self.assertEqual(first["presses"][0]["frame"], anchor["frame"] + 26)
+        self.assertEqual(first["response_end_frame"], anchor["frame"] + 363)
+        self.assertEqual(harness.rank_midpoints[1]["frame"], anchor["frame"] + 720)
+        self.assertEqual(harness.rank_midpoints[1]["source"], "calculated_from_counted_midpoint_and_fixed_metrics")
+        checked = harness.rank_cue_trials[0]
+        self.assertFalse(checked["midpoint_within_line"])
+        self.assertTrue(checked["counted_midpoint_anchor_bound"] and checked["midpoint_policy_met"])
+        held = first["presses"][0]["frame"] - first["frame"] - 1
+        self.assertEqual(harness.rank_captures[0]["buttons"][held:held + 12], ["A"] * 2 + [""] * 10)
+
     def test_main_run_uses_fixed_metrics_reanchors_and_hands_off_without_routine_dance_saves(self):
         harness = self.harness(debug=0)
         harness.prepare_entry()
@@ -878,16 +1030,19 @@ class PersistentLuaChecks(unittest.TestCase):
         self.assertIn("Quick-loads are disabled", rejected["error"])
         self.assertEqual(rejected["epoch"], 0)
 
-    def test_acting_categories_are_cached_and_overrides_use_the_actual_move_cursor(self):
+    def test_acting_types_and_hearts_are_cached_but_order_is_read_each_round(self):
         harness = self.harness()
         harness.prepare_entry()
         harness.dress(0, finish=True)
         harness.ranked_dance()
         categories = ["Beauty", "Tough", "Smart", "Cool"]
-        plans = harness.act(move_categories=categories,
+        hearts = [5, 2, 4, 3]
+        plans = harness.act(move_categories=categories, move_hearts=hearts, acting_positions=[1, 2, 3, 4],
             star_counts=[[0, 0, 0], [0, 4, 4], [0, 1, 2], [0, 0, 0]],
             after_entry=lambda value: value.clock.lua.run("paint_acting_moves({'Cute','Cute','Cute','Cute'}); return 'ready'"))
-        self.assertEqual([plan["move"] for plan in plans], [1, 4, 1, 2])
+        self.assertEqual([plan["move"] for plan in plans], [1, 4, 1, 3])
+        self.assertEqual([plan["move_hearts"] for plan in plans], [5, 3, 5, 4])
+        self.assertEqual([plan["acting_position"] for plan in plans], [1, 2, 3, 4])
         self.assertEqual([plan["previous_move"] for plan in plans], [1, 1, 4, 1])
         self.assertEqual([plan["matching_category_override"] for plan in plans], [False, True, False, False])
         self.assertEqual(plans[1]["menu_buttons"], ["right", "down", "A", "right", "A"])
@@ -896,9 +1051,14 @@ class PersistentLuaChecks(unittest.TestCase):
         for snapshot in harness.act_snapshots:
             moves = snapshot["move_categories"]
             self.assertEqual(moves["categories"], categories)
+            self.assertEqual(moves["hearts"], hearts)
             self.assertEqual((moves["frame"], moves["epoch"], moves["path"]),
                 (first["image"]["frame"], first["image"]["epoch"], first["image"]["path"]))
             self.assertEqual((moves["matched_pixels"], moves["total_pixels"], moves["direct_read_frames"]), (24, 24, 0))
+            order = snapshot["acting_order"]
+            self.assertEqual((order["frame"], order["epoch"], order["path"]),
+                (snapshot["image"]["frame"], snapshot["image"]["epoch"], snapshot["image"]["path"]))
+            self.assertEqual(order["direct_read_frames"], 0)
         self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (4, 1))
 
     def test_round_four_skips_last_used_move_with_entry_categories_cached(self):
@@ -908,6 +1068,7 @@ class PersistentLuaChecks(unittest.TestCase):
         harness.ranked_dance()
         categories = ["Cool", "Cool", "Cool", "Beauty"]
         plans = harness.act(move_categories=categories,
+            acting_positions=[1, 3, 4, 2],
             star_counts=[[0, 0, 0], [1, 2, 0], [0, 1, 2], [0, 0, 4]],
             after_entry=lambda value: value.clock.lua.run("paint_acting_moves({'Cute','Cute','Cute','Cute'}); return 'ready'"))
         self.assertEqual([plan["move"] for plan in plans], [1, 2, 1, 2])
@@ -940,7 +1101,7 @@ class PersistentLuaChecks(unittest.TestCase):
         self.assertEqual(harness.act_snapshots[1]["move_categories"], fresh)
         self.assertEqual(harness.counters()["moves"], 2)
 
-    def test_unreadable_entry_move_fill_stops_paused_before_selection(self):
+    def test_unreadable_entry_move_fill_warns_once_and_uses_recognized_moves(self):
         harness = self.harness()
         harness.prepare_entry()
         harness.dress(0, finish=True)
@@ -951,16 +1112,115 @@ class PersistentLuaChecks(unittest.TestCase):
             value.clock.lua.run("pixel(18,220,{132,132,132}); return 'ready'")
             captured["frame"] = int(value.clock.lua.run("return tostring(frame)"))
 
-        with self.assertRaises(AssertionError):
-            harness.act(rounds=1, entry_change=obstruct)
-        self.assertEqual(int(harness.clock.lua.run("return tostring(frame)")), captured["frame"])
+        plans = harness.act(move_hearts=[6, 1, 4, 3], entry_change=obstruct)
+        self.assertEqual([plan["move"] for plan in plans], [3, 4, 3, 4])
         self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
-        self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (1, 1))
+        self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (4, 1))
         snapshot = harness.act_snapshots[0]
         self.assertFalse(snapshot["move_categories"]["readable"])
         self.assertEqual(snapshot["move_categories"]["categories"][0], "unreadable")
+        self.assertEqual(snapshot["image"]["frame"], captured["frame"])
+        self.assertEqual(snapshot["move_categories"]["unrecognized_move_slots"], [1])
+        self.assertTrue(all(plan["selectable"] and not plan["unrecognized_fallback"] for plan in plans))
+        messages = json.loads(harness.clock.lua.run(f"return dofile({literal((ROOT / 'lua/json.lua').as_posix())}).encode(lua_messages)"))
+        warnings = [message for message in messages if "Acting: WARN - Move slot " in message]
+        self.assertEqual(warnings, snapshot["move_categories"]["warnings"])
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(snapshot["trial"]["completed_rounds"], 0)
+
+    def test_unreadable_entry_hearts_warn_once_and_use_recognized_moves(self):
+        harness = self.harness()
+        harness.prepare_entry()
+        harness.dress(0, finish=True)
+        harness.ranked_dance()
+
+        def obstruct(value):
+            value.clock.lua.run("pixel(62,242,{255,41,0}); return 'ready'")
+
+        plans = harness.act(move_hearts=[6, 1, 4, 3], entry_change=obstruct)
+        self.assertEqual([plan["move"] for plan in plans], [3, 4, 3, 4])
+        snapshot = harness.act_snapshots[0]
+        self.assertTrue(snapshot["move_categories"]["categories_readable"])
+        self.assertFalse(snapshot["move_categories"]["hearts_readable"])
+        self.assertEqual(snapshot["move_categories"]["hearts"][0], -1)
+        self.assertTrue(snapshot["plan"]["selectable"])
+        messages = json.loads(harness.clock.lua.run(f"return dofile({literal((ROOT / 'lua/json.lua').as_posix())}).encode(lua_messages)"))
+        warnings = [message for message in messages if "Acting: WARN - Move slot " in message]
+        self.assertEqual(warnings, snapshot["move_categories"]["warnings"])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("unrecognized raw hearts", warnings[0])
+        self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
+
+    def test_no_recognized_moves_warn_and_fall_back_without_repeating_the_previous_move(self):
+        harness = self.harness()
+        harness.prepare_entry()
+        harness.dress(0, finish=True)
+        harness.ranked_dance()
+
+        def obstruct(value):
+            points = [probes[0] for probes in MOVE_PROBES]
+            value.clock.lua.run(f"for _, point in ipairs({literal(points)}) do "
+                "pixel(point[1],point[2],{132,132,132}) end; return 'ready'")
+
+        plans = harness.act(entry_change=obstruct, acting_positions=[1, 2, 3, 4],
+            star_counts=[[0, 0, 0], [2, 4, 1], [1, 0, 4], [4, 0, 1]])
+        self.assertEqual([plan["move"] for plan in plans], [1, 2, 1, 2])
+        self.assertEqual([plan["judge"] for plan in plans], [1, 3, 2, 2])
+        self.assertTrue(all(plan["selectable"] and plan["unrecognized_fallback"] for plan in plans))
+        self.assertTrue(all(not plan["matching_category_override"] for plan in plans))
+        self.assertEqual(harness.act_snapshots[0]["move_categories"]["unrecognized_move_slots"], [1, 2, 3, 4])
+        messages = json.loads(harness.clock.lua.run(f"return dofile({literal((ROOT / 'lua/json.lua').as_posix())}).encode(lua_messages)"))
+        self.assertEqual(len([message for message in messages if "Acting: WARN - Move slot " in message]), 4)
+        self.assertEqual(len([message for message in messages if "No recognized legal move remains" in message]), 4)
+        self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
+
+    def test_unreadable_judges_still_stop_with_the_actual_paused_capture(self):
+        harness = self.harness()
+        harness.prepare_entry()
+        harness.dress(0, finish=True)
+        harness.ranked_dance()
+        with self.assertRaises(AssertionError):
+            harness.act(rounds=1, entry_change=lambda value: value.clock.lua.run("acting_judge_unreadable=true; return 'ready'"))
+        snapshot = harness.act_snapshots[0]
+        self.assertFalse(snapshot["stars"]["readable"])
         self.assertNotIn("plan", snapshot)
         self.assertEqual(snapshot["trial"]["completed_rounds"], 0)
+        self.assertEqual(int(harness.clock.lua.run("return tostring(frame)")), snapshot["image"]["frame"])
+        self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
+
+    def test_later_unreadable_order_stops_before_any_new_move_inputs(self):
+        harness = self.harness()
+        harness.prepare_entry()
+        harness.dress(0, finish=True)
+        harness.ranked_dance()
+
+        def obstruct(value, number):
+            if number == 2:
+                value.clock.lua.run("pixel(4,90,{132,132,132}); return 'ready'")
+
+        with self.assertRaises(AssertionError):
+            harness.act(rounds=2, acting_positions=[1, 2, 3, 4], before_round=obstruct)
+        snapshot = harness.act_snapshots[1]
+        self.assertFalse(snapshot["acting_order"]["readable"])
+        self.assertNotIn("plan", snapshot)
+        self.assertEqual(snapshot["trial"]["completed_rounds"], 1)
+        self.assertEqual(int(harness.clock.lua.run("return tostring(frame)")), snapshot["image"]["frame"])
+        self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
+
+    def test_multiple_legal_zero_heart_moves_stop_with_a_retained_selection_failure(self):
+        harness = self.harness()
+        harness.prepare_entry()
+        harness.dress(0, finish=True)
+        harness.ranked_dance()
+        with self.assertRaises(AssertionError):
+            harness.act(rounds=2, move_hearts=[6, 0, 0, 0])
+        snapshot = harness.act_snapshots[1]
+        self.assertTrue(snapshot["move_categories"]["readable"])
+        self.assertFalse(snapshot["plan"]["selectable"])
+        self.assertEqual(snapshot["plan"]["legal_move_slots"], [2, 3, 4])
+        self.assertNotIn("steps", snapshot["plan"])
+        self.assertEqual(int(harness.clock.lua.run("return tostring(frame)")), snapshot["image"]["frame"])
+        self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
 
     def test_changed_calibration_cannot_be_acknowledged(self):
         harness = self.harness()
@@ -1432,13 +1692,17 @@ class ActingPixelChecks(unittest.TestCase):
         self.lua.run(f"pixels=dofile({literal((ROOT / 'contest/acting_pixels.lua').as_posix())}); "
             f"json=dofile({literal((ROOT / 'lua/json.lua').as_posix())}); return 'ready'")
 
-    def image(self, categories):
+    def image(self, categories, hearts=(3, 2, 2, 2), acting_position=1):
         image = Image.new("RGB", (256, 384), (81, 81, 81))
-        for box, category in zip(MOVE_BOXES, categories):
+        for slot, (box, category, count) in enumerate(zip(MOVE_BOXES, categories, hearts), 1):
             image.paste(MOVE_FILLS[category], box)
+            paint_move_hearts(image, slot, category, count)
+        for position in range(1, 5):
+            paint_acting_panel(image, position,
+                PLAYER_PANEL_COLORS if position == acting_position else OPPONENT_PANEL_COLORS)
         return image
 
-    def read(self, image):
+    def read(self, image, *, order=False, unavailable=()):
         data = image.convert("RGB").tobytes()
         parts = []
         for color, run in groupby(zip(data[0::3], data[1::3], data[2::3])):
@@ -1446,17 +1710,40 @@ class ActingPixelChecks(unittest.TestCase):
             parts.append(f"string.rep(string.char(0,{color[0]},{color[1]},{color[2]}),{count})")
         height = image.height
         raw = f"string.char(255,254,1,0,{height // 256},{height % 256},1,0,0,0,0)..table.concat({{" + ",".join(parts) + "})"
-        return json.loads(self.lua.run(f"return json.encode(pixels.read_move_categories({raw}))"))
+        call = f"pixels.read_acting_order({raw})" if order else f"pixels.read_move_categories({raw}, {literal(unavailable)})"
+        return json.loads(self.lua.run(f"return json.encode({call})"))
 
     def test_all_five_native_move_fills_are_readable_in_every_slot(self):
         categories = list(stage3_enter.CATEGORIES)
         for first in range(5):
             expected = [categories[(first + slot) % 5] for slot in range(4)]
+            hearts = [(first + slot) % 7 for slot in range(4)]
             with self.subTest(categories=expected):
-                result = self.read(self.image(expected))
+                result = self.read(self.image(expected, hearts))
                 self.assertTrue(result["readable"])
                 self.assertEqual(result["categories"], expected)
+                self.assertEqual(result["hearts"], hearts)
                 self.assertEqual((result["matched_pixels"], result["total_pixels"], result["direct_read_frames"]), (24, 24, 0))
+
+    def test_retained_four_language_pixels_read_native_hearts_and_acting_order(self):
+        reference = json.loads((ROOT / "tests/support/acting-capture.json").read_text(encoding="utf-8"))
+        self.assertEqual(reference["sources"], ["Japan", "Europe", "USA", "Chinese"])
+        image = Image.new("RGB", (256, 384), (81, 81, 81))
+        for x, y, r, g, b in reference["move_fill_points"] + reference["acting_order_points"]:
+            image.putpixel((x, y), (r, g, b))
+        for strip in reference["heart_strips"]:
+            x, y = strip["origin"]
+            self.assertEqual(len(strip["rows"]), 7)
+            for dy, row in enumerate(strip["rows"]):
+                self.assertEqual(len(row), 48)
+                for dx, code in enumerate(row):
+                    image.putpixel((x + dx, y + dy), tuple(reference["palette"][code]))
+        moves, order = self.read(image), self.read(image, order=True)
+        self.assertTrue(moves["readable"])
+        self.assertEqual(moves["categories"], reference["move_types"])
+        self.assertEqual(moves["hearts"], reference["move_hearts"])
+        self.assertTrue(order["readable"])
+        self.assertEqual(order["position"], reference["acting_position"])
 
     def test_unknown_or_conflicting_fills_and_top_only_images_are_rejected(self):
         categories = ["Beauty", "Tough", "Smart", "Cute"]
@@ -1468,11 +1755,84 @@ class ActingPixelChecks(unittest.TestCase):
                 self.assertFalse(result["readable"])
                 self.assertEqual(result["categories"], ["unreadable", *categories[1:]])
                 self.assertEqual(result["slots"][0]["matched_pixels"], 5)
+                self.assertEqual(result["unrecognized_move_slots"], [1])
+                self.assertEqual(result["recognized_move_slots"], [2, 3, 4])
+                self.assertEqual(len(result["warnings"]), 1)
         image = self.image(categories)
         image.paste((89, 142, 231), MOVE_BOXES[0])
         self.assertFalse(self.read(image)["readable"])
         with self.assertRaisesRegex(AssertionError, "stacked"):
             self.read(image.crop((0, 0, 256, 192)))
+
+    def test_native_heart_counts_ignore_move_names_type_letters_and_effect_text(self):
+        categories, hearts = ["Cool", "Beauty", "Cute", "Smart"], [6, 0, 3, 4]
+        image = self.image(categories, hearts)
+        expected = self.read(image)
+        for box, (heart_x, heart_y) in zip(MOVE_BOXES, MOVE_HEART_ORIGINS):
+            image.paste((255, 255, 255), (box[0] + 4, box[1] + 1, box[2] - 7, box[1] + 18))
+            image.paste((0, 0, 0), (box[0] + 4, heart_y - 8, heart_x, heart_y + 7))
+            image.paste((255, 255, 255), (box[0] + 4, heart_y + 9, box[2] - 7, box[3] - 7))
+        self.assertEqual(self.read(image), expected)
+        self.assertTrue(expected["hearts_readable"])
+        self.assertEqual(expected["hearts"], hearts)
+
+    def test_damaged_or_gapped_heart_cells_are_not_silently_counted_as_zero(self):
+        categories = ["Cool", "Beauty", "Cute", "Smart"]
+        for damage in ("partial", "gap", "unknown_empty_cell"):
+            with self.subTest(damage=damage):
+                image = self.image(categories)
+                if damage == "partial":
+                    image.putpixel((62, 242), MOVE_FILLS["Cool"])
+                elif damage == "gap":
+                    image.paste(MOVE_FILLS["Cool"], (67, 240, 75, 247))
+                else:
+                    image.putpixel((91, 242), (132, 132, 132))
+                result = self.read(image)
+                self.assertTrue(result["categories_readable"])
+                self.assertFalse(result["hearts_readable"])
+                self.assertFalse(result["readable"])
+                self.assertEqual(result["hearts"][0], -1)
+                self.assertEqual(len(result["warnings"]), 1)
+                self.assertIn("unrecognized raw hearts", result["warnings"][0])
+
+    def test_blacklisted_slots_need_neither_move_fill_nor_heart_pixels(self):
+        image = self.image(["Cool", "Beauty", "Cute", "Smart"])
+        for box in MOVE_BOXES[2:]:
+            image.paste((0, 0, 0), box)
+        result = self.read(image, unavailable=(3, 4))
+        self.assertTrue(result["readable"])
+        self.assertEqual(result["categories"], ["Cool", "Beauty", "unavailable", "unavailable"])
+        self.assertEqual(result["hearts"], [3, 2, -1, -1])
+        self.assertEqual(len(result["warnings"]), 0)
+
+    def test_all_four_acting_positions_use_panel_colors_without_any_names(self):
+        for position in range(1, 5):
+            with self.subTest(position=position):
+                image = self.image(["Cool", "Beauty", "Cute", "Smart"], acting_position=position)
+                for row in range(4):
+                    image.paste((255, 255, 255), (0, row * 48, 80, row * 48 + 32))
+                result = self.read(image, order=True)
+                self.assertTrue(result["readable"])
+                self.assertEqual((result["position"], result["player_count"], result["direct_read_frames"]), (position, 1, 0))
+                self.assertEqual(result["source"], "native_player_panel_fill_rgb")
+                self.assertEqual((result["matched_pixels"], result["total_pixels"]), (24, 24))
+                self.assertEqual(self.read(image.crop((0, 0, 256, 192)), order=True), result)
+
+    def test_unknown_conflicting_missing_and_multiple_player_panels_are_rejected(self):
+        for damage in ("unknown", "conflicting", "missing", "multiple"):
+            with self.subTest(damage=damage):
+                image = self.image(["Cool", "Beauty", "Cute", "Smart"])
+                if damage == "unknown":
+                    image.putpixel((4, 42), (132, 132, 132))
+                elif damage == "conflicting":
+                    image.putpixel((4, 42), OPPONENT_PANEL_COLORS[1])
+                elif damage == "missing":
+                    paint_acting_panel(image, 1, OPPONENT_PANEL_COLORS)
+                else:
+                    paint_acting_panel(image, 2, PLAYER_PANEL_COLORS)
+                result = self.read(image, order=True)
+                self.assertFalse(result["readable"])
+                self.assertNotIn("position", result)
 
 
 class ActingMoveChecks(unittest.TestCase):
@@ -1486,12 +1846,16 @@ class ActingMoveChecks(unittest.TestCase):
             round_seconds=1 / stage4_dress.FRAME_RATE, final_seconds=1 / stage4_dress.FRAME_RATE),
             "target": TARGET}
 
-    def plan(self, number, previous_move, previous_judge, counts, move_categories=None, *, category="Cool"):
-        config = {**self.config, "target": {**TARGET, "category": category}}
+    def plan(self, number, previous_move, previous_judge, counts, move_categories=None, *, category="Cool",
+             hearts=(2, 2, 2, 2), acting_position=1, unavailable_move_slots=()):
+        config = {**self.config, "target": {**TARGET, "category": category},
+            "unavailable_move_slots": unavailable_move_slots}
+        moves = {"readable": True, "categories": move_categories or ["Beauty", "Tough", "Smart", "Cute"], "hearts": hearts}
+        order = {"readable": True, "position": acting_position}
         return json.loads(self.clock.lua.run(f"local counts={literal(counts)}; "
-            "local stars={readable=true,counts=counts,selected_judge=acting_pixels.choose_judge(counts)}; "
+            "local stars={readable=true,counts=counts}; "
             f"return json.encode(acting_plan.round({literal(config)}, {number}, {previous_move}, "
-            f"{previous_judge}, frame, stars, {literal(move_categories)}))"))
+            f"{previous_judge}, frame, stars, {literal(moves)}, {literal(order)}))"))
 
     def perform(self, plan, menu):
         self.assertEqual(plan["menu_buttons"], menu)
@@ -1524,70 +1888,124 @@ class ActingMoveChecks(unittest.TestCase):
                     self.assertTrue(plan["matching_category_override"])
                     self.perform(plan, directions + ["A", "A"])
 
-    def test_override_requires_four_stars_and_uses_the_lowest_matching_slot(self):
-        for category in stage3_enter.CATEGORIES:
-            with self.subTest(category=category):
+    def test_early_four_star_override_uses_the_strongest_matching_move(self):
+        for category, position in product(stage3_enter.CATEGORIES, (1, 2)):
+            with self.subTest(category=category, position=position):
                 other = "Beauty" if category != "Beauty" else "Cool"
-                plan = self.plan(2, 1, 1, [0, 4, 4], [other, other, category, category], category=category)
-                self.assertEqual((plan["move"], plan["judge"], plan["fallback_move"]), (3, 2, 2))
+                move_types = [other, other, category, category]
+                plan = self.plan(2, 1, 1, [0, 4, 4], move_types, category=category,
+                    hearts=(6, 6, 2, 4), acting_position=position)
+                self.assertEqual((plan["move"], plan["judge"], plan["move_hearts"]), (4, 2, 4))
                 self.assertEqual(plan["move_category"], category)
-                self.assertEqual(plan["move_policy"], "four_star_category_match")
+                self.assertEqual(plan["move_policy"], "four_star_category_match_most_hearts")
                 self.assertTrue(plan["matching_category_override"])
-        cases = (([0, 4, 1], ["Beauty", "Tough", "Smart", "Cute"]),
-                 ([0, 3, 1], ["Beauty", "Tough", "Cool", "Cool"]),
-                 ([0, 5, 1], ["Beauty", "Tough", "Cool", "Cool"]),
-                 ([0, 4, 1], None))
-        for counts, categories in cases:
-            with self.subTest(counts=counts, categories=categories):
-                plan = self.plan(2, 1, 1, counts, categories)
-                self.assertEqual((plan["move"], plan["fallback_move"]), (2, 2))
+                tied = self.plan(2, 1, 1, [0, 4, 4], move_types, category=category,
+                    hearts=(6, 6, 4, 4), acting_position=position)
+                self.assertEqual((tied["move"], tied["judge"]), (3, 2))
+
+    def test_fallback_uses_fewest_judge_and_strongest_eligible_move(self):
+        cases = (
+            ([0, 4, 1], ["Beauty", "Tough", "Cool", "Cool"], 3, 1),
+            ([0, 4, 1], ["Beauty", "Tough", "Cool", "Cool"], 4, 1),
+            ([2, 3, 1], ["Beauty", "Tough", "Cool", "Cool"], 1, 3),
+            ([2, 5, 1], ["Beauty", "Tough", "Cool", "Cool"], 2, 3),
+            ([0, 4, 1], ["Beauty", "Tough", "Smart", "Cute"], 1, 1),
+            ([0, 4, 1], ["Cool", "Tough", "Smart", "Cute"], 2, 1),
+        )
+        for counts, move_types, position, judge in cases:
+            with self.subTest(counts=counts, position=position, categories=move_types):
+                plan = self.plan(2, 1, 1, counts, move_types, hearts=(6, 5, 2, 4), acting_position=position)
+                self.assertEqual((plan["move"], plan["judge"], plan["move_hearts"]), (2, judge, 5))
                 self.assertFalse(plan["matching_category_override"])
-                self.assertEqual(plan["move_policy"], "round_1_2_1_2")
+                self.assertEqual(plan["move_policy"], "most_raw_hearts")
+        tied = self.plan(2, 1, 3, [0, 0, 4], hearts=(6, 4, 4, 4), acting_position=4)
+        self.assertEqual((tied["move"], tied["judge"]), (2, 1))
 
-    def test_last_used_move_is_excluded_from_matching_and_fallback_choices(self):
-        cases = (
-            (4, 1, [0, 0, 4], ["Cool", "Cool", "Cool", "Beauty"], 2, True,
-             ["right", "A", "right", "right", "A"]),
-            (3, 4, [0, 4, 0], ["Beauty", "Tough", "Cool", "Cool"], 3, True,
-             ["left", "A", "right", "A"]),
-            (4, 3, [0, 4, 0], ["Beauty", "Tough", "Cool", "Cute"], 2, False,
-             ["right", "up", "A", "right", "A"]),
-            (3, 1, [0, 0, 4], ["Cool", "Beauty", "Smart", "Cute"], 2, False,
-             ["right", "A", "right", "right", "A"]),
-            (2, 2, [0, 3, 1], None, 1, False, ["left", "A", "A"]),
-        )
-        for number, previous, counts, categories, move, override, menu in cases:
-            with self.subTest(round=number, previous_move=previous, categories=categories):
-                plan = self.plan(number, previous, 1, counts, categories)
-                self.assertEqual(plan["move"], move)
+    def test_last_used_move_is_always_excluded_from_both_picking_paths(self):
+        for previous, position in product(range(1, 5), (1, 4)):
+            with self.subTest(previous=previous, position=position):
+                hearts = [1, 2, 3, 4]
+                hearts[previous - 1] = 6
+                plan = self.plan(2, previous, 1, [0, 4, 1], ["Cool"] * 4,
+                    hearts=hearts, acting_position=position)
+                expected = max((slot for slot in range(1, 5) if slot != previous), key=lambda slot: hearts[slot - 1])
+                self.assertEqual(plan["move"], expected)
                 self.assertNotEqual(plan["move"], previous)
-                self.assertEqual(plan["matching_category_override"], override)
-                self.assertEqual(plan["fallback_move"], 1 if number % 2 else 2)
-                if not override and move != plan["fallback_move"]:
-                    self.assertEqual(plan["move_policy"], "alternate_fallback")
-                self.perform(plan, menu)
+                self.assertNotIn(previous, plan["eligible_move_slots"])
+                self.assertEqual(plan["judge"], 2 if position == 1 else 1)
+        first = self.plan(1, 1, 1, [0, 0, 0], hearts=(6, 2, 2, 2))
+        self.assertEqual(first["move"], 1)
 
-    def test_overrides_keep_the_original_fallback_rounds_and_actual_cursor(self):
-        cases = (
-            (["Beauty", "Tough", "Smart", "Cool"], [1, 4, 1, 2],
-             [[0, 0, 0], [0, 4, 4], [0, 1, 2], [0, 0, 0]],
-             [["A", "A"], ["right", "down", "A", "right", "A"],
-              ["left", "up", "A", "left", "A"], ["right", "A", "A"]]),
-            (["Beauty", "Tough", "Cool", "Cool"], [1, 3, 1, 3],
-             [[0, 0, 0], [0, 4, 4], [0, 1, 2], [4, 0, 1]],
-             [["A", "A"], ["down", "A", "right", "A"],
-              ["up", "A", "left", "A"], ["down", "A", "A"]]),
-        )
-        for categories, moves, stars, menus in cases:
-            previous_move, previous_judge = 1, 1
-            for number, (move, counts, menu) in enumerate(zip(moves, stars, menus), 1):
-                with self.subTest(categories=categories, round=number):
-                    plan = self.plan(number, previous_move, previous_judge, counts, categories)
-                    self.assertEqual(plan["move"], move)
-                    self.assertEqual(plan["fallback_move"], 1 if number % 2 else 2)
-                    self.assertEqual((plan["previous_move"], plan["previous_judge"]), (previous_move, previous_judge))
-                    self.perform(plan, menu)
-                    previous_move, previous_judge = plan["move"], plan["judge"]
+    def test_zero_heart_moves_are_allowed_only_as_the_sole_legal_move(self):
+        plan = self.plan(2, 1, 1, [0, 4, 1], ["Beauty", "Tough", "Cool", "Cute"], hearts=(6, 2, 0, 4))
+        self.assertEqual((plan["move"], plan["judge"]), (4, 1))
+        self.assertNotIn(3, plan["eligible_move_slots"])
+        self.assertFalse(plan["matching_category_override"])
+        only = self.plan(2, 1, 1, [0, 4, 1], ["Cool", "Beauty", "unavailable", "unavailable"],
+            hearts=(6, 0, -1, -1), unavailable_move_slots=(3, 4))
+        self.assertEqual((only["move"], only["move_hearts"], only["judge"]), (2, 0, 1))
+        self.assertTrue(only["zero_heart_only_option"])
+        self.assertEqual(only["eligible_move_slots"], [2])
+        only_recognized = self.plan(2, 1, 1, [0, 4, 1], ["Cool", "Beauty", "unreadable", "unreadable"],
+            hearts=(6, 0, -1, -1))
+        self.assertEqual((only_recognized["move"], only_recognized["move_hearts"]), (2, 0))
+        self.assertTrue(only_recognized["zero_heart_only_option"])
+        self.assertFalse(only_recognized["unrecognized_fallback"])
+        for number, hearts in ((1, (0, 0, 0, 0)), (2, (6, 0, 0, 0))):
+            rejected = self.plan(number, 1, 1, [0, 0, 0], hearts=hearts)
+            self.assertFalse(rejected["selectable"])
+            self.assertNotIn("steps", rejected)
+
+    def test_unknown_strength_is_discarded_but_order_remains_mandatory(self):
+        for value in (-1, 7, 1.5, "2", None):
+            with self.subTest(hearts=value):
+                plan = self.plan(2, 1, 1, [0, 4, 1], hearts=(6, value, 3, 4))
+                self.assertEqual((plan["move"], plan["move_hearts"]), (4, 4))
+                self.assertEqual(plan["recognized_move_slots"], [3, 4])
+                self.assertFalse(plan["unrecognized_fallback"])
+        missing = self.plan(2, 1, 1, [0, 4, 1], hearts=(6, 2, 3))
+        self.assertEqual((missing["move"], missing["move_hearts"]), (3, 3))
+        for position in (None, 0, 5, 1.5, "1"):
+            with self.subTest(position=position), self.assertRaises(AssertionError):
+                self.plan(2, 1, 1, [0, 4, 1], acting_position=position)
+
+    def test_unrecognized_types_are_discarded_and_first_available_fallback_is_always_legal(self):
+        move_types = ["Cool", "unreadable", "Cool", "Beauty"]
+        for position, expected, judge in ((1, 3, 2), (4, 4, 1)):
+            plan = self.plan(2, 1, 1, [0, 4, 1], move_types, hearts=(6, 6, 2, 5), acting_position=position)
+            self.assertEqual((plan["move"], plan["judge"]), (expected, judge))
+            self.assertEqual(plan["recognized_move_slots"], [3, 4])
+        for previous in range(1, 5):
+            with self.subTest(previous=previous):
+                plan = self.plan(2, previous, 1, [2, 4, 1], ["unreadable"] * 4, hearts=(-1, -1, -1, -1))
+                self.assertTrue(plan["unrecognized_fallback"])
+                self.assertEqual(plan["move"], 2 if previous == 1 else 1)
+                self.assertNotEqual(plan["move"], previous)
+                self.assertEqual(plan["judge"], 3)
+                self.assertEqual(len(plan["warnings"]), 1)
+        only_previous_recognized = self.plan(2, 3, 1, [0, 4, 1],
+            ["unreadable", "unreadable", "Cool", "unreadable"], hearts=(-1, -1, 6, -1))
+        self.assertEqual((only_previous_recognized["move"], only_previous_recognized["judge"]), (1, 1))
+        self.assertTrue(only_previous_recognized["unrecognized_fallback"])
+        blocked = self.plan(2, 1, 1, [0, 4, 1], ["unreadable"] * 4,
+            hearts=(-1, -1, -1, -1), unavailable_move_slots=(2, 4))
+        self.assertEqual(blocked["move"], 3)
+
+    def test_raw_heart_choices_keep_actual_move_and_judge_cursors_across_rounds(self):
+        categories, hearts = ["Beauty", "Tough", "Smart", "Cool"], (5, 2, 4, 3)
+        moves, positions = [1, 4, 1, 3], [1, 2, 3, 4]
+        stars = [[0, 0, 0], [0, 4, 4], [0, 1, 2], [4, 0, 1]]
+        menus = [["A", "A"], ["right", "down", "A", "right", "A"],
+            ["left", "up", "A", "left", "A"], ["down", "A", "right", "A"]]
+        previous_move, previous_judge = 1, 1
+        for number, (move, position, counts, menu) in enumerate(zip(moves, positions, stars, menus), 1):
+            with self.subTest(round=number):
+                plan = self.plan(number, previous_move, previous_judge, counts, categories,
+                    hearts=hearts, acting_position=position)
+                self.assertEqual(plan["move"], move)
+                self.assertEqual((plan["previous_move"], plan["previous_judge"]), (previous_move, previous_judge))
+                self.perform(plan, menu)
+                previous_move, previous_judge = plan["move"], plan["judge"]
 
 
 class RankTimingChecks(unittest.TestCase):
@@ -2171,9 +2589,35 @@ class CueAgreementChecks(unittest.TestCase):
                     self.assertEqual(adjustments[0]["next_frame"] - adjustments[0]["frame"], 4)
                     self.assertTrue((work / "midpoint-adjustment-01.png").is_file())
 
-    def test_main_and_debug_late_unreadable_or_stalled_midpoints_install_a_continuation(self):
+    def test_held_midpoint_keeps_original_deadlines_and_only_skips_expired_inputs(self):
+        modes = (("first_button_only", False), ("record_all_buttons", False), ("record_all_buttons", True))
+        for (policy, diagnostics), elapsed in product(modes, (3, 100)):
+            with self.subTest(policy=policy, diagnostics=diagnostics, elapsed=elapsed), temporary_directory() as folder:
+                work, samples = Path(folder), iter(((1000, 127), (1000 + elapsed, 127)))
+                client = SimpleNamespace(command=Mock(side_effect=lambda action, name:
+                    self.debug_capture(work, name, *next(samples)) if action == "capture" else {}))
+                emulator = SimpleNamespace(controller=SimpleNamespace(live_deadline=None),
+                    command=Mock(return_value={"stop_reason": "demo_midpoint"}))
+                plan = rank_dance.stage5_plan(rank="Hyper", source_frame=700, host_timeout=300,
+                    fixed_timing=fixed_timing("Beauty", "Hyper"), entry_pointer_x=64,
+                    feedback_policy=policy, observation_policy="scheduled", midpoint_diagnostics=diagnostics)
+                midpoint, planned, _ = rank_dance.prepare_response(emulator, client, work, 3, plan, record=Mock())
+                expected = [1056, 1146, 1236, 1326]
+                self.assertEqual([press["frame"] for press in planned["presses"]],
+                    [frame for frame in expected if frame > midpoint["frame"]])
+                self.assertEqual(planned["skipped_input_count"], int(elapsed == 100))
+                self.assertEqual((planned["frame"], planned["pointer_x"], planned["response_end_frame"]),
+                    (1000 + elapsed, 127, 1363))
+                self.assertEqual(planned["counted_midpoint_anchor"], {"frame": 1000, "epoch": 2, "pointer_x": 127,
+                    "source": "fresh_paused_midpoint_before_counted_correction"})
+                self.assertEqual(sum(call.args[0] == "retime-midpoint" for call in client.command.call_args_list), 1)
+                if elapsed == 100:
+                    self.assertEqual(planned["skipped_inputs"][0]["reason"], "input_already_due")
+
+    def test_main_and_debug_late_unreadable_or_invalid_corrections_install_a_continuation(self):
         cases = ((((1000, 130),), 4, False), (((1000, 230),), 1, False), (((1000, None),), 0, False),
-            (((1000, 127), (1002, 127)), 0, False), (((1000, 127),), 0, True))
+            (((1000, 127), (1002, 127)), 4, False), (((1000, 127), (1001, 127)), 0, False),
+            (((1000, 127), (1002, 126)), 0, False), (((1000, 127),), 0, True))
         for main, (positions, count, rejected) in product((False, True), cases):
             with self.subTest(main=main, positions=positions), temporary_directory() as folder:
                 work, samples = Path(folder), iter(positions)
@@ -2358,17 +2802,17 @@ class CueAgreementChecks(unittest.TestCase):
             pixels[dx, dy] = color
         offsets = list(dict.fromkeys([(dx, dy) for dx, dy, _ in sprite.probes] +
                                     [(dx, dy) for dx, dy, _ in sprite.points]))
-        for dx, dy in offsets[:len(sprite.points) // 5 + extra_miss]:
+        for dx, dy in offsets[:len(sprite.points) * 3 // 10 + extra_miss]:
             pixels[dx, dy] = (0, 0, 0)
         return pixels, sprite
 
-    def test_cue_match_threshold_accepts_80_percent_and_rejects_lower(self):
+    def test_cue_match_threshold_accepts_70_percent_and_rejects_lower(self):
         for side in ("left", "right"):
             with self.subTest(side=side):
                 pixels, sprite = self.damaged_cue(side)
                 matched = _match(pixels, 0, 0, sprite)
                 self.assertIsNotNone(matched)
-                self.assertGreaterEqual(matched["match_fraction"], 0.80)
+                self.assertGreaterEqual(matched["match_fraction"], 0.70)
                 pixels, sprite = self.damaged_cue(side, extra_miss=1)
                 self.assertIsNone(_match(pixels, 0, 0, sprite))
 

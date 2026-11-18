@@ -9,47 +9,78 @@ local function move_slot(value)
     return math.floor((value - 1) / 2), (value - 1) % 2
 end
 
-local function choose_move(config, number, move_cursor, stars, move_categories)
-    local fallback = config.rounds[number].move
+local function known_hearts(value)
+    return type(value) == "number" and value >= 0 and value <= 6 and value == math.floor(value)
+end
+
+local function eligible_moves(config, number, move_cursor, moves)
     local last_move = number > 1 and move_cursor or nil
-    local blocked, available = {}, {}
+    assert(type(moves) == "table" and type(moves.categories) == "table" and type(moves.hearts) == "table",
+        "Supply move type and raw heart observations from the Acting-entry capture")
+    assert(config.target and categories[config.target.category], "A supported contest category is required")
+    local blocked, available, legal, recognized, eligible = {}, 0, {}, {}, {}
     for _, slot in ipairs(config.unavailable_move_slots or {}) do
         move_slot(slot)
         blocked[slot] = true
     end
-    for slot = 1, 4 do if not blocked[slot] then available[#available + 1] = slot end end
-    assert(#available >= 2, "The first Pokemon needs at least two available moves for Acting")
-    move_slot(fallback)
-    if move_categories then
-        assert(type(move_categories) == "table" and #move_categories == 4,
-            "Supply all four move categories from the Acting-entry capture")
-        assert(config.target and categories[config.target.category], "A supported contest category is required")
-        for slot, category in ipairs(move_categories) do
-            assert(blocked[slot] or categories[category], "Every available move needs a recognized contest category")
-        end
-        if stars.counts[stars.selected_judge] == 4 then
-            for slot, category in ipairs(move_categories) do
-                if not blocked[slot] and slot ~= last_move and category == config.target.category then return slot, true end
+    for slot = 1, 4 do
+        if not blocked[slot] then
+            available = available + 1
+            if slot ~= last_move then
+                legal[#legal + 1] = slot
+                if categories[moves.categories[slot]] and known_hearts(moves.hearts[slot]) then
+                    recognized[#recognized + 1] = slot
+                end
             end
         end
     end
-    if blocked[fallback] or fallback == last_move then
-        fallback = available[(number - 1) % 2 + 1]
-        if fallback == last_move then
-            for _, slot in ipairs(available) do if slot ~= last_move then fallback = slot; break end end
-        end
+    assert(available >= 2, "The first Pokemon needs at least two available moves for Acting")
+    for _, slot in ipairs(recognized) do
+        if moves.hearts[slot] > 0 or #recognized == 1 then eligible[#eligible + 1] = slot end
     end
-    return fallback, false
+    return eligible, legal, recognized, last_move
 end
 
-function M.round(config, number, move_cursor, judge_cursor, frame, stars, move_categories)
-    assert(type(stars) == "table" and stars.readable == true and #stars.counts == 3,
+local function strongest(moves, eligible, category)
+    local selected
+    for _, slot in ipairs(eligible) do
+        if (not category or moves.categories[slot] == category)
+            and (not selected or moves.hearts[slot] > moves.hearts[selected]) then selected = slot end
+    end
+    return selected
+end
+
+function M.round(config, number, move_cursor, judge_cursor, frame, stars, moves, acting_order)
+    assert(type(stars) == "table" and stars.readable == true and type(stars.counts) == "table" and #stars.counts == 3,
         "Plan each round from three readable judge counts")
-    local judge = stars.selected_judge
-    assert(type(judge) == "number" and judge >= 1 and judge <= 3 and judge == math.floor(judge),
-        "A selected judge from one through three is required")
+    for _, count in ipairs(stars.counts) do
+        assert(type(count) == "number" and count >= 0 and count <= 5 and count == math.floor(count),
+            "Judge stars must be whole counts from zero through five")
+    end
+    assert(type(acting_order) == "table" and acting_order.readable == true
+        and type(acting_order.position) == "number" and acting_order.position >= 1 and acting_order.position <= 4
+        and acting_order.position == math.floor(acting_order.position), "A readable pixel-based acting position is required")
+    assert(type(number) == "number" and number >= 1 and number <= 4 and number == math.floor(number),
+        "An Acting round from one through four is required")
+    assert(type(judge_cursor) == "number" and judge_cursor >= 1 and judge_cursor <= 3
+        and judge_cursor == math.floor(judge_cursor), "A judge cursor from one through three is required")
     local previous_row, previous_column = move_slot(move_cursor)
-    local move, override = choose_move(config, number, move_cursor, stars, move_categories)
+    local eligible, legal, recognized, last_move = eligible_moves(config, number, move_cursor, moves)
+    local fallback, override = #recognized == 0, false
+    local move = fallback and legal[1] or strongest(moves, eligible)
+    if not move then
+        return {round = number, selectable = false, acting_position = acting_order.position,
+            previous_move = move_cursor, excluded_previous_move = last_move, legal_move_slots = legal,
+            selection_error = "Multiple recognized zero-heart moves remain; none is the sole available option"}
+    end
+    local judge = 1
+    for index = 2, 3 do if stars.counts[index] < stars.counts[judge] then judge = index end end
+    local matching = not fallback and strongest(moves, eligible, config.target.category)
+    if acting_order.position <= 2 and matching then
+        for index, count in ipairs(stars.counts) do
+            if count == 4 then judge, move, override = index, matching, true; break end
+        end
+    end
     local row, column = move_slot(move)
     local menu, steps = {}, {}
     if column ~= previous_column then menu[#menu + 1] = column > previous_column and "right" or "left" end
@@ -80,11 +111,18 @@ function M.round(config, number, move_cursor, judge_cursor, frame, stars, move_c
         steps[#steps + 1] = "X:" .. timing.hold_frames .. ":" .. timing.release_frames
         total = total + timing.hold_frames + timing.release_frames
     end
-    return {round = number, move = move, judge = judge, previous_move = move_cursor,
-        fallback_move = config.rounds[number].move, matching_category_override = override,
-        move_category = move_categories and move_categories[move] or nil,
-        move_policy = override and "four_star_category_match"
-            or move ~= config.rounds[number].move and "alternate_fallback" or "round_1_2_1_2",
+    return {round = number, selectable = true, move = move, judge = judge, previous_move = move_cursor,
+        excluded_previous_move = last_move, acting_position = acting_order.position,
+        eligible_move_slots = fallback and {move} or eligible, recognized_move_slots = recognized,
+        matching_category_override = override, unrecognized_fallback = fallback,
+        move_category = categories[moves.categories[move]] and moves.categories[move] or "unreadable",
+        move_hearts = known_hearts(moves.hearts[move]) and moves.hearts[move] or -1,
+        zero_heart_only_option = not fallback and moves.hearts[move] == 0 and #recognized == 1,
+        move_policy = fallback and "first_available_unrecognized_fallback"
+            or override and "four_star_category_match_most_hearts" or "most_raw_hearts",
+        warnings = fallback and {string.format(
+            "Acting: WARN - No recognized legal move remains; using first available move slot %d.", move)} or {},
+        judge_policy = override and "early_four_stars_matching" or "first_fewest_stars",
         previous_judge = judge_cursor, menu_buttons = menu, steps = steps,
         start_frame = frame, end_frame = frame + total,
         menu_frames = menu_frames, mash_frames = mash, total_frames = total,

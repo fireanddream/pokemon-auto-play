@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import filecmp
 import json
 import math
@@ -73,11 +72,15 @@ def acting_plan(*, host_timeout, hold_frames=None, release_frames=None,
         "uncapped": uncapped, "speed_percent": 100, "frame_limit": not uncapped, "fast_forward": False,
         "retry_policy": f"reload_accepted_slot_{source_slot}_and_repeat_acting",
         "retry_limit": None if max_attempts is None else max_attempts - 1, "max_attempts": max_attempts,
-        "capture_policy": "all_three_judges_each_round_and_available_move_categories_at_entry",
-        "move_policy": "exclude_empty_and_last_used_slots_then_four_star_match_else_round_fallback",
+        "capture_policy": "judges_and_acting_order_each_round_and_available_move_types_hearts_at_entry",
+        "move_policy": "exclude_empty_previous_and_unrecognized_then_most_raw_hearts_or_first_legal_fallback",
+        "unrecognized_move_policy": "warn_discard_then_first_available_if_no_recognized_legal_move",
+        "zero_heart_policy": "only_if_one_recognized_legal_move_remains",
         "move_category_read_policy": "once_per_attempt_from_first_round_framebuffer",
+        "move_heart_read_policy": "once_per_attempt_from_first_round_framebuffer",
+        "acting_order_read_policy": "each_round_from_player_panel_fill_pixels",
         "move_navigation": "remembered_row_major_2x2",
-        "judge_policy": "first_exactly_four_else_first_fewest",
+        "judge_policy": "early_four_stars_with_matching_move_else_first_fewest",
         "source_slot": source_slot, "checkpoint_slot": OUTPUT_SLOT, "temporary_slot": TEMPORARY_SLOT,
         "entry_mode": "stage5_handoff" if from_stage5 else "load_retry_state",
         "handoff_render_frames": values["handoff_render_frames"],
@@ -87,7 +90,7 @@ def acting_plan(*, host_timeout, hold_frames=None, release_frames=None,
         "timing": {"hold_frames": hold_frames, "release_frames": release_frames,
             "mash_hold_frames": values["mash_hold_frames"], "mash_release_frames": values["mash_release_frames"],
             "frame_rate": FRAME_RATE, "frame_conversion": "nearest emulator frame at the native frame rate"},
-        "rounds": [{"round": index, "move": 1 if index % 2 else 2,
+        "rounds": [{"round": index,
             "mash_game_seconds": seconds, "mash_frames": round(seconds * FRAME_RATE)}
             for index, seconds in enumerate((round_seconds, round_seconds, round_seconds, final_seconds), 1)],
         "success": "report_success_and_remove_owned_temporary_images_after_finalization",
@@ -381,11 +384,15 @@ def run(*, run_name, acting_handoff, overworld_checkpoint, deadline=None, keep_u
                     previous_state=str(backups[TEMPORARY_SLOT]) if backups[TEMPORARY_SLOT] else None)
                 chosen = accepted["checkpoint"]["snapshot"]["plan"]
                 round_result = {"round": number, "image": capture, "stars": snapshot["stars"],
-                    "plan": chosen, "checkpoint_visit": accepted["checkpoint"]["visit"]}
+                    "acting_order": snapshot["acting_order"], "plan": chosen,
+                    "checkpoint_visit": accepted["checkpoint"]["visit"]}
                 attempt["rounds"].append(round_result)
                 record("acting-round", attempt=index, round=number, stars=snapshot["stars"]["counts"],
                        move=chosen["move"], judge=chosen["judge"], frame=accepted["frame"],
-                       move_category=chosen["move_category"], matching_category_override=chosen["matching_category_override"],
+                       move_category=chosen["move_category"], move_hearts=chosen["move_hearts"],
+                       acting_position=chosen["acting_position"],
+                       unrecognized_move_fallback=chosen["unrecognized_fallback"],
+                       matching_category_override=chosen["matching_category_override"],
                        judge_screenshot=capture["judges_png"])
                 progressed = emulator.command("combo", "inputs", *chosen["steps"],
                     timeout=None, deadline=controller.live_deadline)
@@ -504,17 +511,11 @@ def run(*, run_name, acting_handoff, overworld_checkpoint, deadline=None, keep_u
     return result
 
 
-def check():
-    from tests.support.lua51 import Lua51, literal
+def check(*, lua_dll=None):
+    from contest.checks import check_module
 
-    ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    lua = Lua51()
-    try:
-        statements = "; ".join(f"assert(loadfile({literal((HERE / name).as_posix())}))"
-                               for name in ("stage6_act.lua", "acting_pixels.lua", "acting_plan.lua"))
-        print(lua.run(statements + "; return 'Stage 6 Python and Lua syntax OK'"))
-    finally:
-        lua.close()
+    check_module(__file__, ("stage6_act.lua", "acting_pixels.lua", "acting_plan.lua"),
+        "Stage 6 Python and Lua syntax OK", lua_dll=lua_dll)
 
 
 def main():
@@ -537,10 +538,16 @@ def main():
     parser.add_argument("--release-frames", type=int, help="Override profile menu release emulator frames.")
     parser.add_argument("--round-seconds", type=float, help="Override profile rounds 1–3 game seconds.")
     parser.add_argument("--final-seconds", type=float, help="Override profile final round/results game seconds.")
+    parser.add_argument("--lua-dll", type=Path, help="Use this Lua 5.1 DLL for the input-free --check.")
     args = parser.parse_args()
     if args.check:
-        check()
+        try:
+            check(lua_dll=args.lua_dll)
+        except (OSError, ValueError, RuntimeError) as error:
+            parser.error(str(error))
         return 0
+    if args.lua_dll is not None:
+        parser.error("--lua-dll belongs to --check.")
     if args.host_timeout is None:
         parser.error("Supply the agreed --host-timeout in host seconds.")
     options = {key: getattr(args, key) for key in

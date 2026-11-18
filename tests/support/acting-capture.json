@@ -1,0 +1,117 @@
+{
+  "sources": ["Japan", "Europe", "USA", "Chinese"],
+  "move_types": ["Cool", "Cool", "Cool", "Beauty"],
+  "move_hearts": [3, 2, 2, 2],
+  "acting_position": 1,
+  "palette": {
+    "a": [255, 41, 0],
+    "b": [181, 0, 0],
+    "c": [255, 255, 255],
+    "d": [255, 132, 24],
+    "e": [255, 24, 24],
+    "f": [255, 74, 24],
+    "g": [41, 181, 255]
+  },
+  "move_fill_points": [
+    [18, 220, 255, 41, 0],
+    [18, 244, 255, 41, 0],
+    [18, 280, 255, 41, 0],
+    [108, 220, 255, 41, 0],
+    [108, 244, 255, 41, 0],
+    [108, 280, 255, 41, 0],
+    [146, 220, 255, 41, 0],
+    [146, 244, 255, 41, 0],
+    [146, 280, 255, 41, 0],
+    [236, 220, 255, 41, 0],
+    [236, 244, 255, 41, 0],
+    [236, 280, 255, 41, 0],
+    [18, 312, 255, 41, 0],
+    [18, 336, 255, 41, 0],
+    [18, 372, 255, 41, 0],
+    [108, 312, 255, 41, 0],
+    [108, 336, 255, 41, 0],
+    [108, 372, 255, 41, 0],
+    [146, 312, 41, 181, 255],
+    [146, 336, 41, 181, 255],
+    [146, 372, 41, 181, 255],
+    [236, 312, 41, 181, 255],
+    [236, 336, 41, 181, 255],
+    [236, 372, 41, 181, 255]
+  ],
+  "acting_order_points": [
+    [4, 36, 255, 239, 134],
+    [4, 42, 255, 207, 24],
+    [40, 36, 255, 239, 134],
+    [40, 42, 255, 207, 24],
+    [72, 36, 255, 239, 134],
+    [72, 42, 255, 207, 24],
+    [4, 84, 0, 207, 255],
+    [4, 90, 105, 215, 255],
+    [40, 84, 0, 207, 255],
+    [40, 90, 105, 215, 255],
+    [72, 84, 0, 207, 255],
+    [72, 90, 105, 215, 255],
+    [4, 132, 0, 207, 255],
+    [4, 138, 105, 215, 255],
+    [40, 132, 0, 207, 255],
+    [40, 138, 105, 215, 255],
+    [72, 132, 0, 207, 255],
+    [72, 138, 105, 215, 255],
+    [4, 180, 0, 207, 255],
+    [4, 186, 105, 215, 255],
+    [40, 180, 0, 207, 255],
+    [40, 186, 105, 215, 255],
+    [72, 180, 0, 207, 255],
+    [72, 186, 105, 215, 255]
+  ],
+  "heart_strips": [
+    {
+      "origin": [59, 240],
+      "rows": [
+        "abbabbaaabbabbaaabbabbaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bcdbeebabcdbeebabcdbeebaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bdfeeebabdfeeebabdfeeebaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bfeeeebabfeeeebabfeeeebaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "abeeebaaabeeebaaabeeebaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "aabebaaaaabebaaaaabebaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "aaabaaaaaaabaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    {
+      "origin": [187, 240],
+      "rows": [
+        "abbabbaaabbabbaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bcdbeebabcdbeebaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bdfeeebabdfeeebaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bfeeeebabfeeeebaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "abeeebaaabeeebaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "aabebaaaaabebaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "aaabaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    {
+      "origin": [59, 336],
+      "rows": [
+        "abbabbaaabbabbaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bcdbeebabcdbeebaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bdfeeebabdfeeebaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "bfeeeebabfeeeebaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "abeeebaaabeeebaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "aabebaaaaabebaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "aaabaaaaaaabaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ]
+    },
+    {
+      "origin": [187, 336],
+      "rows": [
+        "gbbgbbgggbbgbbgggggggggggggggggggggggggggggggggg",
+        "bcdbeebgbcdbeebggggggggggggggggggggggggggggggggg",
+        "bdfeeebgbdfeeebggggggggggggggggggggggggggggggggg",
+        "bfeeeebgbfeeeebggggggggggggggggggggggggggggggggg",
+        "gbeeebgggbeeebgggggggggggggggggggggggggggggggggg",
+        "ggbebgggggbebggggggggggggggggggggggggggggggggggg",
+        "gggbgggggggbgggggggggggggggggggggggggggggggggggg"
+      ]
+    }
+  ]
+}

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 from collections import Counter
 import json
 import math
@@ -37,7 +36,7 @@ dress_pickup_frames = stage4_dress.PICKUP_FRAMES
 dress_drag_frames = stage4_dress.DRAG_FRAMES
 dress_release_frames = stage4_dress.DRAG_RELEASE_FRAMES
 dress_page_wait_frames = stage4_dress.PAGE_WAIT_FRAMES
-debug = 1
+debug = 0
 total_timeout_seconds = 120 * 60
 stage_timeout_seconds = 5 * 60
 acting_round_seconds = stage6_act.ROUND_SECONDS
@@ -76,7 +75,7 @@ def chain_plan(*, debug=debug,
     acting_round_seconds = acting["rounds"][0]["mash_game_seconds"]
     acting_final_seconds = acting["rounds"][-1]["mash_game_seconds"]
     dressing["automatic_dressing"]["frame_limit"] = False
-    facts = {1: "Twelve central player/receptionist pixels; one paused Options/Bag/party snapshot confirms Text Speed = Fast, HP > 0, Sheen > 0, at least two moves, and not an Egg.",
+    facts = {1: "Twelve central player/receptionist pixels; one paused Options/Bag/party/accessory snapshot confirms Text Speed = Fast, HP > 0, Sheen > 0, at least two moves, and not an Egg; startup warnings cover accessory copies < 10, Sheen < 255, and missing scarves.",
         2: "Validated first-party ribbon flags, ordered Items pocket, and required held-item result.",
         3: "All 5/10/15/20 rank-selected empty accessory slots on the native top screen; no button or text matching.",
         4: "Zero-frame Stage 3 handoff, fresh accessory grid/rank marker, counted dressing deadline, and a readable green Dance 1 demo pointer.",
@@ -402,26 +401,24 @@ def wait(run_name):
         time.sleep(0.2)
 
 
-def check():
-    from tests.support.lua51 import Lua51, literal
-
+def check(*, lua_dll=None):
+    from contest.checks import check_sources, launcher_path
     from contest import artifacts, dance_timings, messages, platinum, rank_dance, runtime, timing_profiles
     from host import controller, dialogs
 
-    for module in (*STAGES.values(), sections, artifacts, dance_timings, messages, platinum, rank_dance, runtime, timing_profiles, controller, dialogs):
-        ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
-    ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    ast.parse((ROOT / "run_contest.py").read_text(encoding="utf-8"))
+    modules = (*STAGES.values(), sections, artifacts, dance_timings, messages, platinum,
+        rank_dance, runtime, timing_profiles, controller, dialogs)
+    python_files = [Path(module.__file__) for module in modules]
+    python_files.extend((Path(__file__), launcher_path(), HERE / "checks.py"))
+    python_files.extend(ROOT / "host" / name for name in ("bootstrap.py", "lua51.py", "windows.py"))
     check_profiles()
-    lua = Lua51()
-    try:
-        names = ("resource_root.lua", "super_contest.lua", "sections.lua", "acting_plan.lua", "stage1_load.lua", "stage2_prep.lua", "bag_contest.lua", "party_contest.lua",
-                   "stage3_enter.lua", "stage4_dress.lua", "dress_pixels.lua", "dance_master.lua", "rank_dance.lua", "dance_pixels.lua", "stage6_act.lua", "screen_checks.lua")
-        code = "; ".join(f"assert(loadfile({literal((HERE / name).as_posix())}))" for name in names)
-        code += f"; assert(loadfile({literal((ROOT / 'lua/platinum.lua').as_posix())}))"
-        print(lua.run(code + "; return 'Persistent contest Python/Lua syntax OK'"))
-    finally:
-        lua.close()
+    names = ("resource_root.lua", "super_contest.lua", "sections.lua", "acting_plan.lua", "stage1_load.lua",
+        "stage2_prep.lua", "bag_contest.lua", "party_contest.lua", "stage3_enter.lua", "stage4_dress.lua",
+        "dress_pixels.lua", "dance_master.lua", "rank_dance.lua", "dance_pixels.lua", "stage6_act.lua", "screen_checks.lua")
+    lua_files = [HERE / name for name in names]
+    lua_files.extend(sorted((ROOT / "lua").glob("*.lua")))
+    check_sources(python_files, lua_files, lua_dll=lua_dll)
+    print("Persistent contest Python/Lua syntax OK")
 
 
 def main():
@@ -432,6 +429,7 @@ def main():
     mode.add_argument("--execute", action="store_true")
     mode.add_argument("--background", action="store_true")
     mode.add_argument("--wait", action="store_true")
+    parser.add_argument("--lua-dll", type=Path, help="Use this Lua 5.1 DLL for the input-free --check.")
     parser.add_argument("--run-name")
     parser.add_argument("--game-code", choices=sorted(GAME_CODES),
                         help="Preview a regional timing profile; execution verifies it against the selected ROM.")
@@ -451,8 +449,13 @@ def main():
     parser.add_argument("--acting-final-seconds", type=float)
     args = parser.parse_args()
     if args.check:
-        check()
+        try:
+            check(lua_dll=args.lua_dll)
+        except (OSError, ValueError, RuntimeError) as error:
+            parser.error(str(error))
         return 0
+    if args.lua_dll is not None:
+        parser.error("--lua-dll belongs to --check.")
     options = {"debug": args.debug,
         "total_timeout": args.total_timeout, "stage_timeout": args.stage_timeout,
         "osd_settle_seconds": args.osd_settle_seconds, "offset_frames": args.offset_frames,

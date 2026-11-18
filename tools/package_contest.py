@@ -1,31 +1,28 @@
 """Stage the two-item release layout, or create its ZIP at release time."""
 
 import argparse
+import json
 from pathlib import Path
 import re
 import shutil
+import sys
 from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 CODE_SUFFIXES = {".py", ".lua", ".json"}
 
 
 def release_readme():
-    source = (ROOT / "README.md").read_text(encoding="utf-8")
-    sections = [source.splitlines()[0]]
-    for heading in ("Setup and ownership", "Release layout", "Attribution"):
-        marker = f"\n## {heading}\n"
-        if marker not in source:
-            raise ValueError(f"Keep the {heading} section in README.md for release guidance.")
-        body = source.split(marker, 1)[1].split("\n## ", 1)[0].strip()
-        sections.append(f"## {heading}\n\n{body}")
-    return ("\n\n".join(sections) + "\n").replace("](run_contest.py)", "](../run_contest.py)").replace(
-        "](contest/README.md", "](DESIGN.md")
+    return (ROOT / "readme.md").read_text(encoding="utf-8")
 
 
 def stage_release(destination):
+    from host.bootstrap import bundled_wheels
+
+    wheels = bundled_wheels(ROOT)
     destination = Path(destination).resolve()
     if not any(destination.is_relative_to((ROOT / name).resolve()) for name in ("tmp", ".tmp")):
         raise ValueError("Stage releases inside project tmp/ or .tmp/.")
@@ -55,33 +52,55 @@ def stage_release(destination):
     for source in sorted((ROOT / "contest/timing_profiles").glob("*.json")):
         copy(source)
     copy(ROOT / "contest" / "debug" / ".gitkeep")
-    for folder, pattern in (("contest/states", "*.ds*"), ("contest/evidence", "*.png")):
-        for source in sorted((ROOT / folder).glob(pattern)):
-            if source.is_file():
-                copy(source)
-    copy(ROOT / "requirements.txt")
+    copy(wheels / "manifest.json")
+    for name in json.loads((wheels / "manifest.json").read_text(encoding="utf-8"))["wheels"]:
+        copy(wheels / name)
     copy(ROOT / "lua" / "PLATINUM-LICENSE.txt")
     for name in ("region-memory-results.txt", "scarf-test-results.txt"):
         copy(ROOT / "contest" / name)
-    design = (ROOT / "contest" / "README.md").read_text(encoding="utf-8")
-    (support / "DESIGN.md").write_text(design.replace("](../README.md", "](README.md"), encoding="utf-8", newline="\n")
-    (support / "README.md").write_text(release_readme(), encoding="utf-8", newline="\n")
+    algorithm = (ROOT / "ALGORITHM.md").read_text(encoding="utf-8")
+    algorithm = algorithm.replace("](run_contest.py)", "](../run_contest.py)").replace("](contest/", "](")
+    (support / "ALGORITHM.md").write_text(algorithm, encoding="utf-8", newline="\n")
+    (support / "readme.md").write_text(release_readme(), encoding="utf-8", newline="\n")
+    copy(ROOT / "buyable-poffin-guide.md")
     return destination
 
 
-def build_zip(output):
+def write_archive(staged, output):
+    """Write a candidate archive for the release gate or its local review input."""
+    with ZipFile(output, "x", compression=ZIP_DEFLATED, compresslevel=9) as archive:
+        for path in sorted(Path(staged).rglob("*")):
+            if path.is_file():
+                archive.write(path, path.relative_to(staged).as_posix())
+
+
+def build_zip(output, *, lua_dll=None):
     output = Path(output).resolve()
     if not output.is_relative_to(ROOT) or output.suffix.lower() != ".zip":
         raise ValueError("Use a project-local .zip output path.")
+    if output.exists():
+        raise FileExistsError(f"Use a fresh release ZIP path: {output}")
     scratch = ROOT / "tmp"
     scratch.mkdir(exist_ok=True)
     with TemporaryDirectory(prefix="contest-release-", dir=scratch) as directory:
         staged = stage_release(Path(directory) / "bundle")
+        candidate = Path(directory) / "candidate.zip"
+        write_archive(staged, candidate)
+        from tests.release import verify_release
+
+        verification = verify_release(candidate, lua_dll=lua_dll)
+        if verification.get("outcome") != "pass":
+            raise RuntimeError("Release verification failed; the requested ZIP was not created.")
         output.parent.mkdir(parents=True, exist_ok=True)
-        with ZipFile(output, "x", compression=ZIP_DEFLATED, compresslevel=9) as archive:
-            for path in sorted(staged.rglob("*")):
-                if path.is_file():
-                    archive.write(path, path.relative_to(staged).as_posix())
+        created = False
+        try:
+            with output.open("xb") as destination, candidate.open("rb") as source:
+                created = True
+                shutil.copyfileobj(source, destination)
+        except BaseException:
+            if created:
+                output.unlink(missing_ok=True)
+            raise
     return output
 
 
@@ -90,14 +109,17 @@ def main():
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--stage", type=Path, help="Write a fresh review folder inside tmp/ or .tmp/.")
     mode.add_argument("--zip", type=Path, help="Create a new release ZIP inside the project.")
+    parser.add_argument("--lua-dll", type=Path, help="Use this matching local Lua DLL for the required release gate.")
     args = parser.parse_args()
     try:
         requested = args.stage if args.stage is not None else args.zip
         path = requested if requested.is_absolute() else ROOT / requested
-        result = stage_release(path) if args.stage is not None else build_zip(path)
+        if args.stage is not None and args.lua_dll is not None:
+            parser.error("Use --lua-dll with --zip.")
+        result = stage_release(path) if args.stage is not None else build_zip(path, lua_dll=args.lua_dll)
         print(result)
         return 0
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, RuntimeError) as error:
         parser.error(str(error))
 
 

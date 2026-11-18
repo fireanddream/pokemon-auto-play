@@ -121,6 +121,30 @@ local function first_judgment_count()
     return first_feedback and first_feedback.skipped and 0 or 1
 end
 
+local function timing_origin()
+    local anchor = plan.counted_midpoint_anchor
+    return anchor and anchor.frame or plan.frame, anchor and anchor.pointer_x or plan.pointer_x
+end
+
+local function counted_anchor_valid(frame)
+    local anchor = plan and plan.counted_midpoint_anchor
+    local accepted = current and current.correction_anchor
+    return type(anchor) == "table" and accepted ~= nil
+        and anchor.source == accepted.source and anchor.frame == accepted.frame
+        and anchor.epoch == accepted.epoch and anchor.epoch == adapter.epoch()
+        and anchor.pointer_x == accepted.pointer_x and anchor.pointer_x == plan.pointer_x
+        and plan.frame >= anchor.frame + math.ceil((128 - anchor.pointer_x) / plan.speed)
+        and frame >= plan.frame or false
+end
+
+local function response_timing_ready(frame, bar)
+    local pointer = plan and plan.pointer_x
+    local bounds = bar and bar.position_bounds
+    return type(pointer) == "number" and pointer >= 8 and pointer <= 247
+        and bounds ~= nil and bounds[1] <= pointer and pointer <= bounds[2]
+        and (pointer >= 128 or midpoint_diagnostics or counted_anchor_valid(frame)) or false
+end
+
 local function completed_count()
     return response_complete and current and math.max(completed, current.index) or completed
 end
@@ -200,12 +224,8 @@ end
 local function snapshot(frame)
     captures = captures + 1
     local image, raw = capture(string.format("checkpoint-%04d", captures))
+    local ready = response_timing_ready(frame, pixels.bar(raw))
     if plan and frame == plan.frame and not response_complete then
-        local bar = pixels.bar(raw)
-        local bounds = bar and bar.position_bounds
-        local pointer = plan.pointer_x
-        local ready = pointer and pointer >= (midpoint_diagnostics and 8 or 128) and pointer <= 247
-            and bounds and bounds[1] <= pointer and pointer <= bounds[2]
         for index, cue in ipairs(plan.cues.accepted) do
             if not ready then skip_press(index, "midpoint_position_unreadable_or_early")
             elseif not colors_match(raw, cue.pixel_points or plan.pixel_points) then
@@ -223,9 +243,11 @@ local function snapshot(frame)
         and cue_side_offset < 256 and cue_side_offset == math.floor(cue_side_offset)
         and (not fixed_metrics or cue_side_offset == config.rank_timing.cue_side_offset_pixels)
     if plan then
+        consistent = consistent and (not plan.counted_midpoint_anchor or counted_anchor_valid(frame))
+        local origin_frame, origin_x = timing_origin()
         for index, press in ipairs(plan.presses) do
             local cue = cues and cues[index]
-            local due = plan.frame + math.floor((press.response_x - plan.pointer_x) / plan.speed + 0.5) + plan.offset_frames
+            local due = origin_frame + math.floor((press.response_x - origin_x) / plan.speed + 0.5) + plan.offset_frames
             local following = plan.presses[index + 1] and plan.presses[index + 1].frame or plan.predicted_end_frame
             if not cue or cue.button ~= press.button or cue.response_x ~= press.response_x
                 or cue.response_x ~= cue.demo_x + cue_side_offset
@@ -272,8 +294,11 @@ local function snapshot(frame)
         and plan.pointer_x == math.floor(plan.pointer_x) and bounds ~= nil
         and bounds[1] <= plan.pointer_x and plan.pointer_x <= bounds[2] or false
     value.trial.midpoint_diagnostics = midpoint_diagnostics
+    value.trial.response_timing_ready = ready
+    value.trial.counted_midpoint_anchor_bound = value.trial.midpoint_pointer_bound and counted_anchor_valid(frame)
     value.trial.midpoint_policy_met = value.trial.midpoint_within_line
         or midpoint_diagnostics and value.trial.midpoint_pointer_bound
+        or value.trial.counted_midpoint_anchor_bound
         or (planned_count() == runtime_skip_count()
             or value.trial.midpoint_pointer_bound and plan.pointer_x >= 128)
     value.trial.midpoint_adjustment_count = current and current.midpoint_adjustments or 0
@@ -333,7 +358,7 @@ local function definitions()
     local start, finish = common(), common()
     start[#start + 1] = stage5
         and {id = "midpoint", field = "trial.at_authorized_midpoint", expected = true}
-        or {id = "midpoint", field = "bar.last_x", op = "range", expected = {128, 247}}
+        or {id = "midpoint", field = "trial.response_timing_ready", expected = true}
     start[#start + 1] = {id = "plan", field = "trial.plan_consistent", expected = true}
     start[#start + 1] = {id = "planned_cues_bound", field = "trial.planned_cues_bound", expected = true}
     start[#start + 1] = {id = "fresh_visual_binding", field = "trial.fresh_visual_binding", expected = true}
@@ -625,6 +650,11 @@ local function dispatch(action, args)
         local frames = math.ceil((128 - observed.pointer_x) / speed)
         assert(observed.next_frame == observed.frame + frames and frames > 0,
             "Calculate the remaining pointer travel in emulator frames")
+        local bounds = pixels.bar(gui.gdscreenshot()).position_bounds
+        assert(bounds and bounds[1] <= observed.pointer_x and observed.pointer_x <= bounds[2],
+            "Bind the correction anchor to the fresh paused pointer position")
+        current.correction_anchor = {frame = observed.frame, epoch = observed.epoch, pointer_x = observed.pointer_x,
+            source = "fresh_paused_midpoint_before_counted_correction"}
         current.midpoint_frame, current.midpoint_source = observed.next_frame, "calculated_from_fresh_demo_pointer"
         current.midpoint_adjustments = current.midpoint_adjustments + 1
     elseif action == "plan" then
@@ -632,6 +662,8 @@ local function dispatch(action, args)
         plan = assert(loadfile(args[1]))()
         assert(plan.frame == adapter.frame() and plan.epoch == adapter.epoch() and plan.dance == current.index
             and plan.rank == rank and plan.speed > 0 and #plan.presses <= cue_count, "The plan belongs to this midpoint")
+        assert(not plan.counted_midpoint_anchor or counted_anchor_valid(adapter.frame()),
+            "Use the same-epoch verified pointer origin after its counted correction")
         assert(not plan.response_end_frame or #plan.presses == 0
             or plan.presses[#plan.presses].frame + plan.hold_frames < plan.response_end_frame,
             "The final input must fit before the counted response endpoint")
@@ -646,7 +678,8 @@ local function dispatch(action, args)
                 endpoint = math.max(plan.frame + 1, anchor + math.ceil(1 / plan.speed)
                     + config.rank_timing.response_frames)
             else
-                endpoint = math.floor(plan.frame + (128 - plan.pointer_x) / plan.speed + config.rank_timing.response_frames + 0.5)
+                local origin_frame, origin_x = timing_origin()
+                endpoint = math.floor(origin_frame + (128 - origin_x) / plan.speed + config.rank_timing.response_frames + 0.5)
                 endpoint = math.max(plan.frame + 1, endpoint)
             end
             assert(plan.speed == config.rank_timing.pixels_per_frame and plan.response_end_frame == endpoint
@@ -690,13 +723,16 @@ local function dispatch(action, args)
                     "Schedule the released-input feedback capture before the second button")
             end
             if (config.pointer_calibration or fixed_metrics) and not plan.skip_reason then
-                local origin = scheduled_feedback and plan.frame + math.floor((127 - plan.pointer_x) / plan.speed)
+                local origin_frame, origin_x = timing_origin()
+                local origin = scheduled_feedback and origin_frame + math.floor((127 - origin_x) / plan.speed)
                     or plan.response_end_frame - config.rank_timing.response_frames
                 for index = current.index + 1, 6 do
                     midpoint_frames[index] = origin + (index - current.index) * config.rank_timing.cycle_frames
                         + (math.floor((index - 1) / 2) - math.floor((current.index - 1) / 2)) * config.rank_timing.extra_switch_frames
                 end
-                midpoint_source = fixed_metrics and "calculated_from_fresh_midpoint_and_fixed_metrics"
+                midpoint_source = plan.counted_midpoint_anchor and (fixed_metrics
+                    and "calculated_from_counted_midpoint_and_fixed_metrics" or "calculated_from_counted_midpoint_and_calibration")
+                    or fixed_metrics and "calculated_from_fresh_midpoint_and_fixed_metrics"
                     or "calculated_from_fresh_midpoint_and_calibration"
             end
         end
@@ -707,7 +743,8 @@ local function dispatch(action, args)
                 midpoint_frames[index] = origin + (index - current.index) * config.rank_timing.cycle_frames
                     + (math.floor((index - 1) / 2) - math.floor((current.index - 1) / 2)) * config.rank_timing.extra_switch_frames
             end
-            midpoint_source = "calculated_from_fresh_prepared_midpoint_and_rank_timing"
+            midpoint_source = plan.counted_midpoint_anchor and "calculated_from_counted_prepared_midpoint_and_rank_timing"
+                or "calculated_from_fresh_prepared_midpoint_and_rank_timing"
         end
     elseif action == "recover-response" then
         assert(current and not active and not pending and #args == 3

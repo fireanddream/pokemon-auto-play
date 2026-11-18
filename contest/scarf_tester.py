@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 from collections import Counter
 from datetime import datetime
 import json
@@ -305,6 +304,13 @@ def wait(run_name):
     return 0 if result["outcome"] == "pass" else 1
 
 
+def check(*, lua_dll=None):
+    from contest.checks import check_module
+
+    super_contest.check(lua_dll=lua_dll)
+    check_module(__file__, ("scarf_tester.lua",), "Scarf tester Python/Lua syntax OK", lua_dll=lua_dll)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -313,20 +319,14 @@ def main():
     parser.add_argument("--run-name", help="Fresh run name; generated automatically for execution if omitted.")
     parser.add_argument("--total-timeout", type=float, default=super_contest.total_timeout_seconds)
     parser.add_argument("--stage-timeout", type=float, default=super_contest.stage_timeout_seconds)
+    parser.add_argument("--lua-dll", type=Path, help="Use this Lua 5.1 DLL for the input-free --check.")
     args = parser.parse_args()
     try:
         if args.check:
-            from tests.support.lua51 import Lua51, literal
-
-            ast.parse(Path(__file__).read_text(encoding="utf-8"))
-            super_contest.check()
-            lua = Lua51()
-            try:
-                print(lua.run(f"assert(loadfile({literal((HERE / 'scarf_tester.lua').as_posix())})); "
-                    "return 'Scarf tester Python/Lua syntax OK'"))
-            finally:
-                lua.close()
+            check(lua_dll=args.lua_dll)
             return 0
+        if args.lua_dll is not None:
+            parser.error("--lua-dll belongs to --check.")
         options = {"total_timeout": args.total_timeout, "stage_timeout": args.stage_timeout}
         plan = test_plan(**options)
         if args.plan_only:

@@ -50,4 +50,40 @@ function M.read_options(memory_api, save, frame)
     return result
 end
 
+function M.read_accessories(memory_api, save, frame)
+    -- ImageClips page 14 contains Fashion Case at +0x7F4; backdrops are separate.
+    -- PKHeX SAV4: IDs 0..60 use nibbles; IDs 61..99 use flags at +0x20.
+    local result = {frame = frame, save_base = save, read_valid = false,
+        source = "platinum_fashion_case", direct_read_frames = 0}
+    local ok, message = pcall(function()
+        assert(type(save) == "number" and save % 4 == 0
+            and save >= 0x02000000 and save + 0x20114 <= 0x02400000,
+            "The accessory save pointer is outside main RAM")
+        local page = save + 0x20024 + 14 * 16
+        result.page_id = memory_api.readdwordunsigned(page) % 0x100000000
+        result.page_size = memory_api.readdwordunsigned(page + 4) % 0x100000000
+        result.page_location = memory_api.readdwordunsigned(page + 8) % 0x100000000
+        assert(result.page_id == 14 and result.page_size == 0x83C, "Unexpected accessory save-page layout")
+        assert(result.page_location % 4 == 0 and result.page_location + result.page_size <= 0x20000,
+            "The accessory save page is outside the save body")
+        result.address = save + 0x14 + result.page_location + 0x7F4
+        local total, distinct = 0, 0
+        for id = 0, 60 do
+            local byte = memory_api.readbyte(result.address + math.floor(id / 2)) % 0x100
+            local quantity = math.floor(byte / (16 ^ (id % 2))) % 16
+            assert(quantity <= 9, string.format("Accessory %d has an invalid quantity: %d", id, quantity))
+            total = total + quantity
+            if quantity > 0 then distinct = distinct + 1 end
+        end
+        for bit = 0, 38 do
+            local byte = memory_api.readbyte(result.address + 0x20 + math.floor(bit / 8)) % 0x100
+            local quantity = math.floor(byte / (2 ^ (bit % 8))) % 2
+            total, distinct = total + quantity, distinct + quantity
+        end
+        result.total_owned, result.distinct_owned, result.read_valid = total, distinct, true
+    end)
+    if not ok then result.error = tostring(message) end
+    return result
+end
+
 return M

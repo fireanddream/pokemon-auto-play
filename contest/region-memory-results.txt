@@ -1,6 +1,7 @@
 Platinum regional memory-reader verification
 
 Scope: supplied JPN, USA, EU, and Korea ROMs; offline Lua 5.1 readers.
+Runner acceptance: CPUJ and CPUE; the CPUK row is a recorded offline reader comparison.
 Fields: first-slot HP, occupied/empty moves, 20 contest-ribbon bits, Bag scarves
 260-264 with one-based positions and quantities.
 Units: offline cases; HP points; zero emulator-frame advancement.
@@ -33,13 +34,8 @@ Raw ARM9 trainer/save pointer literals are present in all four files. Data-point
 literals were not found by raw-byte inspection; offline fixtures do not prove
 live pointer contents or native layout correctness for every region.
 
-Existing checks: python -B -m tests passed (68 tests).
-Syntax: python -B contest/super_contest.py --check passed.
-Reproduce: python -B tmp/inspect_platinum_regions.py
-           python -B tmp/verify_platinum_regions.py
-
-Retained inputs: tmp/contest/contest-20261115-115237-405718/prepared-battery.dsv
-                tmp/contest/usa-party-debug-20261115-121536-018445/prepared-battery.dsv
-Prior live Stage 1 evidence: JPN and USA, paused frame 1368, HP 187/187.
+Shared checks: python -B -m tests
+               python -B contest/super_contest.py --check
+Recorded live Stage 1 result: JPN and USA, paused frame 1368, HP 187/187.
 EU/Korea live reads and full regional contest runs remain unverified.
 This verification performed zero live attempts and advanced zero emulator frames.

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import filecmp
 import json
 import math
@@ -222,7 +221,8 @@ def measurement_speed(start, end, samples):
 
 
 def response_plan(midpoint, image, samples, read_frame, *, rank, expected_cues, speed, hold_frames, offset_frames,
-                  dance=1, side_offset_pixels=None, allow_demo_midpoint=False, fixed_spacing=False, tolerant_inputs=False):
+                  dance=1, side_offset_pixels=None, allow_demo_midpoint=False, fixed_spacing=False, tolerant_inputs=False,
+                  counted_midpoint_anchor=None):
     side_offset = timing_for(rank)["cue_side_offset_pixels"] if side_offset_pixels is None else side_offset_pixels
     seen = {"left": {}, "right": {}}
     changed = {side: set() for side in seen}
@@ -273,14 +273,27 @@ def response_plan(midpoint, image, samples, read_frame, *, rank, expected_cues, 
                 [(cue["demo_x"], cue["button"]) for cue in history["accepted"]]:
             raise ReviewNeeded("The fresh cue pairs contradict the demonstrated cues.")
     position = midpoint["position"]
-    if position["phase"] != "response" and not (allow_demo_midpoint is True
+    timing_frame, timing_x = midpoint["frame"], position["x"]
+    if counted_midpoint_anchor is not None:
+        anchor = counted_midpoint_anchor
+        if (not isinstance(anchor, dict)
+                or any(isinstance(anchor.get(key), bool) or not isinstance(anchor.get(key), int)
+                    for key in ("frame", "epoch", "pointer_x"))
+                or anchor.get("source") != "fresh_paused_midpoint_before_counted_correction"
+                or anchor["frame"] < 0 or anchor["epoch"] != midpoint["epoch"]
+                or not 8 <= anchor["pointer_x"] < 128 or anchor["pointer_x"] != position["x"]
+                or position["phase"] != "demo"
+                or midpoint["frame"] < anchor["frame"] + math.ceil((128 - anchor["pointer_x"]) / speed)):
+            raise ReviewNeeded("The held display needs its same-epoch completed counted midpoint anchor.")
+        timing_frame, timing_x = anchor["frame"], anchor["pointer_x"]
+    if position["phase"] != "response" and counted_midpoint_anchor is None and not (allow_demo_midpoint is True
             and position["phase"] == "demo" and 8 <= position["x"] < 128):
         raise ReviewNeeded("The fresh capture has not reached the response midpoint.")
     presses, points, accepted, skipped = [], [], [], []
     px = image.load()
-    predicted_end = midpoint["frame"] + math.floor((248 - position["x"]) / speed + 0.5)
+    predicted_end = timing_frame + math.floor((248 - timing_x) / speed + 0.5)
     for input_index, cue in enumerate(paired["accepted"], 1):
-        due = midpoint["frame"] + math.floor((cue["response_x"] - position["x"]) / speed + 0.5) + offset_frames
+        due = timing_frame + math.floor((cue["response_x"] - timing_x) / speed + 0.5) + offset_frames
         reason = "cue_changed_during_demo" if any(reading["x"] in changed[side] for side, reading in cue["evidence"].items()) \
             else "input_already_due" if due <= midpoint["frame"] else "input_outside_response" \
             if due + hold_frames >= predicted_end else "overlapping_input" \
@@ -312,6 +325,9 @@ def response_plan(midpoint, image, samples, read_frame, *, rank, expected_cues, 
         "offset_frames": offset_frames, "player_center_x": 204 - 80 * ((dance - 1) // 2), "presses": presses,
         "predicted_end_frame": predicted_end, "response_end_frame": predicted_end, "pixel_points": points,
         "cues": paired, "source": "fresh_native_cues_with_per_button_fallback"}
+    if counted_midpoint_anchor is not None:
+        result.update(counted_midpoint_anchor=dict(counted_midpoint_anchor),
+            source="fresh_native_cues_with_counted_midpoint_anchor")
     if tolerant_inputs:
         result.update(expected_inputs=expected_cues, skipped_input_count=expected_cues - len(presses), skipped_inputs=skipped)
     return result
@@ -710,15 +726,10 @@ def run(*, run_name, **options):
     return result
 
 
-def check():
-    from tests.support.lua51 import Lua51, literal
+def check(*, lua_dll=None):
+    from contest.checks import check_module
 
-    ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    lua = Lua51()
-    try:
-        print(lua.run(f"assert(loadfile({literal((HERE / 'rank_speed_probe.lua').as_posix())})); return 'Rank-speed probe Python/Lua syntax OK'"))
-    finally:
-        lua.close()
+    check_module(__file__, ("rank_speed_probe.lua",), "Rank-speed probe Python/Lua syntax OK", lua_dll=lua_dll)
 
 
 def main(argv=None):
@@ -737,10 +748,16 @@ def main(argv=None):
     parser.add_argument("--host-timeout", type=float, default=300)
     parser.add_argument("--hold-frames", type=int)
     parser.add_argument("--offset-frames", type=int)
+    parser.add_argument("--lua-dll", type=Path, help="Use this Lua 5.1 DLL for the input-free --check.")
     args = parser.parse_args(argv)
     if args.check:
-        check()
+        try:
+            check(lua_dll=args.lua_dll)
+        except (OSError, ValueError, RuntimeError) as error:
+            parser.error(str(error))
         return 0
+    if args.lua_dll is not None:
+        parser.error("--lua-dll belongs to --check.")
     if args.inspect_image:
         image = load_image(args.inspect_image)
         print(json.dumps({"position": pointer_position(image), "left": cue_positions(image, "left"),

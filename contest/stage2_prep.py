@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import filecmp
 import json
 import math
@@ -217,6 +216,12 @@ def run(*, run_name, source_checkpoint, host_timeout, deadline=None,
     return result
 
 
+def check(*, lua_dll=None):
+    from contest.checks import check_module
+
+    check_module(__file__, ("bag_contest.lua", "stage2_prep.lua"), "Stage 2 Python/Lua syntax OK", lua_dll=lua_dll)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -225,19 +230,16 @@ def main():
     parser.add_argument("--run-name")
     parser.add_argument("--source-checkpoint")
     parser.add_argument("--host-timeout", type=float)
+    parser.add_argument("--lua-dll", type=Path, help="Use this Lua 5.1 DLL for the input-free --check.")
     args = parser.parse_args()
     if args.check:
-        from tests.support.lua51 import Lua51, literal
-
-        ast.parse(Path(__file__).read_text(encoding="utf-8"))
-        lua = Lua51()
         try:
-            code = "; ".join(f"assert(loadfile({literal((HERE / name).as_posix())}))"
-                             for name in ("bag_contest.lua", "stage2_prep.lua"))
-            print(lua.run(code + "; return 'Stage 2 Python/Lua syntax OK'"))
-        finally:
-            lua.close()
+            check(lua_dll=args.lua_dll)
+        except (OSError, ValueError, RuntimeError) as error:
+            parser.error(str(error))
         return 0
+    if args.lua_dll is not None:
+        parser.error("--lua-dll belongs to --check.")
     if not args.run_name or not args.source_checkpoint or args.host_timeout is None:
         parser.error("Execution requires --run-name, --source-checkpoint, and --host-timeout.")
     result = run(run_name=args.run_name, source_checkpoint=args.source_checkpoint, host_timeout=args.host_timeout)

@@ -1,4 +1,4 @@
--- Native CPUJ Acting star cells and move fills; no emulator calls or frame advancement.
+-- Native Acting judge cells, move fills/hearts, and player panels; no emulator calls.
 local M = {}
 local empty_rows = {"abbaa", "bbbba", "bbbba", "bbbba", "abbaa"}
 local star_rows = {"ab*aa", "b***a", "*****", "b***a", "ab*aa"}
@@ -51,7 +51,6 @@ function M.choose_judge(counts)
         assert(type(count) == "number" and count >= 0 and count <= 5 and count == math.floor(count),
             "Judge stars must be whole counts from zero through five")
     end
-    for index, count in ipairs(counts) do if count == 4 then return index end end
     local selected = 1
     for index = 2, 3 do if counts[index] < counts[selected] then selected = index end end
     return selected
@@ -97,20 +96,63 @@ local move_profiles = {
 }
 local move_boxes = {{16, 216, 112, 284}, {144, 216, 240, 284},
                     {16, 308, 112, 376}, {144, 308, 240, 376}}
+local heart_positions = {{59, 240}, {187, 240}, {59, 336}, {187, 336}}
+local heart_rows = {".dd.dd..", "dwydrrd.", "dyorrrd.", "dorrrrd.",
+                    ".drrrd..", "..drd...", "...d...."}
+local heart_colors = {d = {181, 0, 0}, w = {255, 255, 255}, y = {255, 132, 24},
+                      o = {255, 74, 24}, r = {255, 24, 24}}
+
+local function heart_matches(raw, x, y, fill, filled)
+    for dy = 0, 6 do
+        for dx = 0, 7 do
+            local code = filled and heart_rows[dy + 1]:sub(dx + 1, dx + 1) or "."
+            local r, g, b = rgb(raw, x + dx, y + dy)
+            if not same(r, g, b, code == "." and fill or heart_colors[code]) then return false end
+        end
+    end
+    return true
+end
+
+local function read_hearts(raw, slot, fill)
+    local result = {readable = true, hearts = 0, cells = {}, source = "native_raw_heart_shapes"}
+    local origin = heart_positions[slot]
+    local empty_seen = false
+    -- The six 8-by-7 cells follow the type capsule, outside all caption lettering.
+    for cell = 1, 6 do
+        local x, y = origin[1] + (cell - 1) * 8, origin[2]
+        local label
+        if heart_matches(raw, x, y, fill, false) then
+            label, empty_seen = "empty", true
+        elseif heart_matches(raw, x, y, fill, true) then
+            label = "heart"
+            result.hearts = result.hearts + 1
+            if empty_seen then result.readable = false end
+        else
+            label, result.readable = "unreadable", false
+        end
+        result.cells[cell] = {cell = cell, x = x, y = y, label = label}
+    end
+    if not result.readable then result.hearts = -1 end
+    return result
+end
 
 function M.read_move_categories(raw, unavailable_move_slots)
-    assert(validate(raw) == 384, "Move categories require a native stacked 256 by 384 GD framebuffer")
+    assert(validate(raw) == 384, "Move types and hearts require a native stacked 256 by 384 GD framebuffer")
     local blocked = {}
     for _, slot in ipairs(unavailable_move_slots or {}) do blocked[slot] = true end
-    local result = {source = "native_move_button_fill_rgb", readable = true,
-        categories = {}, slots = {}, total_pixels = 0, matched_pixels = 0,
+    local result = {source = "native_move_button_fill_rgb_and_raw_heart_shapes", readable = true,
+        categories_readable = true, hearts_readable = true,
+        categories = {}, hearts = {}, slots = {}, total_pixels = 0, matched_pixels = 0,
+        recognized_move_slots = {}, unrecognized_move_slots = {}, warnings = {},
         memory_proven = false, direct_read_frames = 0, unavailable_move_slots = unavailable_move_slots}
     for slot, box in ipairs(move_boxes) do
-        local item = {slot = slot, bounds = box, category = "unreadable", readable = false,
+        local item = {slot = slot, bounds = box, category = "unreadable", hearts = -1, readable = false,
+            category_readable = false, hearts_readable = false,
             probes = {}, matched_pixels = 0}
-        -- Keep both columns outside the move names, category labels, and heart text.
+        -- Keep both fill columns outside the move names, type labels, and heart icons.
         if blocked[slot] then
             item.category, item.readable, item.unavailable = "unavailable", true, true
+            item.category_readable, item.hearts_readable = true, true
         else
             for _, x in ipairs({box[1] + 2, box[3] - 4}) do
                 for _, y in ipairs({box[2] + 4, box[2] + 28, box[4] - 4}) do
@@ -124,15 +166,71 @@ function M.read_move_categories(raw, unavailable_move_slots)
                 end
                 item.matched_pixels = math.max(item.matched_pixels, matched)
                 if matched == #item.probes then
-                    item.category, item.readable = profile.category, true
+                    item.category, item.category_readable = profile.category, true
+                    item.raw_hearts = read_hearts(raw, slot, profile.rgb)
+                    item.hearts, item.hearts_readable = item.raw_hearts.hearts, item.raw_hearts.readable
                 end
+            end
+            item.readable = item.category_readable and item.hearts_readable
+            if item.readable then
+                result.recognized_move_slots[#result.recognized_move_slots + 1] = slot
+            else
+                result.unrecognized_move_slots[#result.unrecognized_move_slots + 1] = slot
+                local fields = {}
+                if not item.category_readable then fields[#fields + 1] = "type" end
+                if not item.hearts_readable then fields[#fields + 1] = "raw hearts" end
+                result.warnings[#result.warnings + 1] = string.format(
+                    "Acting: WARN - Move slot %d has unrecognized %s; excluding it from scored choices.",
+                    slot, table.concat(fields, " and "))
             end
         end
         result.slots[slot], result.categories[slot] = item, item.category
+        result.hearts[slot] = item.hearts
         result.total_pixels = result.total_pixels + #item.probes
+        result.matched_pixels = result.matched_pixels + item.matched_pixels
+        result.categories_readable = result.categories_readable and item.category_readable
+        result.hearts_readable = result.hearts_readable and item.hearts_readable
+        result.readable = result.readable and item.readable
+    end
+    return result
+end
+
+local panel_profiles = {
+    {label = "player", colors = {{255, 239, 134}, {255, 207, 24}}},
+    {label = "opponent", colors = {{0, 207, 255}, {105, 215, 255}}},
+}
+
+function M.read_acting_order(raw)
+    validate(raw)
+    local result = {source = "native_player_panel_fill_rgb", readable = true, rows = {},
+        player_count = 0, total_pixels = 24, matched_pixels = 0,
+        memory_proven = false, direct_read_frames = 0, bounds = {0, 0, 80, 192}}
+    local position
+    for row = 1, 4 do
+        local item = {position = row, label = "unreadable", readable = false, probes = {}, matched_pixels = 0}
+        -- Lower panel fills are clear of names, weather icons, and every text line.
+        for _, x in ipairs({4, 40, 72}) do
+            for _, dy in ipairs({36, 42}) do
+                item.probes[#item.probes + 1] = {x, (row - 1) * 48 + dy, rgb(raw, x, (row - 1) * 48 + dy)}
+            end
+        end
+        for _, profile in ipairs(panel_profiles) do
+            local matched = 0
+            for index, point in ipairs(item.probes) do
+                if same(point[3], point[4], point[5], profile.colors[(index - 1) % 2 + 1]) then
+                    matched = matched + 1
+                end
+            end
+            item.matched_pixels = math.max(item.matched_pixels, matched)
+            if matched == #item.probes then item.label, item.readable = profile.label, true end
+        end
+        if item.label == "player" then position, result.player_count = row, result.player_count + 1 end
+        result.rows[row] = item
         result.matched_pixels = result.matched_pixels + item.matched_pixels
         result.readable = result.readable and item.readable
     end
+    result.readable = result.readable and result.player_count == 1
+    if result.readable then result.position = position end
     return result
 end
 

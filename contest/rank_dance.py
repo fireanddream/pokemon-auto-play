@@ -1,7 +1,6 @@
 """Six native dance responses from a prepared source, with optional speed calibration."""
 
 import argparse
-import ast
 from contextlib import ExitStack
 import filecmp
 import json
@@ -351,8 +350,6 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
         if tolerant_inputs and midpoint["position"]["x"] is None:
             skip_reason = midpoint["position"]["reason"]
             break
-        if diagnostics and adjustments:
-            break
         if midpoint["position"]["phase"] == "response":
             break
         if not (options.get("pointer_calibration") or options.get("fixed_metrics") or options.get("prepared_midpoint_anchor")) or midpoint["position"]["phase"] != "demo":
@@ -364,11 +361,28 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
         # Pixel-derived speeds are quantized. A readable early stop supplies a
         # new counted target; no running-frame image polling is needed.
         x = midpoint["position"]["x"]
-        if adjustments and x <= adjustments[-1]["pointer_x"]:
-            if tolerant_inputs:
-                skip_reason = "The counted midpoint adjustment has no readable forward progress."
+        if adjustments:
+            previous = adjustments[-1]
+            if x < previous["pointer_x"]:
+                skip_reason = "The counted midpoint adjustment moved backward."
                 break
-            raise ReviewNeeded("The calculated midpoint adjustment has no forward pointer progress.")
+            if x == previous["pointer_x"]:
+                if midpoint["epoch"] != previous["epoch"] or midpoint["frame"] < previous["next_frame"]:
+                    skip_reason = "The held display lacks same-epoch completed counted midpoint travel."
+                    break
+                # Display holds do not move absolute press deadlines. Keep the
+                # verified pre-correction origin and read cues from this capture.
+                anchor = {key: previous[key] for key in ("frame", "epoch", "pointer_x")}
+                anchor["source"] = "fresh_paused_midpoint_before_counted_correction"
+                midpoint["counted_midpoint_anchor"] = anchor
+                captures[-1]["counted_midpoint_anchor"] = anchor
+                write_json(folder / "midpoint-captures.json", {"accepted_pointer_pixels": [128, 129], "captures": captures})
+                write_json(folder / "midpoint.json", midpoint)
+                record("midpoint_display_held", dance=dance, frame=midpoint["frame"], pointer_x=x,
+                    advanced_emulator_frames=midpoint["frame"] - anchor["frame"], counted_midpoint_anchor=anchor)
+                break
+        if diagnostics and adjustments:
+            break
         frames = math.ceil((128 - x) / options["pointer_pixels_per_emulator_frame"])
         adjustment = {"frame": midpoint["frame"], "epoch": midpoint["epoch"], "pointer_x": x,
             "next_frame": midpoint["frame"] + frames, "path": midpoint["image"]["path"],
@@ -436,14 +450,16 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
                 offset_frames=options["offset_frames"], dance=dance,
                 side_offset_pixels=options["rank_timing"]["cue_side_offset_pixels"] if options.get("fixed_metrics")
                     else options.get("resolved_cue_side_offset_pixels"),
-                allow_demo_midpoint=diagnostics, fixed_spacing=options.get("fixed_metrics") is True, tolerant_inputs=True)
+                allow_demo_midpoint=diagnostics, fixed_spacing=options.get("fixed_metrics") is True, tolerant_inputs=True,
+                counted_midpoint_anchor=midpoint.get("counted_midpoint_anchor"))
         except ReviewNeeded as error:
             if not tolerant_inputs:
                 raise
             planned = skipped_response(midpoint, dance, options, str(error))
     options["resolved_cue_side_offset_pixels"] = planned["cues"]["side_offset_pixels"]
     if options.get("rank_timing") and not planned.get("skip_reason"):
-        planned["response_end_frame"] = math.floor(midpoint["frame"] + (128 - midpoint["position"]["x"]) / planned["speed"]
+        origin = planned.get("counted_midpoint_anchor") or {"frame": midpoint["frame"], "pointer_x": midpoint["position"]["x"]}
+        planned["response_end_frame"] = math.floor(origin["frame"] + (128 - origin["pointer_x"]) / planned["speed"]
             + options["rank_timing"]["response_frames"] + 0.5)
         if tolerant_inputs:
             planned["response_end_frame"] = max(midpoint["frame"] + 1, planned["response_end_frame"])
@@ -548,6 +564,8 @@ def stage5_responses(runtime, plan):
         if plan.get("midpoint_diagnostics"):
             value["midpoint_diagnostic"] = {"dance": dance,
                 **midpoint.get("diagnostic", {"recovery_reason": midpoint.get("recovery_reason")})}
+        if planned.get("counted_midpoint_anchor"):
+            value["counted_midpoint_anchor"] = planned["counted_midpoint_anchor"]
         responses.append(value)
         write_json(folder / "dance-result.json", value)
         if plan.get("tolerant_inputs") or plan["feedback_policy"] == "all_buttons":
@@ -842,6 +860,12 @@ def run(run_name, **arguments):
     return result
 
 
+def check(*, lua_dll=None):
+    from contest.checks import check_module
+
+    check_module(__file__, ("rank_dance.lua",), "Rank-dance Python/Lua syntax OK", lua_dll=lua_dll)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
@@ -855,16 +879,16 @@ def main():
     parser.add_argument("--host-timeout", type=float, default=300)
     parser.add_argument("--pointer-speed", type=float)
     parser.add_argument("--calibrate-speed", action="store_true")
+    parser.add_argument("--lua-dll", type=Path, help="Use this Lua 5.1 DLL for the input-free --check.")
     args = parser.parse_args()
     if args.check:
-        from tests.support.lua51 import Lua51, literal
-        ast.parse(Path(__file__).read_text(encoding="utf-8"))
-        lua = Lua51()
         try:
-            print(lua.run(f"assert(loadfile({literal((HERE / 'rank_dance.lua').as_posix())})); return 'Rank-dance Python/Lua syntax OK'"))
-        finally:
-            lua.close()
+            check(lua_dll=args.lua_dll)
+        except (OSError, ValueError, RuntimeError) as error:
+            parser.error(str(error))
         return 0
+    if args.lua_dll is not None:
+        parser.error("--lua-dll belongs to --check.")
     options = {name: getattr(args, name) for name in ("rank", "category", "input_slot", "host_timeout", "pointer_speed", "calibrate_speed")}
     if not args.execute:
         print(json.dumps(settings(**options), indent=2)); return 0

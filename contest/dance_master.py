@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import filecmp
 import json
 from pathlib import Path
@@ -185,17 +184,11 @@ def attach(controller, attachment, *, bridge="pt-dance-master"):
     controller.set_pause(True)
 
 
-def check():
-    from tests.support.lua51 import Lua51, literal
+def check(*, lua_dll=None):
+    from contest.checks import check_sources
 
-    ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    lua = Lua51()
-    try:
-        statements = "; ".join(f"assert(loadfile({literal((HERE / name).as_posix())}))" for name in
-            ("dance_master.lua", "dance_pixels.lua"))
-        print(lua.run(statements + "; return 'Dance master and pixel-reader syntax OK'"))
-    finally:
-        lua.close()
+    check_sources([Path(__file__)], [HERE / name for name in ("dance_master.lua", "dance_pixels.lua")], lua_dll=lua_dll)
+    print("Dance master and pixel-reader syntax OK")
 
 
 def settle_native_osd(controller, seconds):
@@ -560,6 +553,7 @@ def main():
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--execute", action="store_true")
     mode.add_argument("--plan-only", action="store_true")
+    parser.add_argument("--lua-dll", type=Path, help="Use this Lua 5.1 DLL for the input-free --check.")
     parser.add_argument("--run-name", default="dance-full-next")
     parser.add_argument("--input-slot", type=int, default=5)
     parser.add_argument("--checkpoint-slot", type=int, default=10)
@@ -574,8 +568,13 @@ def main():
         help="Paused host seconds before each section, allowing native status overlays to expire.")
     args = parser.parse_args()
     if args.check:
-        check()
+        try:
+            check(lua_dll=args.lua_dll)
+        except (OSError, ValueError, RuntimeError) as error:
+            parser.error(str(error))
         return 0
+    if args.lua_dll is not None:
+        parser.error("--lua-dll belongs to --check.")
     args.timing_profile = load_profile()
     values = section(args.timing_profile, "stage5_dancing")
     args.hold_frames = setting(args.hold_frames, values, "response_hold_frames")

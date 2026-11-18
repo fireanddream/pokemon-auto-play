@@ -111,12 +111,12 @@ def _sprite(rows, palette, probes, *, minimum_match_fraction=0.94, strict_probes
 LEFT_SPRITES = {
     button: _sprite(_LEFT_BLUE_ROWS if button == "B" else _LEFT_COLOR_ROWS,
                     _LEFT_PALETTES[button], ((5, 0), (7, 2), (2, 5), (8, 10)),
-                    minimum_match_fraction=0.80, strict_probes=False)
+                    minimum_match_fraction=0.70, strict_probes=False)
     for button in BUTTONS
 }
 RIGHT_SPRITES = {
     button: _sprite(_RING_ROWS, {".": colors[0], "a": colors[1], "#": (223, 247, 255)},
-                    ((8, 3), (3, 7), (12, 11), (8, 1)), minimum_match_fraction=0.80, strict_probes=False)
+                    ((8, 3), (3, 7), (12, 11), (8, 1)), minimum_match_fraction=0.70, strict_probes=False)
     for button, colors in _RING_COLORS.items()
 }
 POINTER_SPRITES = tuple(_sprite(rows, _POINTER_PALETTE, ((7, 0), (2, 1), (4, 5), (10, 5)))

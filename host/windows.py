@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+from contextlib import contextmanager
+import sys
 
 
 class ProcessEntry(ctypes.Structure):
@@ -187,6 +189,42 @@ def hide_private_console() -> bool:
             KERNEL32.CloseHandle(process)
     USER32.ShowWindow(console, 0)
     return True
+
+
+@contextmanager
+def setup_console(quiet: bool):
+    """Temporarily show setup progress, including a pythonw launch without stdout."""
+    if not quiet:
+        yield
+        return
+    previous = sys.stdout, sys.stderr
+    allocated, stream = False, None
+    console = KERNEL32.GetConsoleWindow()
+    if not console:
+        KERNEL32.AllocConsole.argtypes = []
+        KERNEL32.AllocConsole.restype = wintypes.BOOL
+        if not KERNEL32.AllocConsole():
+            raise ctypes.WinError(ctypes.get_last_error())
+        allocated = True
+        console = KERNEL32.GetConsoleWindow()
+    try:
+        KERNEL32.SetConsoleTitleW.argtypes = [wintypes.LPCWSTR]
+        KERNEL32.SetConsoleTitleW.restype = wintypes.BOOL
+        KERNEL32.SetConsoleTitleW("Pokemon Auto Play setup")
+        USER32.ShowWindow(console, 5)
+        stream = open("CONOUT$", "w", encoding="utf-8", errors="replace", buffering=1, newline="\n")
+        sys.stdout = sys.stderr = stream
+        yield
+    finally:
+        sys.stdout, sys.stderr = previous
+        if stream is not None:
+            stream.close()
+        if allocated:
+            KERNEL32.FreeConsole.argtypes = []
+            KERNEL32.FreeConsole.restype = wintypes.BOOL
+            KERNEL32.FreeConsole()
+        else:
+            USER32.ShowWindow(console, 0)
 
 
 def emulator_process_ids() -> list[int]:

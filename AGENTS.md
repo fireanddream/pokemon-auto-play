@@ -4,8 +4,8 @@ Platinum contest automation. Follow the user's scope; region acceptance is separ
 
 ## Ownership and design
 
-- [README.md](README.md) owns setup/shared contracts; [contest/README.md](contest/README.md)
-  owns runner/stage design. Keep guidance concise and current; omit run histories.
+- [readme.md](readme.md) owns the user introduction/setup; [ALGORITHM.md](ALGORITHM.md)
+  owns runner steps/shared contracts. Keep guidance concise and current; omit run histories.
 - Keep source and Markdown files LF-only, following `.gitattributes`; mixed LF/CRLF
   triggers IDLE warnings. Verify Python-file line endings after edits. Code that rewrites
   source files must explicitly write LF (e.g. `newline="\n"` in Python text writes).
@@ -15,7 +15,7 @@ Platinum contest automation. Follow the user's scope; region acceptance is separ
 
 ## Runners and verification
 
-- Follow [planning and checkpoints](README.md#runner-planning-and-checkpoints): agree on
+- Follow [planning and checkpoints](ALGORITHM.md#runner-planning-and-checkpoints): agree on
   actions, readable boundaries, branches, guards with units, live attempt, and finish point.
   Prepared runs use saved defaults; ask before shared timing changes or new retry/timeout limits.
 - Keep progress/retries local. Use the shared pause/capture/check/save/acknowledge protocol
@@ -26,10 +26,10 @@ Platinum contest automation. Follow the user's scope; region acceptance is separ
 
 ## Contest contracts
 
-- Follow the [integrated design](contest/README.md#integrated-runner-design),
-  [save policy](contest/README.md#stage-checkpoints-and-resume), and
-  [test retention policy](contest/README.md#test-statistics-and-retention).
-- Stage 5 uses [entry-anchored midpoint scheduling](contest/README.md#stage-5--dancing).
-- Stage 6 follows [render-before-analysis](contest/README.md#stage-6-retry-render-preparation):
+- Follow the [integrated design](ALGORITHM.md#integrated-runner-design),
+  [save policy](ALGORITHM.md#stage-checkpoints-and-resume), and
+  [test retention policy](ALGORITHM.md#test-statistics-and-retention).
+- Stage 5 uses [entry-anchored midpoint scheduling](ALGORITHM.md#stage-5-dancing).
+- Stage 6 follows [render-before-analysis](ALGORITHM.md#stage-6-retry-render-preparation):
   accepted paused source -> agreed input-free preparation -> confirmed native pause ->
   fresh zero-frame capture -> judge analysis. Cached screenshots cannot establish readiness.

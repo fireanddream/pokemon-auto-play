@@ -35,4 +35,3 @@ Tough: 1 / 1 / 0 / 0
 Final menu closed: True; paused: True; inputs released: True.
 Contest entries: 0; quick saves: 0; quick loads: 0.
 Live duration: 194.686 host seconds.
-Evidence and checkpoint receipts: tmp/contest/scarf-swaps-20261115-01

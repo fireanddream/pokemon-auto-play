@@ -12,5 +12,5 @@ Additional emulator frames and game inputs for these checks: 0.
 Production combined-reader replay: 1 passed using retained USA (CPUE) native slot 2 RAM.
 Read together: HP 187/187, Sheen 255, 4 moves, Text Speed Fast, 14 Bag items.
 Selected USA battery file: both stored Options fields contain Fast.
-Offline suite: 76 tests passed; main/debug/scarf Python/Lua checks passed.
+Shared checks: python -B -m tests and main/debug/scarf --check entries.
 Fresh live attempts: 0. Retained RAM and offline checks do not establish fresh live behavior.

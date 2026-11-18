@@ -64,8 +64,8 @@ function observer.update(frame)
     end
 end
 
-local function plan_round(frame, stars)
-    return acting_plan.round(config, round_index, move_cursor, judge_cursor, frame, stars, entry_moves.categories)
+local function plan_round(frame, stars, acting_order)
+    return acting_plan.round(config, round_index, move_cursor, judge_cursor, frame, stars, entry_moves, acting_order)
 end
 
 local function checkpoint_snapshot(frame)
@@ -82,12 +82,19 @@ local function checkpoint_snapshot(frame)
         direct_read_frames = 0, retained = true}
     if capture_kind == "round" then
         result.stars = pixels.read_stars(raw)
+        result.acting_order = pixels.read_acting_order(raw)
+        result.acting_order.frame, result.acting_order.epoch, result.acting_order.path =
+            frame, result.image.epoch, result.image.path
         if round_index == 1 and not entry_moves then
             entry_moves = pixels.read_move_categories(raw, config.unavailable_move_slots)
             entry_moves.frame, entry_moves.epoch, entry_moves.path = frame, result.image.epoch, result.image.path
+            for _, warning in ipairs(entry_moves.warnings) do print(warning) end
         end
         result.move_categories = entry_moves
-        if result.stars.readable and entry_moves and entry_moves.readable then result.plan = plan_round(frame, result.stars) end
+        if result.stars.readable and result.acting_order.readable and entry_moves then
+            result.plan = plan_round(frame, result.stars, result.acting_order)
+            for _, warning in ipairs(result.plan.warnings or {}) do print(warning) end
+        end
     elseif capture_kind == "result" then
         result.screen = pixels.match_points(raw, config.overworld.points)
         result.screen.expected = "loaded_overworld"
@@ -111,7 +118,6 @@ local function initialize()
                 {id = "initial_empty_star_slots", expected = true, evaluate = function(snapshot, context)
                     return context.round ~= 1 or snapshot.stars.all_empty == true, snapshot.stars.counts
                 end},
-                {id = "four_readable_move_categories", field = "move_categories.readable", expected = true},
                 {id = "move_category_epoch", field = "move_categories.epoch", context = "epoch"},
                 {id = "zero_frame_move_read", field = "move_categories.direct_read_frames", expected = 0},
                 {id = "entry_move_capture_binding", expected = true, evaluate = function(snapshot, context)
@@ -120,6 +126,14 @@ local function initialize()
                         and (context.round ~= 1 or moves.frame == context.frame and moves.path == snapshot.image.path),
                         {frame = moves.frame, path = moves.path}
                 end},
+                {id = "readable_acting_order", field = "acting_order.readable", expected = true},
+                {id = "acting_order_frame", field = "acting_order.frame", context = "frame"},
+                {id = "acting_order_epoch", field = "acting_order.epoch", context = "epoch"},
+                {id = "zero_frame_acting_order_read", field = "acting_order.direct_read_frames", expected = 0},
+                {id = "acting_order_capture_binding", expected = true, evaluate = function(snapshot)
+                    return snapshot.acting_order.path == snapshot.image.path, snapshot.acting_order.path
+                end},
+                {id = "eligible_move_plan", field = "plan.selectable", expected = true},
                 {id = "capture_frame", field = "image.frame", context = "frame"},
                 {id = "capture_epoch", field = "image.epoch", context = "epoch"},
             }, branches = {pass = "perform-round"}},

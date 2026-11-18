@@ -18,7 +18,7 @@ from contest.pt_dance_read import EMPTY_PROFILE, FILLED_PROFILES
 from contest.timing_profiles import load_profile
 from tests.support.bridge import BridgeClock
 from tests.support.lua51 import Lua51, literal
-from tests.support.paths import ROOT, temporary_directory
+from tests.support.paths import ROOT, fixture_path, temporary_directory
 
 
 CAPTURES = json.loads((ROOT / "tests/support/dance-captures.json").read_text(encoding="utf-8"))["captures"]
@@ -221,7 +221,7 @@ class RetainedDancePixelChecks(unittest.TestCase):
             f"return json.encode(pixels.feedback(native_raw,{center}))"))
 
     def test_retained_english_and_jpn_excellent_palettes_are_recognized(self):
-        with Image.open(ROOT / "contest/evidence/completed.png") as source:
+        with Image.open(fixture_path("completed.png")) as source:
             jpn = Image.new("RGB", (256, 384))
             jpn.paste(source.convert("RGB").crop((0, 0, 256, 50)))
         cases = [("english_initial", retained_image("english_initial"), 204),
@@ -242,8 +242,8 @@ class RetainedDancePixelChecks(unittest.TestCase):
             with self.subTest(capture=name):
                 self.assertIsNone(self.feedback(retained_image(name), center))
 
-    def test_obscured_midpoint_skips_unconfirmed_cues_and_clear_capture_keeps_four(self):
-        for name, counts, planned in (("saved_overlay", (0, 2), 0), ("clear_cues", (4, 4), 4)):
+    def test_obscured_demo_uses_readable_response_cues_and_clear_capture_keeps_four(self):
+        for name, counts, planned in (("saved_overlay", (0, 4), 4), ("clear_cues", (4, 4), 4)):
             with self.subTest(capture=name):
                 image = retained_image(name)
                 left = rank_speed_probe.cue_positions(image, "left")
@@ -254,9 +254,11 @@ class RetainedDancePixelChecks(unittest.TestCase):
                     rank="Hyper", expected_cues=4, speed=5 / 9, hold_frames=2, offset_frames=-7,
                     side_offset_pixels=120, tolerant_inputs=True)
                 self.assertEqual((len(response["presses"]), response["skipped_input_count"]), (planned, 4 - planned))
-                if not planned:
-                    self.assertEqual(response["cues"]["selection_policy"], "confirmed_pairs_only")
-                    self.assertEqual(response["cues"]["accepted"], [])
+                if name == "saved_overlay":
+                    self.assertEqual(response["cues"]["selection_policy"], "complete_side_positions")
+                    self.assertEqual([(cue["demo_x"], cue["button"], cue["source_side"])
+                        for cue in response["cues"]["accepted"]],
+                        [(28, "B", "right"), (48, "Y", "right"), (68, "B", "right"), (88, "Y", "right")])
 
 
 class DanceCaptureRecoveryChecks(unittest.TestCase):
@@ -346,6 +348,27 @@ class DanceCaptureRecoveryChecks(unittest.TestCase):
         replay.set_image(retained_image("clear_cues"))
         corrected = replay.clock.command("observe-demo")
         self.assertEqual((corrected["frame"], corrected["stop_reason"]), (next_frame, "demo_midpoint"))
+        self.assertTrue(all(not buttons for buttons in replay.clock.trace()))
+
+    def test_counted_display_hold_cannot_use_an_unverified_pointer_origin(self):
+        replay = self.replay("rank")
+        replay.call("select-dance", 1, replay.work, 0)
+        image = retained_image("clear_cues")
+        for x in range(8, 248):
+            for row, color in enumerate(FILLED_PROFILES[0] if x <= 127 else EMPTY_PROFILE, 155):
+                image.putpixel((x, row), color)
+        replay.set_image(image)
+        replay.clock.lua.run("frame=1002; return 'ready'")
+        captured = replay.call("capture", "held-display")
+        anchor = {"frame": 1000, "epoch": captured["epoch"], "pointer_x": 127,
+            "source": "fresh_paused_midpoint_before_counted_correction"}
+        planned = rank_speed_probe.response_plan({"frame": 1002, "epoch": captured["epoch"],
+            "position": {"x": 127, "phase": "demo"}}, image, [], None, rank="Master",
+            expected_cues=4, speed=5 / 9, hold_frames=2, offset_frames=-7,
+            side_offset_pixels=120, tolerant_inputs=True, counted_midpoint_anchor=anchor)
+        result = replay.clock.checkpoint("plan", replay.configuration(planned))
+        self.assertTrue(result["recovery_required"])
+        self.assertIn("verified pointer origin", result["warning"])
         self.assertTrue(all(not buttons for buttons in replay.clock.trace()))
 
     def test_probe_unreadable_recovery_uses_the_remaining_counted_response_budget(self):

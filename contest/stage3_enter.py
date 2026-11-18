@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import filecmp
 import json
 import math
@@ -492,6 +491,12 @@ def background(run_name, source_checkpoint):
     return child.returncode
 
 
+def check(*, lua_dll=None):
+    from contest.checks import check_module
+
+    check_module(__file__, ("party_contest.lua", "stage3_enter.lua"), "Stage 3 Python/Lua syntax OK", lua_dll=lua_dll)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -508,6 +513,7 @@ def main():
     parser.add_argument("--hold-frames", type=int, help="Override profile menu hold emulator frames.")
     parser.add_argument("--release-frames", type=int, help="Override profile menu release emulator frames.")
     parser.add_argument("--intro-seconds", type=float, help="Override profile introduction game seconds.")
+    parser.add_argument("--lua-dll", type=Path, help="Use this Lua 5.1 DLL for the input-free --check.")
     capture_mode = parser.add_mutually_exclusive_group()
     capture_mode.add_argument("--timing-probe", action="store_true",
                               help="Use profile probe capture times plus the endpoint; finish locally for later review.")
@@ -515,16 +521,13 @@ def main():
                               help="Capture rank, category, party selection, and dress-up for the endpoint review.")
     args = parser.parse_args()
     if args.check:
-        from tests.support.lua51 import Lua51, literal
-
-        ast.parse(Path(__file__).read_text(encoding="utf-8"))
-        lua = Lua51()
         try:
-            loads = "; ".join(f"assert(loadfile({literal((HERE / name).as_posix())}))" for name in ("party_contest.lua", "stage3_enter.lua"))
-            print(lua.run(loads + "; return 'Stage 3 Python/Lua syntax OK'"))
-        finally:
-            lua.close()
+            check(lua_dll=args.lua_dll)
+        except (OSError, ValueError, RuntimeError) as error:
+            parser.error(str(error))
         return 0
+    if args.lua_dll is not None:
+        parser.error("--lua-dll belongs to --check.")
     if args.host_timeout is None:
         parser.error("Supply the agreed --host-timeout in host seconds.")
     options = {key: getattr(args, key) for key in

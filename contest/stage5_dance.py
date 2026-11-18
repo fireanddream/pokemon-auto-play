@@ -422,9 +422,9 @@ def run(*, run_name, dance_handoff, deadline=None, auto_review=False, keep_uncap
     return result
 
 
-def check():
+def check(*, lua_dll=None):
     ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    check_dance()
+    check_dance(lua_dll=lua_dll)
     print("Stage 5 Python syntax OK")
 
 
@@ -442,10 +442,16 @@ def main():
     parser.add_argument("--transition-seconds", type=float)
     parser.add_argument("--uncapped", action="store_true")
     parser.add_argument("--osd-settle-seconds", type=float)
+    parser.add_argument("--lua-dll", type=Path, help="Use this Lua 5.1 DLL for the input-free --check.")
     args = parser.parse_args()
     if args.check:
-        check()
+        try:
+            check(lua_dll=args.lua_dll)
+        except (OSError, ValueError, RuntimeError) as error:
+            parser.error(str(error))
         return 0
+    if args.lua_dll is not None:
+        parser.error("--lua-dll belongs to --check.")
     if args.host_timeout is None:
         parser.error("Supply the agreed --host-timeout in host seconds.")
     options = {key: getattr(args, key) for key in ("host_timeout", "hold_frames", "offset_frames",

@@ -12,8 +12,13 @@
 *.gba
 *.sav
 *.dsv
+*.ds[0-9]
 *.dst
 *.luasav
+
+# Private prepared states and captured evidence.
+/contest/states/
+/contest/evidence/
 
 # Local recordings and converted videos.
 /*.avi
@@ -25,6 +30,12 @@ tmp/
 __pycache__/
 *.pyc
 .venv/
+
+# Prepared dependency wheels; copied into the release ZIP.
+/wheels/
+
+# Private, durable inputs used by retained tests.
+/tests/fixtures/local/
 
 # Persistent local evidence; retain the empty folder in source and releases.
 /contest/debug/*

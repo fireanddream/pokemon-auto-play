@@ -28,7 +28,7 @@
     },
     "stage4_dress_up": {
       "_help": "Accessory placement, page rendering, Finish, and repeated A before input-free dance-entry checks.",
-      "accessory_budget_game_seconds": 15,
+      "accessory_budget_game_seconds": 20,
       "accessory_pickup_hold_frames": 4,
       "accessory_drag_frames": 12,
       "accessory_release_frames": 5,

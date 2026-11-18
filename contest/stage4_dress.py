@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import filecmp
 import json
 import math
@@ -601,17 +600,10 @@ def run(*, run_name, source_checkpoint, deadline=None, keep_uncapped=False, from
     return result
 
 
-def check():
-    from tests.support.lua51 import Lua51, literal
+def check(*, lua_dll=None):
+    from contest.checks import check_module
 
-    ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    lua = Lua51()
-    try:
-        code = "; ".join(f"assert(loadfile({literal((HERE / name).as_posix())}))"
-                         for name in ("stage4_dress.lua", "dress_pixels.lua"))
-        print(lua.run(code + "; return 'Stage 4 Python/Lua syntax OK'"))
-    finally:
-        lua.close()
+    check_module(__file__, ("stage4_dress.lua", "dress_pixels.lua"), "Stage 4 Python/Lua syntax OK", lua_dll=lua_dll)
 
 
 def main():
@@ -635,10 +627,16 @@ def main():
     parser.add_argument("--stylus-y", type=int, default=173)
     parser.add_argument("--stylus-hold-frames", type=int)
     parser.add_argument("--stylus-release-frames", type=int)
+    parser.add_argument("--lua-dll", type=Path, help="Use this Lua 5.1 DLL for the input-free --check.")
     args = parser.parse_args()
     if args.check:
-        check()
+        try:
+            check(lua_dll=args.lua_dll)
+        except (OSError, ValueError, RuntimeError) as error:
+            parser.error(str(error))
         return 0
+    if args.lua_dll is not None:
+        parser.error("--lua-dll belongs to --check.")
     if args.host_timeout is None:
         parser.error("Supply the agreed --host-timeout in host seconds.")
     options = {key: getattr(args, key) for key in ("host_timeout", "transition_seconds",

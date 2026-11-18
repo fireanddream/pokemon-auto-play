@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 from collections import Counter
 import json
 import math
@@ -37,7 +36,7 @@ CAPTURE_WAIT_FRAMES = round(_DIAGNOSTIC["dance_capture_interval_game_seconds"] *
 RESULT_KEYS = ("outcome", "target", "active_stage", "completed_contests", "measured_contests", "total_contests",
     "loop_count", "required_midpoint_visits", "measurements_path", "results_path", "total_inputs", "required_response_inputs", "total_excellent",
     "total_misses", "total_skipped_inputs", "total_conflicting_cues", "baseline_restored", "finish_reason", "frame", "emulator_paused",
-    "inputs_released", "emulator_closed", "measurement_dances", "total_samples", "required_samples", "entry_restored",
+    "inputs_released", "emulator_closed", "measurement_dances",
     "total_host_seconds", "last_checkpoint", "last_save_state", "work_dir", "error", "cleanup_errors")
 
 def fixed_target(rank, *, category=DEFAULT_CATEGORY):
@@ -478,7 +477,7 @@ def run(*, run_name, **options):
             msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def _run(run_name, plan, started, *, pointer_sections=None):
+def _run(run_name, plan, started):
     work = ROOT / "tmp" / "contest" / run_name
     if work.exists():
         raise FileExistsError("Use a fresh debug run name.")
@@ -507,14 +506,8 @@ def _run(run_name, plan, started, *, pointer_sections=None):
         "loop_count": plan["loop_count"],
         "measurements_path": str(work / "measurements.json")}
     inputs_mode = plan["mode"] == "debug_inputs"
-    pointer_mode = plan["mode"] == "pointer_speed"
-    if pointer_mode and pointer_sections is None:
-        raise ValueError("Saved-entry pointer measurements require their configured section handlers.")
     handlers = {1: load, 3: enter, 4: skip_dress, 5: dance}
-    if pointer_mode:
-        handlers.update(pointer_sections["handlers"])
-        result.update(total_samples=0, required_samples=plan["required_samples"], entry_restored=False)
-    single_dance = not inputs_mode and not pointer_mode and plan["measurement_dances"] == 1
+    single_dance = not inputs_mode and plan["measurement_dances"] == 1
     reload_each = inputs_mode or single_dance
     report_path = work / ("dance-results.json" if inputs_mode else "measurements.json")
     if inputs_mode:
@@ -525,8 +518,7 @@ def _run(run_name, plan, started, *, pointer_sections=None):
             required_response_inputs=plan["required_response_inputs"],
             required_midpoint_visits=plan["required_midpoint_visits"], baseline_restored=False)
     else:
-        if not pointer_mode:
-            result["measurement_dances"] = plan["measurement_dances"]
+        result["measurement_dances"] = plan["measurement_dances"]
         if single_dance:
             result.update(total_inputs=0, baseline_restored=False)
     report = {"schema": 1, "run_id": run_name, "mode": plan["mode"], "frame_unit": "emulator_frames",
@@ -536,8 +528,6 @@ def _run(run_name, plan, started, *, pointer_sections=None):
             for index, target in enumerate(plan["targets"])]}
     if inputs_mode:
         report["midpoint_policy"] = plan["midpoint_policy"]
-    elif pointer_mode:
-        report["sampling"] = plan["sampling"]
     else:
         report["measurement_dances"] = plan["measurement_dances"]
     write_json(report_path, report)
@@ -595,11 +585,6 @@ def _run(run_name, plan, started, *, pointer_sections=None):
         for index, target in enumerate(plan["targets"]):
             runtime.target = dict(target)
             result["target"] = target
-            if pointer_mode:
-                result["entry_restored"] = False
-            if pointer_mode and index:
-                pointer_sections["reset"](runtime)
-                visit(1)
             entry = report["contests"][index]
             entry["status"] = "running"
             folder = work / "visits" / f"s5-{index + 1:03d}"
@@ -613,7 +598,7 @@ def _run(run_name, plan, started, *, pointer_sections=None):
             record("input_target" if inputs_mode else "measurement_target",
                 category=target["category"], rank=target["rank"], number=index + 1, loop=target.get("debug_loop", 1))
             if not plan["resume_paused"]:
-                visit(3, reload=index > 0 and not reload_each and not pointer_mode)
+                visit(3, reload=index > 0 and not reload_each)
                 visit(4)
             captured = visit(5)
             entry.update(final_capture=captured["final_capture"], checkpoint_receipt=captured["checkpoint_receipt"])
@@ -634,17 +619,7 @@ def _run(run_name, plan, started, *, pointer_sections=None):
             else:
                 entry.update(status="captured", metrics=captured["metrics"],
                     dance_input_count=captured["dance_input_count"], dance_stylus_count=captured["dance_stylus_count"])
-                if pointer_mode:
-                    if captured["sample_count"] != plan["sampling"]["samples_per_target"]:
-                        raise RuntimeError("Each pointer-speed target must complete its configured sample count.")
-                    entry.update(status="completed", sample_count=captured["sample_count"],
-                        entry_capture=captured["entry_capture"], entry_state=captured["entry_state"],
-                        entry_reloads=captured["entry_reloads"], final_reload=captured["final_reload"],
-                        last_sample_checkpoint=captured["last_sample_checkpoint"])
-                    result["total_samples"] += captured["sample_count"]
-                    result["measured_contests"] += 1
-                    result.update(frame=runtime.position["frame"], entry_restored=True)
-                elif single_dance:
+                if single_dance:
                     entry["baseline_reload"] = reload_baseline(runtime)
                     entry["status"] = "completed"
                     result.update(frame=runtime.position["frame"], baseline_restored=True)
@@ -659,11 +634,8 @@ def _run(run_name, plan, started, *, pointer_sections=None):
                     "total_excellent", "total_misses", "total_skipped_inputs", "total_conflicting_cues") if key in result})
         if inputs_mode and result["total_inputs"] + result["total_skipped_inputs"] != result["required_response_inputs"]:
             raise RuntimeError("Executed and skipped inputs must account for the selected rank requirements.")
-        if pointer_mode and result["total_samples"] != result["required_samples"]:
-            raise RuntimeError("The pointer-speed pass did not finish all configured samples.")
         result.update(outcome="pass", finish_reason="all_responses_accounted_baseline_restored"
-            if inputs_mode else "all_pointer_samples_complete_entry_restored"
-            if pointer_mode else "all_single_dance_captures_complete_baseline_restored"
+            if inputs_mode else "all_single_dance_captures_complete_baseline_restored"
             if single_dance else "all_measurement_captures_complete")
     except (Exception, SystemExit, KeyboardInterrupt) as error:
         session = runtime.controller.live_session or {}
@@ -692,7 +664,7 @@ def _run(run_name, plan, started, *, pointer_sections=None):
                 entry.update(status=result["outcome"], error=result.get("error"))
         report.update({key: result[key] for key in ("outcome", "completed_contests", "measured_contests", "total_inputs",
             "required_response_inputs", "total_excellent", "total_misses", "total_skipped_inputs",
-            "total_conflicting_cues", "baseline_restored", "total_samples", "required_samples", "entry_restored") if key in result})
+            "total_conflicting_cues", "baseline_restored") if key in result})
         write_json(report_path, report)
         result["total_host_seconds"] = time.monotonic() - started
         write_json(work / "runner-result.json", result)
@@ -759,22 +731,20 @@ def main():
     parser.add_argument("--no-timeout", action="store_true", help="Disable both run timers; continue through completion or manual closure.")
     parser.add_argument("--offset-frames", type=int,
         help="Override the profile response input offset in emulator frames.")
+    parser.add_argument("--lua-dll", type=Path, help="Use this Lua 5.1 DLL for the input-free --check.")
     args = parser.parse_args()
     options = {name: getattr(args, name) for name in ("category", "rank", "total_timeout", "stage_timeout",
         "skip_joined_from", "resume_paused_from", "measure_only", "offset_frames", "no_timeout", "loops", "midpoint_diagnostics", "measurement_dances")}
     try:
         if args.check:
-            from tests.support.lua51 import Lua51, literal
+            from contest.checks import check_sources
 
-            ast.parse(Path(__file__).read_text(encoding="utf-8"))
-            super_contest.check()
-            lua = Lua51()
-            try:
-                print(lua.run(f"assert(loadfile({literal(Path(__file__).with_name('debug_measure.lua').as_posix())})); "
-                    "return 'Dance debug Python/Lua syntax OK'"))
-            finally:
-                lua.close()
+            super_contest.check(lua_dll=args.lua_dll)
+            check_sources([Path(__file__)], [Path(__file__).with_name("debug_measure.lua")], lua_dll=args.lua_dll)
+            print("Dance debug Python/Lua syntax OK")
             return 0
+        if args.lua_dll is not None:
+            parser.error("--lua-dll belongs to --check.")
         if args.plan_only:
             print(json.dumps(debug_plan(**options), indent=2))
             return 0

@@ -75,7 +75,7 @@ local function report_checkpoint(action, record)
     if record.decision == "abort" then runtime.fail_stage(); return end
     if action == "complete" and record.status == "complete" and record.proceed
         and record.checkpoint == "stage-6-round" and record.snapshot.trial.round == 1 then
-        print("Acting entry: PASS - All 15 empty star slots and available move categories confirmed.")
+        print("Acting entry: PASS - Judge status, acting order, and move selection ready.")
     end
     local feedback = stage_feedback[feedback_stage]
     if action ~= "complete" or record.status ~= "complete" or not record.proceed
@@ -83,6 +83,10 @@ local function report_checkpoint(action, record)
     if record.decision == "miss" then
         if feedback_stage == 5 then
             print("Dancing: WARN - Handoff dance checks missed; continuing to Acting.")
+            reported_result = "warning"
+            return
+        elseif feedback_stage == 6 then
+            print("Acting: WARN - Target ribbon not acquired; retrying.")
             reported_result = "warning"
             return
         else runtime.fail_stage(); return end
@@ -184,7 +188,7 @@ end
 local function initialize(args)
     assert(not runtime.engine and (#args == 3 or #args == 4 or #args == 5) and (args[3] == "0" or args[3] == "1")
         and (args[4] == nil or args[4] == "scheduled" or args[4] == "diagnostic"
-            or args[4] == "measurement" or args[4] == "debug_inputs" or args[4] == "pointer_speed"
+            or args[4] == "measurement" or args[4] == "debug_inputs"
             or args[4] == "scarf_test"),
         "Initialize once with run identity, debug mode, and the dance observation policy")
     run_id, work, debug_mode = args[1], args[2], tonumber(args[3])
@@ -199,10 +203,9 @@ local function initialize(args)
     local definitions = sections.definitions()
     local prototypes = {}
     if dance_observation_policy == "measurement" or dance_observation_policy == "debug_inputs"
-        or dance_observation_policy == "pointer_speed" or dance_observation_policy == "scarf_test" then
+        or dance_observation_policy == "scarf_test" then
         assert(debug_mode == 0, "Measurement modes own their declared state policies")
-        local measurement = dofile(directory .. (dance_observation_policy == "pointer_speed"
-            and "/debug_pointer_speed.lua" or dance_observation_policy == "scarf_test"
+        local measurement = dofile(directory .. (dance_observation_policy == "scarf_test"
             and "/scarf_tester.lua" or "/debug_measure.lua"))
         definitions = measurement.definitions(definitions, runtime, dance_observation_policy == "debug_inputs")
         measurement_run = measurement.run(runtime, dance_observation_policy == "debug_inputs")
@@ -316,12 +319,7 @@ local function dispatch(action, args)
         initialize(args)
     elseif action == "state-changed" then
         if args[1] == "reset" then
-            assert(not runtime.engine or measurement_run and measurement_run.can_reset and measurement_run.can_reset(),
-                "Reset requires initial boot or the completed configured pointer-speed target")
-            if runtime.engine then
-                measurement_run.reset()
-                current, config, latest = nil, nil, nil
-            end
+            assert(not runtime.engine, "Reset requires initial boot")
         elseif measurement_run then
             local keep_section = measurement_run.loaded(args)
             if not keep_section then
@@ -342,12 +340,6 @@ local function dispatch(action, args)
         assert(measurement_run, "Baseline reloads belong to the measurement debug runner")
         stable(latest)
         return measurement_run.arm(args, latest)
-    elseif action == "arm-pointer-speed-reset" then
-        assert(measurement_run and measurement_run.arm_reset, "Only the saved-entry pointer pass declares a mid-run reset")
-        local result = measurement_run.arm_reset(args, latest)
-        if current then current.finish() end
-        current, config = nil, nil
-        return result
     elseif action == "terminal" then
         if current then current.finish() end
         finish(nil, "terminal")
@@ -416,8 +408,7 @@ local function start(parts)
     local action = parts[2]
     state.command_id = parts[1]
     assert(not halted, "The persistent runtime is stopped")
-    assert(action == "reset" and (not runtime.engine
-        or measurement_run and measurement_run.can_reset and measurement_run.can_reset())
+    assert(action == "reset" and not runtime.engine
         or current and current.authorize and current.authorize(action),
         "The active section did not authorize this input action")
     state.command_id, state.command_done, state.error = parts[1], false, ""

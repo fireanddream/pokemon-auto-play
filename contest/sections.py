@@ -41,6 +41,24 @@ def reviewed_inputs(runtime, plan, expected, filename):
         "input_frames": capture["frame"] - inputs["command_start_frame"]}
 
 
+def readiness_warnings(snapshot):
+    party, warnings = snapshot["party"], []
+    accessories = snapshot.get("accessories") or {}
+    if accessories.get("read_valid") is True:
+        count = accessories["total_owned"]
+        if count < 10:
+            warnings.append(f"Loading: WARN - Only {count} contest accessory copies owned; recommended minimum is 10. Continuing.")
+    else:
+        warnings.append("Loading: WARN - Contest accessory ownership could not be read reliably. Continuing.")
+    if party["sheen"] < 255:
+        warnings.append(f"Loading: WARN - First Pokemon Sheen is {party['sheen']}/255. Continuing.")
+    owned_items = {party["held_item_id"]} | {item["item_id"] for item in snapshot["bag"]["items"] if item["quantity"] > 0}
+    missing = [name for item_id, name in stage2_prep.SCARVES.items() if item_id not in owned_items]
+    if missing:
+        warnings.append(f"Loading: WARN - Missing scarf items: {', '.join(missing)}. Continuing.")
+    return warnings
+
+
 def load(runtime):
     plan = stage1_load.load_plan(timing_profile=runtime.settings.get("timing_profile"))
     facts = reviewed_inputs(runtime, plan, plan["acceptance"], "stage1.png")
@@ -49,10 +67,15 @@ def load(runtime):
     snapshot = runtime.boundary["checkpoint"]["snapshot"]
     party = snapshot["party"]
     runtime.unavailable_move_slots = list(party["unavailable_move_slots"])
+    warnings = readiness_warnings(snapshot)
+    for message in warnings:
+        runtime.controller.log_lua(message)
+        runtime.record("readiness_warning", message=message)
     runtime.record("readiness", hp=party["current_hp"], max_hp=party["max_hp"], sheen=party["sheen"],
         move_count=party["move_count"], unavailable_move_slots=party["unavailable_move_slots"],
-        text_speed=snapshot["options"]["text_speed"], screenshot=facts["screenshot"])
-    return accepted(runtime, **facts)
+        text_speed=snapshot["options"]["text_speed"], accessories=snapshot.get("accessories"),
+        warnings=warnings, screenshot=facts["screenshot"])
+    return accepted(runtime, readiness_warnings=warnings, **facts)
 
 
 def prep(runtime, *, target=None):
@@ -222,9 +245,11 @@ def act(runtime, *, attempt):
         checked = runtime.acknowledge(pending, slot=plan["temporary_slot"])
         chosen = checked["checkpoint"]["snapshot"]["plan"]
         runtime.record("acting_round", round=number, stars=snapshot["stars"]["counts"], move=chosen["move"], judge=chosen["judge"],
-            move_category=chosen["move_category"], matching_category_override=chosen["matching_category_override"])
+            move_category=chosen["move_category"], move_hearts=chosen["move_hearts"], acting_position=chosen["acting_position"],
+            unrecognized_move_fallback=chosen["unrecognized_fallback"],
+            matching_category_override=chosen["matching_category_override"])
         inputs = runtime.action("combo", "inputs", *chosen["steps"], expected="combo_complete")
-        item = {"round": number, "image": capture, "stars": snapshot["stars"], "plan": chosen,
+        item = {"round": number, "image": capture, "stars": snapshot["stars"], "acting_order": snapshot["acting_order"], "plan": chosen,
             "checkpoint_visit": checked["checkpoint"]["visit"], "end_frame": inputs["frame"]}
         rounds.append(item)
         runtime.json(f"round-{number}.json", item)

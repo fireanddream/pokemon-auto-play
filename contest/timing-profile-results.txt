@@ -1,22 +1,25 @@
-Regional timing profile verification — current offline results
+Regional timing profile verification
 
-Scope: Regional defaults, pointer-based dance acceptance, counted continuation,
-checkpoint/save policy, and existing runner checks.
+Scope: CPUJ (JPN) and CPUE (English, shared USA/EU) defaults, pointer-based dance
+acceptance, counted continuation, checkpoint/save policy, and existing runner checks.
 Mode: Python planning and real Lua with simulated emulator callbacks.
 Units: Emulator frames; game seconds at 67027965 / 1120380 frames per second;
 host seconds are wall-clock time; cue spacing is native pixels.
 
-Profiles: 9 accepted ROM codes; all schemas passed. USA/EU share CPUE.
-Defaults: Dressing 15 game seconds / 897 frames in all profiles; introduction
-English/JPN 60/50 game seconds; Acting CPUE 69/144, CPUJ 64/140 game seconds.
-Other seeded Acting profiles remain 64/132 game seconds. Dance input offset: -7 frames.
-English Acting waits: 4128/4128/4128/8615 emulator frames.
+Profiles: 2 accepted ROM codes; USA/EU share CPUE.
+Defaults: Dressing 15 game seconds / 897 emulator frames; introduction English/JPN
+60/50 game seconds; Acting CPUE 74/150, CPUJ 64/140 game seconds.
+Dance input offset: -7 emulator frames.
 JPN/English post-Dance B-mashing: 18 game seconds / 1077 emulator frames.
-Dance checks: Byte-different paused captures accepted; existing input schedules,
-counted response endpoints, six-response accounting, and handoff waits passed.
-Injected analysis/plan/capture faults continued without repeating completed work.
-Existing suite: 74 passed; 0 failures, 0 errors, 0 skipped.
-CLI --check: super_contest.py passed, including all regional schemas and persistent runner syntax.
+Acting waits: CPUJ 3829/3829/3829/8376; CPUE 4427/4427/4427/8974 emulator frames.
 
-The updated JPN/English timings still need live verification. These offline checks do
-not establish regional live behavior.
+Results: 103 offline tests passed; 0 failures, errors, or skipped tests.
+Both timing schemas and all four CLI syntax checks passed.
+
+Checks: python -B -m tests
+        python -B contest/super_contest.py --check
+        python -B contest/debug_contest.py --check
+        python -B contest/dance_master.py --check
+        python -B contest/scarf_tester.py --check
+
+These offline checks do not establish regional live behavior.
