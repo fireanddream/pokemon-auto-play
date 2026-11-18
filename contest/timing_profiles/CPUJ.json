@@ -55,10 +55,12 @@
       "transition_mash_release_frames": 20
     },
     "stage6_acting": {
-      "_help": "Move/judge menus, repeated B between rounds and through results, and input-free render preparation. Main and standalone runners share this profile's durations.",
+      "_help": "Move/judge menus, base B tapping between rounds, silent readiness retries, a B delay after readiness, results, and input-free entry rendering. Main and standalone runners share these durations.",
       "menu_hold_frames": 12,
       "menu_release_frames": 90,
-      "rounds_1_to_3_b_mash_game_seconds": 67,
+      "rounds_1_to_3_b_mash_game_seconds": 60,
+      "round_readiness_retry_b_mash_game_seconds": 5,
+      "round_readiness_settle_b_mash_game_seconds": 3,
       "final_round_and_results_b_mash_game_seconds": 140,
       "mash_hold_frames": 10,
       "mash_release_frames": 20,

@@ -133,10 +133,17 @@ acting position (1-4) from the same fresh capture:
 4. No recognized legal move: warn and use the first legal slot/fewest-star judge.
    Unreadable judges/order, no legal slot, or recognized but ineligible moves stop paused.
 5. Navigate from remembered move/judge selections, confirm, then tap B at
-   **10 held / 20 released frames** through the configured round/results segment.
+   **10 held / 20 released frames** through the configured base round/results segment.
+6. Before rounds 2-4, check judges, acting order, and selectable move-button fills
+   from a fresh paused image, excluding empty slots and the gray previous move.
+   If unreadable, tap B for **5 game seconds** and recheck under the existing section
+   deadline. Once readable, tap B for **3 more game seconds**, then take the fresh
+   round checkpoint and select. Polls are silent and retain evidence without checkpoint
+   visits/saves; first-round messages and cached move scoring remain unchanged.
 
-Segments last **67 / 140 game seconds** for JPN rounds 1-3 / final round and results;
-English uses **74 / 150**. Selection uses raw hearts, not simulated move effects.
+Base segments last **60 / 140 game seconds** for JPN rounds 1-3 / final round and
+results; English uses **65 / 150**. Initial entry and final/results have no readiness
+loop. Selection uses raw hearts, not simulated move effects.
 
 Confirm the closed-menu overworld, use **X -> read -> X** to check the target ribbon,
 and acknowledge before returning to Stage 2. Each new Acting entry resets round/

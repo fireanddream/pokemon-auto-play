@@ -68,6 +68,9 @@ function M.definitions()
             {id = "acting_order_capture_binding", expected = true, evaluate = function(snapshot)
                 return snapshot.acting_order.path == snapshot.image.path, snapshot.acting_order.path
             end},
+            {id = "readable_between_round_menu", expected = true, evaluate = function(snapshot, context)
+                return context.round == 1 or snapshot.round_readiness.ready == true
+            end},
             {id = "eligible_move_plan", field = "plan.selectable", expected = true},
             {id = "capture_frame", field = "image.frame", context = "frame"},
             {id = "capture_epoch", field = "image.epoch", context = "epoch"},
@@ -93,6 +96,8 @@ function M.new(config, runtime)
     local stage = config.stage == 6 and "setup" or config.stage == 2 and "inspect" or "inputs"
     local latest, pending, captured, screen, initial, prep, current_plan, source_party, entry_moves, result_party
     local round_index, completed_rounds, move_cursor, judge_cursor = 0, 0, 1, 1
+    local pause_plan, settled
+    local readiness_checks = 0
     local render_prepared, render_end_frame = false, nil
     local render_epoch, capture_kind = adapter.epoch(), "source"
     local section = {}
@@ -106,6 +111,7 @@ function M.new(config, runtime)
             completed_rounds = completed_rounds, move_cursor = move_cursor, judge_cursor = judge_cursor,
             render_preparation_frames = render_prepared and render_end_frame - config.source_frame or 0,
             render_preparation_mode = config.entry_mode,
+            readiness_checks = readiness_checks, readiness_settle_frames = settled and settled.frames or 0,
             released = api.state.command_done and api.state.buttons == "" and not api.state.stylus_touch}
     end
 
@@ -143,6 +149,10 @@ function M.new(config, runtime)
                     for _, warning in ipairs(entry_moves.warnings) do print(warning) end
                 end
                 result.move_categories = entry_moves
+                if round_index > 1 then
+                    result.round_readiness = acting_pixels.read_round_readiness(raw, config.unavailable_move_slots,
+                        move_cursor, result.stars, result.acting_order)
+                end
                 if result.stars.readable and result.acting_order.readable and entry_moves then
                     result.plan = acting_plan.round(config, round_index, move_cursor, judge_cursor, frame,
                         result.stars, entry_moves, result.acting_order)
@@ -189,6 +199,8 @@ function M.new(config, runtime)
         if pending or not api.state.command_done then return false end
         if action == "combo" then
             return stage == "inputs" or stage == "prepare" or stage == "perform-round"
+                or stage == "round-wait" and pause_plan and adapter.frame() == pause_plan.start_frame
+                    and adapter.epoch() == pause_plan.epoch
                 or config.stage == 6 and stage == "ready" and completed_rounds == 4
         end
         return action == "advance" and config.stage == 6 and stage == "prepare-render"
@@ -284,6 +296,36 @@ function M.new(config, runtime)
                 "A direct Acting handoff needs its configured counted input-free frames")
             render_prepared, render_end_frame, stage = true, adapter.frame(), "ready"
             observation = section.observation(adapter.frame())
+        elseif action == "round-readiness" then
+            assert(config.stage == 6 and not pending and #args == 1, "Check readiness outside a checkpoint visit")
+            if stage == "perform-round" then finish_round() end
+            if stage == "round-wait" then
+                assert(pause_plan.phase == "retry", "Finish the ready-screen B delay before move selection")
+                acting_plan.finish_pause(pause_plan, api.state, adapter.frame(), adapter.epoch())
+                pause_plan, stage = nil, "ready"
+            end
+            local number = tonumber(args[1])
+            assert(stage == "ready" and round_index >= 1 and round_index < 4
+                and completed_rounds == round_index and number == round_index + 1 and not settled,
+                "Check only the next round after its base B segment")
+            readiness_checks = readiness_checks + 1
+            local frame = adapter.frame()
+            local path = config.work .. string.format("/round-%d-readiness-%03d.gd", number, readiness_checks)
+            local raw
+            observation = section.observation(frame)
+            observation.image, raw = runtime.image(path, frame)
+            observation.readiness = acting_pixels.read_round_readiness(raw, config.unavailable_move_slots, move_cursor)
+            observation.readiness.frame, observation.readiness.epoch, observation.readiness.path =
+                frame, adapter.epoch(), path
+            pause_plan = acting_plan.round_pause(config, number, frame, adapter.epoch(), observation.readiness.ready)
+            observation.pause_plan, stage = pause_plan, "round-wait"
+        elseif action == "round-settled" then
+            assert(config.stage == 6 and not pending and #args == 1 and stage == "round-wait"
+                and pause_plan and pause_plan.phase == "settle" and tonumber(args[1]) == pause_plan.round,
+                "Complete the ready-screen B delay before the next round visit")
+            acting_plan.finish_pause(pause_plan, api.state, adapter.frame(), adapter.epoch())
+            settled, pause_plan, stage = pause_plan, nil, "ready"
+            observation = section.observation(adapter.frame())
         elseif action == "round-visit" or action == "result-visit" then
             assert(config.stage == 6 and not pending, "Expected one active Acting visit")
             if stage == "perform-round" then finish_round() end
@@ -293,6 +335,9 @@ function M.new(config, runtime)
                 if round_index == 0 then
                     assert(render_prepared and adapter.epoch() == render_epoch and adapter.frame() == render_end_frame,
                         "Render preparation must precede the first fresh judge capture")
+                else
+                    assert(settled and settled.round == round_index + 1 and settled.end_frame == adapter.frame()
+                        and settled.epoch == adapter.epoch(), "Finish the post-readiness B delay before move selection")
                 end
                 round_index, capture_kind = round_index + 1, "round"
             else
@@ -303,6 +348,7 @@ function M.new(config, runtime)
                 {frame = adapter.frame(), epoch = adapter.epoch(), round = round_index, attempt = config.attempt})
             pending = (latest.status == "awaiting_save" or latest.status == "awaiting_ack") and latest or nil
             current_plan, observation, stage = latest.snapshot and latest.snapshot.plan, latest.snapshot, "checkpoint"
+            settled, readiness_checks = nil, 0
         elseif action == "complete" then
             assert(pending and (#args == 6 or #args == 7), "Expected pending checkpoint evidence")
             latest = engine:complete(tonumber(args[2]), {run_id = args[1], visit = tonumber(args[2]),

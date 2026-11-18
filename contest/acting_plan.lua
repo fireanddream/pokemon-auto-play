@@ -50,6 +50,40 @@ local function strongest(moves, eligible, category)
     return selected
 end
 
+function M.mash_steps(timing, frames)
+    assert(type(frames) == "number" and frames >= 1 and frames == math.floor(frames),
+        "B tapping requires a positive whole emulator-frame count")
+    local steps, cycle = {}, timing.mash_hold_frames + timing.mash_release_frames
+    for _ = 1, math.floor(frames / cycle) do
+        steps[#steps + 1] = "B:" .. timing.mash_hold_frames .. ":" .. timing.mash_release_frames
+    end
+    local tail = frames % cycle
+    if tail > timing.mash_hold_frames then
+        steps[#steps + 1] = "B:" .. timing.mash_hold_frames .. ":" .. (tail - timing.mash_hold_frames)
+    elseif tail > 0 then
+        steps[#steps + 1] = "wait:" .. tail
+    end
+    return steps
+end
+
+function M.round_pause(config, number, frame, epoch, ready)
+    assert(number >= 2 and number <= 4 and number == math.floor(number),
+        "Readiness delays apply only between Acting rounds")
+    local values = config.between_round_readiness
+    local phase = ready and "settle" or "retry"
+    local frames = values[phase .. "_frames"]
+    return {round = number, phase = phase, game_seconds = values[phase .. "_game_seconds"],
+        frames = frames, steps = M.mash_steps(config.timing, frames),
+        start_frame = frame, end_frame = frame + frames, epoch = epoch}
+end
+
+function M.finish_pause(plan, state, frame, epoch)
+    assert(plan and state.command_done and state.error == "" and state.stop_reason == "combo_complete"
+        and state.command_start_frame == plan.start_frame and frame == plan.end_frame and epoch == plan.epoch
+        and #state.combo_history == #plan.steps and state.buttons == "" and not state.stylus_touch,
+        "Complete the configured released B segment before another readiness check or move selection")
+end
+
 function M.round(config, number, move_cursor, judge_cursor, frame, stars, moves, acting_order)
     assert(type(stars) == "table" and stars.readable == true and type(stars.counts) == "table" and #stars.counts == 3,
         "Plan each round from three readable judge counts")
@@ -95,16 +129,7 @@ function M.round(config, number, move_cursor, judge_cursor, frame, stars, moves,
         steps[#steps + 1] = button .. ":" .. timing.hold_frames .. ":" .. timing.release_frames
     end
     local mash = config.rounds[number].mash_frames
-    local cycle = timing.mash_hold_frames + timing.mash_release_frames
-    for _ = 1, math.floor(mash / cycle) do
-        steps[#steps + 1] = "B:" .. timing.mash_hold_frames .. ":" .. timing.mash_release_frames
-    end
-    local tail = mash % cycle
-    if tail > timing.mash_hold_frames then
-        steps[#steps + 1] = "B:" .. timing.mash_hold_frames .. ":" .. (tail - timing.mash_hold_frames)
-    elseif tail > 0 then
-        steps[#steps + 1] = "wait:" .. tail
-    end
+    for _, step in ipairs(M.mash_steps(timing, mash)) do steps[#steps + 1] = step end
     local menu_frames = #menu * (timing.hold_frames + timing.release_frames)
     local total = menu_frames + mash
     if number == 4 then

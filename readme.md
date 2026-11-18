@@ -2,7 +2,7 @@
 
 # Summary
 
-[中文说明](中文说明.md)
+[简体中文](中文说明.md)
 
 One night, I was watching TV while passively doing contests for a Flygon and kept getting stumped in dancing. I got fed up, so I set out to make this to have my revenge.
 

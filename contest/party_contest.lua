@@ -29,17 +29,36 @@ function M.new(memory_api, game_code)
         assert(count >= 1 and count <= 6, "The first party Pokemon is unavailable")
         local address = addresses.party
         local personality, flags, stored = read32(address), read16(address + 4), read16(address + 6)
-        local clear, key, total = {}, stored, 0
+        local body_plain = common.get_bits(flags, 1, 1) == 1
+        local invalid_record = common.get_bits(flags, 2, 1) == 1
+        local clear, key, total, raw_total = {}, stored, 0, 0
         for index = 1, 64 do
             local word = read16(address + 6 + index * 2)
-            if common.get_bits(flags, 1, 1) == 0 then
+            raw_total = (raw_total + word) % 0x10000
+            if not body_plain then
                 key = common.lcg32(key, 0x41C64E6D, 0x6073)
                 word = common.xor16(word, math.floor(key / 0x10000))
             end
             clear[index], total = word, (total + word) % 0x10000
         end
-        assert(total == stored and common.get_bits(flags, 2, 1) == 0,
-            "The first Pokemon failed stored-data validation")
+        if total ~= stored or invalid_record then
+            -- Diagnose the already-read words only; never accept the alternate encoding.
+            local alternate_total = raw_total
+            if body_plain then
+                key, alternate_total = stored, 0
+                for _, word in ipairs(clear) do
+                    key = common.lcg32(key, 0x41C64E6D, 0x6073)
+                    alternate_total = (alternate_total + common.xor16(word, math.floor(key / 0x10000))) % 0x10000
+                end
+            end
+            error(string.format(
+                "The first Pokemon failed stored-data validation (game=%s, frame=%d, address=0x%08X, " ..
+                "body_encoding=%s, checksum_matches=%s, invalid_record_flag=%s, hp_plain_flag=%s, " ..
+                "alternate_encoding_checksum_matches=%s, direct_read_frames=0)",
+                game.code, frame, address, body_plain and "plain" or "encrypted", tostring(total == stored),
+                tostring(invalid_record), tostring(common.get_bits(flags, 0, 1) == 1),
+                tostring(alternate_total == stored)))
+        end
         local order = orders[common.get_bits(personality, 13, 5) % 24 + 1]
         local growth = (order:find("A") - 1) * 16
         local attacks = (order:find("B") - 1) * 16

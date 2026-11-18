@@ -28,6 +28,7 @@ SCALAR_SECTIONS = {
         "demo_sample_interval_frames", "native_overlay_settle_host_seconds",
         "acting_transition_b_mash_game_seconds", "transition_mash_hold_frames", "transition_mash_release_frames"),
     "stage6_acting": ("menu_hold_frames", "menu_release_frames", "rounds_1_to_3_b_mash_game_seconds",
+        "round_readiness_retry_b_mash_game_seconds", "round_readiness_settle_b_mash_game_seconds",
         "final_round_and_results_b_mash_game_seconds", "mash_hold_frames", "mash_release_frames",
         "handoff_render_frames", "loaded_state_render_host_seconds"),
     "standalone_dancing": ("first_handoff_offset_frames", "loaded_source_refresh_frames"),

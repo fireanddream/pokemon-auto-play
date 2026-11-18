@@ -195,7 +195,7 @@ class ContestClock:
                     module.read_stars=function() stars_read=stars_read+1
                         local empty=first_judge_capture; first_judge_capture=false
                         acting_read_index=(acting_read_index or 0)+1
-                        local counts=acting_star_counts and acting_star_counts[acting_read_index]
+                        local counts=acting_star_counts and acting_star_counts[acting_fixture_round or acting_read_index]
                             or (empty and {{0,0,0}} or {{0,4,1}})
                         local readable = acting_judge_unreadable ~= true
                         return {{readable=readable,all_empty=counts[1]==0 and counts[2]==0 and counts[3]==0,
@@ -271,6 +271,8 @@ class ContestClock:
         return path
 
     def call(self, action, *args):
+        if action in ("round-readiness", "round-visit"):
+            self.clock.lua.run(f"acting_fixture_round={int(args[0])}; return 'ready'")
         result = self.clock.checkpoint(action, *args)
         if result.get("error"):
             raise AssertionError(result["error"])
@@ -412,13 +414,22 @@ class ContestClock:
             f"acting_star_counts={literal(star_counts)}; acting_read_index=0; return 'ready'")
         if entry_change:
             entry_change(self)
-        self.act_records, self.act_snapshots = [], []
+        self.act_records, self.act_snapshots, self.act_readiness = [], [], []
         plans = []
         for number in range(1, rounds + 1):
             if number > 1:
                 self.clock.lua.run(f"paint_acting_order({positions[number - 1]}); return 'ready'")
             if before_round:
                 before_round(self, number)
+            if number > 1:
+                readiness = self.call("round-readiness", number)["observation"]
+                self.act_readiness.append(readiness)
+                if not readiness["readiness"]["ready"]:
+                    self.act_snapshots.append({**readiness["readiness"], "image": readiness["image"],
+                        "trial": readiness["trial"]})
+                    raise AssertionError("The next Acting round is not ready for move inputs.")
+                self.clock.command("combo", "inputs", *readiness["pause_plan"]["steps"])
+                self.call("round-settled", number)
             pending = self.call("round-visit", number)
             self.act_records.append(pending["checkpoint"])
             self.act_snapshots.append(pending["checkpoint"]["snapshot"])
@@ -1024,7 +1035,7 @@ class PersistentLuaChecks(unittest.TestCase):
         self.assertEqual(harness.boundary["snapshot"]["target"]["ribbon_bit"], 4)
         self.assertEqual(harness.boundary["epoch"], 0)
         counts = harness.counters()
-        self.assertEqual((counts["engines"], counts["stars"]), (1, 4))
+        self.assertEqual((counts["engines"], counts["stars"]), (1, 7))
         self.assertEqual(counts["callbacks"], {"registerbefore": 1, "registerafter": 1, "registermenustart": 1})
         rejected = harness.clock.checkpoint("state-changed", "load", harness.boundary["visit"])
         self.assertIn("Quick-loads are disabled", rejected["error"])
@@ -1059,7 +1070,7 @@ class PersistentLuaChecks(unittest.TestCase):
             self.assertEqual((order["frame"], order["epoch"], order["path"]),
                 (snapshot["image"]["frame"], snapshot["image"]["epoch"], snapshot["image"]["path"]))
             self.assertEqual(order["direct_read_frames"], 0)
-        self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (4, 1))
+        self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (7, 1))
 
     def test_round_four_skips_last_used_move_with_entry_categories_cached(self):
         harness = self.harness()
@@ -1078,7 +1089,7 @@ class PersistentLuaChecks(unittest.TestCase):
         first = harness.act_snapshots[0]["move_categories"]
         self.assertEqual(first["categories"], categories)
         self.assertTrue(all(snapshot["move_categories"] == first for snapshot in harness.act_snapshots))
-        self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (4, 1))
+        self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (7, 1))
 
     def test_contest_reentry_reads_new_categories_from_a_fresh_current_state_capture(self):
         harness = self.harness()
@@ -1115,7 +1126,7 @@ class PersistentLuaChecks(unittest.TestCase):
         plans = harness.act(move_hearts=[6, 1, 4, 3], entry_change=obstruct)
         self.assertEqual([plan["move"] for plan in plans], [3, 4, 3, 4])
         self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
-        self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (4, 1))
+        self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (7, 1))
         snapshot = harness.act_snapshots[0]
         self.assertFalse(snapshot["move_categories"]["readable"])
         self.assertEqual(snapshot["move_categories"]["categories"][0], "unreadable")
@@ -1188,7 +1199,7 @@ class PersistentLuaChecks(unittest.TestCase):
         self.assertEqual(int(harness.clock.lua.run("return tostring(frame)")), snapshot["image"]["frame"])
         self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
 
-    def test_later_unreadable_order_stops_before_any_new_move_inputs(self):
+    def test_later_unreadable_order_blocks_new_move_inputs_without_halting_the_checkpoint_engine(self):
         harness = self.harness()
         harness.prepare_entry()
         harness.dress(0, finish=True)
@@ -1206,6 +1217,86 @@ class PersistentLuaChecks(unittest.TestCase):
         self.assertEqual(snapshot["trial"]["completed_rounds"], 1)
         self.assertEqual(int(harness.clock.lua.run("return tostring(frame)")), snapshot["image"]["frame"])
         self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
+        self.assertEqual(harness.act_readiness[0]["pause_plan"]["phase"], "retry")
+        self.assertEqual(harness.boundary["snapshot"]["trial"]["round"], 1)
+
+    def test_between_round_retries_and_settle_are_silent_in_both_lua_callers(self):
+        for standalone in (False, True):
+            with self.subTest(standalone=standalone):
+                harness = self.harness()
+                harness.prepare_entry()
+                harness.dress(0, finish=True)
+                harness.ranked_dance()
+                if standalone:
+                    plan = stage6_act.acting_plan(host_timeout=300, from_stage5=True,
+                        hold_frames=1, release_frames=1, round_seconds=1, final_seconds=1)
+                    config = {**plan, "run_id": "integrated-check", "work": harness.work,
+                        "source_frame": harness.boundary["frame"], "target": harness.target,
+                        "source_context": {}, "overworld": {"points": [[1, 1, 0, 0, 0]], "reference": {}}}
+                    harness.clock.lua.run(f"assert(loadfile({literal((ROOT / 'contest/stage6_act.lua').as_posix())}))"
+                        f"({literal(config)}); paint_acting_moves({{'Beauty','Tough','Smart','Cute'}}); "
+                        "paint_acting_order(1); first_judge_capture=true; acting_fixture_round=nil; return 'ready'")
+                    harness.call("begin-attempt")
+                    harness.clock.command("advance", 10)
+                    harness.call("render-prepared")
+                    accepted = harness.acknowledge(harness.call("round-visit", 1))
+                    harness.clock.command("combo", "inputs", *accepted["checkpoint"]["snapshot"]["plan"]["steps"])
+                else:
+                    harness.act(rounds=1)
+                before_visit = harness.boundary["visit"]
+                before_messages = harness.clock.lua.run("return table.concat(lua_messages, '\\n')")
+                harness.clock.reset_measurement()
+                harness.clock.lua.run("acting_judge_unreadable=true; pixel(146,244,{132,132,132}); return 'ready'")
+                for reason in ("judges", "moves"):
+                    before = int(harness.clock.lua.run("return tostring(frame)"))
+                    response = harness.call("round-readiness", 2)
+                    snapshot = response["observation"]
+                    self.assertFalse(snapshot["readiness"]["ready"])
+                    self.assertEqual((response["frame"], snapshot["image"]["frame"]), (before, before))
+                    self.assertEqual(response["checkpoint"]["visit"], before_visit)
+                    self.assertTrue(response["checkpoint"]["proceed"])
+                    self.assertEqual(snapshot["pause_plan"]["phase"], "retry")
+                    self.assertEqual(snapshot["pause_plan"]["frames"], round(5 * stage4_dress.FRAME_RATE))
+                    harness.clock.command("combo", "inputs", *snapshot["pause_plan"]["steps"])
+                    if reason == "judges":
+                        harness.clock.lua.run("acting_judge_unreadable=false; return 'ready'")
+                    else:
+                        harness.clock.lua.run("paint_acting_moves({'Beauty','Tough','Smart','Cute'}); "
+                            "pixel(18,244,{132,132,132}); return 'ready'")
+                ready = harness.call("round-readiness", 2)["observation"]
+                self.assertTrue(ready["readiness"]["ready"])
+                self.assertEqual(ready["pause_plan"]["phase"], "settle")
+                self.assertEqual(ready["pause_plan"]["frames"], round(3 * stage4_dress.FRAME_RATE))
+                harness.clock.command("combo", "inputs", *ready["pause_plan"]["steps"])
+                harness.call("round-settled", 2)
+                self.assertEqual(set(harness.clock.trace()), {"", "B"})
+                self.assertEqual(harness.clock.lua.run("return table.concat(lua_messages, '\\n')"), before_messages)
+                harness.clock.lua.run("paint_acting_order(3); return 'ready'")
+                pending = harness.call("round-visit", 2)
+                self.assertEqual(pending["checkpoint"]["visit"], before_visit + 1)
+                snapshot = pending["checkpoint"]["snapshot"]
+                self.assertTrue(snapshot["round_readiness"]["ready"])
+                self.assertEqual(snapshot["plan"]["acting_position"], 3)
+                self.assertEqual(snapshot["image"]["frame"], ready["pause_plan"]["end_frame"])
+                self.assertEqual(snapshot["trial"]["readiness_settle_frames"], round(3 * stage4_dress.FRAME_RATE))
+                self.assertEqual(harness.counters()["moves"], 1)
+
+    def test_next_round_cannot_be_visited_before_the_post_readiness_b_delay(self):
+        for check_first in (False, True):
+            with self.subTest(check_first=check_first):
+                harness = self.harness()
+                harness.prepare_entry()
+                harness.dress(0, finish=True)
+                harness.ranked_dance()
+                harness.act(rounds=1)
+                if check_first:
+                    ready = harness.call("round-readiness", 2)["observation"]
+                    self.assertTrue(ready["readiness"]["ready"])
+                before = int(harness.clock.lua.run("return tostring(frame)"))
+                rejected = harness.clock.checkpoint("round-visit", 2)
+                self.assertIn("error", rejected)
+                self.assertEqual(rejected["frame"], before)
+                self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
 
     def test_multiple_legal_zero_heart_moves_stop_with_a_retained_selection_failure(self):
         harness = self.harness()
@@ -1702,7 +1793,7 @@ class ActingPixelChecks(unittest.TestCase):
                 PLAYER_PANEL_COLORS if position == acting_position else OPPONENT_PANEL_COLORS)
         return image
 
-    def read(self, image, *, order=False, unavailable=()):
+    def read(self, image, *, order=False, unavailable=(), buttons=False, previous_move=1):
         data = image.convert("RGB").tobytes()
         parts = []
         for color, run in groupby(zip(data[0::3], data[1::3], data[2::3])):
@@ -1710,7 +1801,9 @@ class ActingPixelChecks(unittest.TestCase):
             parts.append(f"string.rep(string.char(0,{color[0]},{color[1]},{color[2]}),{count})")
         height = image.height
         raw = f"string.char(255,254,1,0,{height // 256},{height % 256},1,0,0,0,0)..table.concat({{" + ",".join(parts) + "})"
-        call = f"pixels.read_acting_order({raw})" if order else f"pixels.read_move_categories({raw}, {literal(unavailable)})"
+        call = f"pixels.read_acting_order({raw})" if order else (
+            f"pixels.read_move_buttons({raw}, {literal(unavailable)}, {previous_move})" if buttons else
+            f"pixels.read_move_categories({raw}, {literal(unavailable)})")
         return json.loads(self.lua.run(f"return json.encode({call})"))
 
     def test_all_five_native_move_fills_are_readable_in_every_slot(self):
@@ -1835,6 +1928,133 @@ class ActingPixelChecks(unittest.TestCase):
                 self.assertNotIn("position", result)
 
 
+    def test_between_round_menu_checks_exclude_gray_previous_and_empty_slots(self):
+        for previous in range(1, 5):
+            with self.subTest(previous=previous):
+                image = self.image(["Cool", "Beauty", "Cute", "Smart"])
+                empty = previous % 4 + 1
+                for slot in (previous, empty):
+                    image.paste((132, 132, 132), MOVE_BOXES[slot - 1])
+                result = self.read(image, buttons=True, previous_move=previous, unavailable=(empty,))
+                self.assertTrue(result["readable"])
+                self.assertEqual((result["available_count"], result["direct_read_frames"]), (2, 0))
+                self.assertTrue(result["slots"][previous - 1]["unavailable"])
+                self.assertTrue(result["slots"][empty - 1]["unavailable"])
+
+    def test_missing_move_menu_or_conflicting_selectable_fill_is_not_ready(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                image = self.image(["Cool", "Beauty", "Cute", "Smart"])
+                if missing:
+                    image.paste((255, 101, 150), (0, 192, 256, 384))
+                else:
+                    image.putpixel((146, 244), MOVE_FILLS["Cool"])
+                self.assertFalse(self.read(image, buttons=True)["readable"])
+        with self.assertRaisesRegex(AssertionError, "stacked"):
+            self.read(image.crop((0, 0, 256, 192)), buttons=True)
+
+    def test_move_menu_readiness_does_not_replace_cached_scoring_reads(self):
+        image = self.image(["Cool", "Beauty", "Cute", "Smart"])
+        for probes in MOVE_PROBES:
+            image.putpixel(probes[0], (132, 132, 132))
+        image.putpixel((62, 242), MOVE_FILLS["Cool"])
+        self.assertFalse(self.read(image)["readable"])
+        self.assertTrue(self.read(image, buttons=True)["readable"])
+
+
+class ActingReadinessLoopChecks(unittest.TestCase):
+    def loop(self, folder, detections, *, deadline=100):
+        state = {"frame": 1000, "host_seconds": 0, "checks": 0, "settled": []}
+        timing = stage6_act.acting_plan(host_timeout=300)["between_round_readiness"]
+
+        def remaining():
+            if state["host_seconds"] >= deadline:
+                raise TimeoutError("timeout")
+            return deadline - state["host_seconds"]
+
+        controller = SimpleNamespace(live_deadline=deadline, remaining=Mock(side_effect=remaining))
+
+        def command(action, number):
+            if action == "round-settled":
+                state["settled"].append(number)
+                return {}
+            self.assertEqual((action, number), ("round-readiness", 2))
+            state["checks"] += 1
+            ready = detections[min(state["checks"] - 1, len(detections) - 1)]
+            phase = "settle" if ready else "retry"
+            frames = timing[phase + "_frames"]
+            cycle, tail = divmod(frames, 30)
+            steps = ["B:10:20"] * cycle + ([f"B:10:{tail - 10}"] if tail > 10 else [f"wait:{tail}"] if tail else [])
+            path = folder / f"round-2-readiness-{state['checks']:03d}.gd"
+            path.write_bytes(bytes((255, 254, 1, 0, 1, 128, 1, 0, 0, 0, 0)) + bytes((0, 81, 81, 81)) * (256 * 384))
+            return {"observation": {"image": {"path": str(path), "frame": state["frame"], "epoch": 0,
+                "source": "fresh_zero_frame_framebuffer", "direct_read_frames": 0}, "readiness": {"ready": ready},
+                "pause_plan": {"phase": phase, "steps": steps, "end_frame": state["frame"] + frames}}}
+
+        def advance(action, name, *steps, timeout, deadline):
+            self.assertEqual((action, name, timeout, deadline), ("combo", "inputs", None, controller.live_deadline))
+            for step in steps:
+                values = step.split(":")
+                self.assertIn(values[0], ("B", "wait"))
+                state["frame"] += sum(map(int, values[1:]))
+            state["host_seconds"] += 1
+            return {"frame": state["frame"], "stop_reason": "combo_complete"}
+
+        client = SimpleNamespace(command=Mock(side_effect=command))
+        emulator = SimpleNamespace(controller=controller, command=Mock(side_effect=advance))
+        return state, emulator, client
+
+    def test_retries_then_three_second_settle_are_silent_and_retain_each_capture(self):
+        with temporary_directory() as folder:
+            folder = Path(folder)
+            state, emulator, client = self.loop(folder, [False, False, True])
+            images, output = set(), io.StringIO()
+            with redirect_stdout(output):
+                checks = stage6_act.wait_round_ready(emulator, client, folder, images, 2)
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual([check["pause_plan"]["phase"] for check in checks], ["retry", "retry", "settle"])
+            self.assertEqual(state["settled"], [2])
+            self.assertEqual(state["frame"], 1000 + 2 * round(5 * stage4_dress.FRAME_RATE) + round(3 * stage4_dress.FRAME_RATE))
+            self.assertEqual(len(images), 6)
+            for check in checks:
+                path = Path(check["image"]["path"])
+                self.assertTrue(path.is_file() and path.with_suffix(".png").is_file())
+                saved = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+                self.assertEqual(saved["end_frame"], check["pause_plan"]["end_frame"])
+
+    def test_timeout_retains_unreadable_evidence_without_a_round_visit_or_deadline_reset(self):
+        with temporary_directory() as folder:
+            folder = Path(folder)
+            state, emulator, client = self.loop(folder, [False], deadline=2)
+            images, output = set(), io.StringIO()
+            with redirect_stdout(output), self.assertRaises(TimeoutError):
+                stage6_act.wait_round_ready(emulator, client, folder, images, 2)
+            self.assertEqual(output.getvalue(), "")
+            self.assertEqual((state["checks"], state["settled"], emulator.controller.live_deadline), (2, [], 2))
+            self.assertEqual(len(images), 4)
+            self.assertTrue(all(call.args[0] == "round-readiness" for call in client.command.call_args_list))
+            last = json.loads((folder / "round-2-readiness-002.json").read_text(encoding="utf-8"))
+            self.assertFalse(last["readiness"]["ready"])
+
+    def test_section_deadline_also_applies_to_the_post_readiness_delay(self):
+        with temporary_directory() as folder:
+            folder = Path(folder)
+            state, emulator, client = self.loop(folder, [True], deadline=1)
+            with self.assertRaises(TimeoutError):
+                stage6_act.wait_round_ready(emulator, client, folder, set(), 2)
+            self.assertEqual(state["settled"], [])
+            self.assertEqual(state["frame"], 1000 + round(3 * stage4_dress.FRAME_RATE))
+
+    def test_first_round_has_no_readiness_loop(self):
+        with temporary_directory() as folder:
+            folder = Path(folder)
+            state, emulator, client = self.loop(folder, [True])
+            with self.assertRaises(ValueError):
+                stage6_act.wait_round_ready(emulator, client, folder, set(), 1)
+            client.command.assert_not_called()
+            emulator.command.assert_not_called()
+
+
 class ActingMoveChecks(unittest.TestCase):
     def setUp(self):
         self.clock = BridgeClock(ROOT / "lua" / "input_bridge.lua", game_code="CPUJ")
@@ -1868,6 +2088,24 @@ class ActingMoveChecks(unittest.TestCase):
         self.assertEqual(executed["command_start_frame"], plan["start_frame"])
         self.assertEqual(executed["command_end_frame"], plan["end_frame"])
         self.assertEqual(plan["total_frames"], len(expected))
+
+    def test_regional_bases_and_shared_retry_settle_durations(self):
+        for code, base, final in (("CPUJ", 60, 140), ("CPUE", 65, 150)):
+            with self.subTest(code=code):
+                plan = stage6_act.acting_plan(host_timeout=300, from_stage5=True,
+                    timing_profile=super_contest.load_profile(code))
+                self.assertEqual([round_["mash_game_seconds"] for round_ in plan["rounds"]], [base, base, base, final])
+                values = plan["between_round_readiness"]
+                self.assertEqual((values["retry_game_seconds"], values["settle_game_seconds"]), (5, 3))
+                self.assertEqual(values["messages"], "silent")
+                for ready, seconds in ((False, 5), (True, 3)):
+                    pause = json.loads(self.clock.lua.run(f"return json.encode(acting_plan.round_pause({literal(plan)}, "
+                        f"2, frame, 0, {literal(ready)}))"))
+                    self.assertEqual(pause["frames"], round(seconds * stage4_dress.FRAME_RATE))
+                    self.clock.reset_measurement()
+                    self.clock.command("combo", "inputs", *pause["steps"])
+                    self.assertEqual(len(self.clock.trace()), pause["frames"])
+                    self.assertEqual(set(self.clock.trace()), {"", "B"})
 
     def test_four_slot_navigation_executes_minimal_cardinal_paths(self):
         paths = {

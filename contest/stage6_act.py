@@ -1,4 +1,4 @@
-"""Run frame-counted CPUJ Acting, retry slot 5 on ribbon misses, and finish paused."""
+"""Run regional Acting with bounded round readiness, slot-5 retries, and paused finish."""
 
 from __future__ import annotations
 
@@ -87,6 +87,13 @@ def acting_plan(*, host_timeout, hold_frames=None, release_frames=None,
         "retry_render_host_seconds": values["loaded_state_render_host_seconds"],
         "entry_render_method": ("input_bridge_advance_then_fresh_paused_capture" if from_stage5
             else "host_unpause_then_native_pause_and_fresh_capture"),
+        "between_round_readiness": {
+            "retry_game_seconds": values["round_readiness_retry_b_mash_game_seconds"],
+            "retry_frames": round(values["round_readiness_retry_b_mash_game_seconds"] * FRAME_RATE),
+            "settle_game_seconds": values["round_readiness_settle_b_mash_game_seconds"],
+            "settle_frames": round(values["round_readiness_settle_b_mash_game_seconds"] * FRAME_RATE),
+            "checks": "fresh_paused_judges_acting_order_and_selectable_move_button_fills",
+            "deadline": "existing_section_host_deadline", "messages": "silent"},
         "timing": {"hold_frames": hold_frames, "release_frames": release_frames,
             "mash_hold_frames": values["mash_hold_frames"], "mash_release_frames": values["mash_release_frames"],
             "frame_rate": FRAME_RATE, "frame_conversion": "nearest emulator frame at the native frame rate"},
@@ -187,6 +194,34 @@ def retain_capture(snapshot, work, images, *, judges=False):
         images.add(crop)
         result["judges_png"] = str(crop)
     return result
+
+
+def wait_round_ready(emulator, client, work, images, number):
+    """Silently poll before one round visit, then finish the configured B settle delay."""
+    if number not in (2, 3, 4):
+        raise ValueError("Readiness polling applies only between Acting rounds.")
+    controller, checks = emulator.controller, []
+    while True:
+        controller.remaining()
+        response = client.command("round-readiness", number)
+        snapshot = response["observation"]
+        capture = retain_capture(snapshot, work, images)
+        sample = {**snapshot, "image": capture}
+        checks.append(sample)
+        evidence = project_path(capture["path"]).with_suffix(".json")
+        write_json(evidence, sample)
+        controller.remaining()
+        pause = snapshot["pause_plan"]
+        progressed = emulator.command("combo", "inputs", *pause["steps"],
+            timeout=None, deadline=controller.live_deadline)
+        if progressed.get("stop_reason") != "combo_complete" or progressed["frame"] != pause["end_frame"]:
+            raise RuntimeError("The Acting readiness B segment did not reach its configured endpoint.")
+        sample["end_frame"] = progressed["frame"]
+        write_json(evidence, sample)
+        if snapshot["readiness"]["ready"]:
+            controller.remaining()
+            client.command("round-settled", number)
+            return checks
 
 
 def cleanup_images(work, images):
@@ -373,6 +408,7 @@ def run(*, run_name, acting_handoff, overworld_checkpoint, deadline=None, keep_u
             record("render-prepared", attempt=index, **attempt["render_preparation"])
             for number in range(1, 5):
                 controller.remaining()
+                readiness_checks = wait_round_ready(emulator, client, work, images, number) if number > 1 else []
                 pending = client.command("round-visit", number)
                 snapshot = pending["checkpoint"]["snapshot"]
                 capture = retain_capture(snapshot, work, images, judges=True)
@@ -385,6 +421,7 @@ def run(*, run_name, acting_handoff, overworld_checkpoint, deadline=None, keep_u
                 chosen = accepted["checkpoint"]["snapshot"]["plan"]
                 round_result = {"round": number, "image": capture, "stars": snapshot["stars"],
                     "acting_order": snapshot["acting_order"], "plan": chosen,
+                    "readiness_checks": readiness_checks,
                     "checkpoint_visit": accepted["checkpoint"]["visit"]}
                 attempt["rounds"].append(round_result)
                 record("acting-round", attempt=index, round=number, stars=snapshot["stars"]["counts"],
@@ -496,6 +533,9 @@ def run(*, run_name, acting_handoff, overworld_checkpoint, deadline=None, keep_u
                 for attempt in result["attempts"]:
                     for item in attempt["rounds"]:
                         item["image"].update(retained=False, cleanup_manifest=str(work / "image-cleanup.json"))
+                        for sample in item["readiness_checks"]:
+                            sample["image"].update(retained=False, cleanup_manifest=str(work / "image-cleanup.json"))
+                            write_json(project_path(sample["image"]["path"]).with_suffix(".json"), sample)
                         write_json(work / f"attempt-{attempt['attempt']:02d}" / f"round-{item['round']}.json", item)
                     attempt["result_image"].update(retained=False, cleanup_manifest=str(work / "image-cleanup.json"))
                     write_json(work / f"attempt-{attempt['attempt']:02d}" / "attempt-result.json", attempt)

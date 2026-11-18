@@ -234,6 +234,8 @@ def act(runtime, *, attempt):
     runtime.record("render_prepared", **preparation)
     rounds, images, move_categories = [], set(), None
     for number in range(1, 5):
+        readiness_checks = stage6_act.wait_round_ready(runtime.emulator, runtime, runtime.active_work, images, number) \
+            if number > 1 else []
         pending = runtime.command("round-visit", number)
         if not pending["checkpoint"].get("snapshot"):
             runtime.acknowledge(pending, slot=plan["temporary_slot"])
@@ -250,6 +252,7 @@ def act(runtime, *, attempt):
             matching_category_override=chosen["matching_category_override"])
         inputs = runtime.action("combo", "inputs", *chosen["steps"], expected="combo_complete")
         item = {"round": number, "image": capture, "stars": snapshot["stars"], "acting_order": snapshot["acting_order"], "plan": chosen,
+            "readiness_checks": readiness_checks,
             "checkpoint_visit": checked["checkpoint"]["visit"], "end_frame": inputs["frame"]}
         rounds.append(item)
         runtime.json(f"round-{number}.json", item)

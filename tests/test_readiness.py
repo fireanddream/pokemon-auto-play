@@ -1,4 +1,4 @@
-"""Startup advisory thresholds and independently encoded Fashion Case memory."""
+"""Startup advisories, independently encoded memory, and read-only failure details."""
 
 from copy import deepcopy
 import json
@@ -118,6 +118,101 @@ class AccessoryMemoryChecks(unittest.TestCase):
                 self.assertEqual(startup["access"]["direct_read_frames"], 0)
                 self.assertNotIn("accessories", later)
                 self.assertNotIn("options", later)
+
+
+class PartyValidationDiagnosticChecks(unittest.TestCase):
+    def setUp(self):
+        self.lua = Lua51()
+        self.addCleanup(self.lua.close)
+
+    def fixture(self, code, *, actual_plain, flagged_plain, invalid=False, damaged=False):
+        data = 0x02080000
+        address = data + 0xD094
+        words = [0] * 64
+        words[0], words[1], words[13] = 330, 260, 255 * 256
+        words[16:20] = [49, 98, 225, 432]
+        words[44] = 1
+        stored = sum(words) % 0x10000
+        if damaged:
+            words[1] += 1
+        encoded, key = [], stored
+        for word in words:
+            key = (key * 0x41C64E6D + 0x6073) % 0x100000000
+            encoded.append(word if actual_plain else word ^ (key >> 16))
+        data_pointer, trainer_pointer = {
+            "CPUJ": (0x0210112C, 0x021BFB94), "CPUE": (0x02101D2C, 0x021C0794),
+        }[code]
+        values = {data_pointer: data, trainer_pointer: SAVE, data + 0xD090: 1,
+            address: 0, address + 4: 1 + 2 * flagged_plain + 4 * invalid, address + 6: stored,
+            address + 0x8E: 30, address + 0x90: 100}
+        values.update({address + 8 + index * 2: word for index, word in enumerate(encoded)})
+        self.lua.run(f"""
+            values = {literal(values)}
+            reads = 0
+            local function read(address) reads = reads + 1; return values[address] or 0 end
+            local function forbidden() error('Diagnostics must not write memory or control the emulator') end
+            memory = {{readdwordunsigned=read, readword=read, readbyte=read,
+                writebyte=forbidden, writeword=forbidden, writedword=forbidden}}
+            emu = {{frameadvance=forbidden, pause=forbidden, unpause=forbidden}}
+            joypad = {{set=forbidden}}
+            savestate = {{save=forbidden, load=forbidden}}
+            reader = dofile({literal((ROOT / 'contest/party_contest.lua').as_posix())})
+                .new(memory, function() return {literal(code)} end)
+            return 'ready'
+        """)
+
+    def read(self):
+        return json.loads(self.lua.run(f"""
+            local ok, result = pcall(reader.read_first, 77)
+            return dofile({literal((ROOT / 'lua/json.lua').as_posix())})
+                .encode({{ok=ok, result=result, reads=reads}})
+        """))
+
+    def check_failure(self, result, code, *, body_plain, matches, invalid, alternate=False):
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reads"], 71)
+        error = result["result"]
+        for detail in ("The first Pokemon failed stored-data validation", f"game={code}", "frame=77",
+                f"body_encoding={'plain' if body_plain else 'encrypted'}", f", checksum_matches={str(matches).lower()}",
+                f"invalid_record_flag={str(invalid).lower()}", "hp_plain_flag=true",
+                f"alternate_encoding_checksum_matches={str(alternate).lower()}", "direct_read_frames=0"):
+            self.assertIn(detail, error)
+
+    def test_valid_plain_and_encrypted_records_keep_the_original_result(self):
+        for code in ("CPUJ", "CPUE"):
+            for plain in (False, True):
+                with self.subTest(code=code, plain=plain):
+                    self.fixture(code, actual_plain=plain, flagged_plain=plain)
+                    result = self.read()
+                    self.assertTrue(result["ok"])
+                    self.assertEqual(result["reads"], 73)
+                    party = result["result"]
+                    self.assertTrue(party["read_valid"] and party["data_validation_passed"])
+                    self.assertEqual((party["frame"], party["direct_read_frames"]), (77, 0))
+                    self.assertEqual((party["species_id"], party["held_item_id"], party["owned_count"]), (330, 260, 1))
+                    self.assertEqual((party["current_hp"], party["max_hp"], party["sheen"]), (30, 100, 255))
+                    self.assertEqual(party["moves"], [49, 98, 225, 432])
+
+    def test_checksum_failures_report_the_declared_encoding_without_extra_reads(self):
+        for code in ("CPUJ", "CPUE"):
+            for plain in (False, True):
+                with self.subTest(code=code, plain=plain):
+                    self.fixture(code, actual_plain=plain, flagged_plain=plain, damaged=True)
+                    self.check_failure(self.read(), code, body_plain=plain, matches=False, invalid=False)
+
+    def test_invalid_record_flag_is_reported_independently_of_the_checksum(self):
+        for plain in (False, True):
+            for damaged in (False, True):
+                with self.subTest(plain=plain, damaged=damaged):
+                    self.fixture("CPUE", actual_plain=plain, flagged_plain=plain, invalid=True, damaged=damaged)
+                    self.check_failure(self.read(), "CPUE", body_plain=plain, matches=not damaged, invalid=True)
+
+    def test_an_alternate_encoding_match_is_diagnostic_only_and_still_rejected(self):
+        for code in ("CPUJ", "CPUE"):
+            for plain in (False, True):
+                with self.subTest(code=code, actual_plain=plain):
+                    self.fixture(code, actual_plain=plain, flagged_plain=not plain)
+                    self.check_failure(self.read(), code, body_plain=not plain, matches=False, invalid=False, alternate=True)
 
 
 class ReadinessWarningChecks(unittest.TestCase):

@@ -234,6 +234,49 @@ function M.read_acting_order(raw)
     return result
 end
 
+function M.read_move_buttons(raw, unavailable_move_slots, previous_move)
+    assert(validate(raw) == 384, "Move-menu readiness requires a native stacked GD framebuffer")
+    assert(type(previous_move) == "number" and previous_move >= 1 and previous_move <= 4
+        and previous_move == math.floor(previous_move), "Supply the previous move for a between-round menu check")
+    local blocked = {[previous_move] = true}
+    for _, slot in ipairs(unavailable_move_slots or {}) do blocked[slot] = true end
+    local result = {source = "native_selectable_move_button_fills", readable = true,
+        slots = {}, available_count = 0, direct_read_frames = 0}
+    for slot, box in ipairs(move_boxes) do
+        local item = {slot = slot, unavailable = blocked[slot] == true, readable = true, probes = {}}
+        if not item.unavailable then
+            result.available_count = result.available_count + 1
+            -- Lower fill probes establish the menu, not the cached move score/name data.
+            for _, x in ipairs({box[1] + 2, box[3] - 4}) do
+                for _, y in ipairs({box[2] + 28, box[4] - 4}) do
+                    item.probes[#item.probes + 1] = {x, y, rgb(raw, x, y)}
+                end
+            end
+            item.readable = false
+            for _, profile in ipairs(move_profiles) do
+                local matched = true
+                for _, point in ipairs(item.probes) do
+                    matched = matched and same(point[3], point[4], point[5], profile.rgb)
+                end
+                if matched then item.readable = true; break end
+            end
+        end
+        result.slots[slot] = item
+        result.readable = result.readable and item.readable
+    end
+    result.readable = result.readable and result.available_count > 0
+    return result
+end
+
+function M.read_round_readiness(raw, unavailable_move_slots, previous_move, stars, acting_order)
+    stars = stars or M.read_stars(raw)
+    acting_order = acting_order or M.read_acting_order(raw)
+    local moves = M.read_move_buttons(raw, unavailable_move_slots, previous_move)
+    return {ready = stars.readable and acting_order.readable and moves.readable,
+        stars = stars, acting_order = acting_order, move_buttons = moves,
+        source = "fresh_judges_order_and_selectable_move_menu", direct_read_frames = 0}
+end
+
 function M.match_points(raw, points)
     local height = validate(raw)
     assert(type(points) == "table" and #points > 0, "A reviewed screen reference is required")
