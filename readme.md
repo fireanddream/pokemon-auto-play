@@ -1,3 +1,5 @@
+<img width="256" height="191" alt="Pokemon - Platinum Version (Europe)__6257" src="https://github.com/user-attachments/assets/c1e27f96-b5eb-42fd-852b-4a1b2a74cf4d" />
+
 # Summary
 
 One night, I was watching TV while passively doing contests for a Flygon and kept getting stumped in dancing. I got fed up, so I set out to make this to have my revenge.
