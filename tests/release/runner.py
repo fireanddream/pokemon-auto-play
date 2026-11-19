@@ -147,7 +147,9 @@ class ReleaseChecks:
                     raise RuntimeError(f"Release ZIP contains code or timing data outside the main runtime: {name}")
                 if any(part in {"states", "evidence", ".venv", "tmp", ".tmp", "tests", "__pycache__"} for part in path.parts):
                     raise RuntimeError(f"Release ZIP contains private/generated data: {name}")
-                if path.suffix.lower() in {".exe", ".dll", ".nds", ".dsv", ".sav", ".png", ".pyc"} or re.search(r"\.ds[0-9]$", name, re.I):
+                if (path.suffix.lower() in {".exe", ".dll", ".nds", ".dsv", ".sav", ".pyc"}
+                        or path.suffix.lower() == ".png" and name not in RUNTIME_MEMBERS
+                        or re.search(r"\.ds[0-9]$", name, re.I)):
                     raise RuntimeError(f"Release ZIP contains an excluded binary: {name}")
                 if path.suffix in {".py", ".lua", ".json", ".md"}:
                     data = archive.read(name)

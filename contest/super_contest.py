@@ -406,6 +406,8 @@ def check(*, lua_dll=None):
     python_files = [path for path in sources if path.suffix == ".py"] + [launcher_path()]
     lua_files = [path for path in sources if path.suffix == ".lua"]
     check_profiles()
+    with stage4_dress.read_background():
+        pass
     check_sources(python_files, lua_files, lua_dll=lua_dll)
     print("Persistent contest Python/Lua syntax OK")
 

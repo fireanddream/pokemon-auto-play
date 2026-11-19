@@ -62,7 +62,9 @@ the handoff adds zero frames.
 
 1. Make **0-7 random initial down-page taps**, each costing
    **2 held + 1 released + 30 render frames**, before scanning accessories.
-2. Scan each grid center once per fresh paused page: **8x8** by default, also 6x6/7x7.
+2. Scan each full-box grid center once per fresh paused page: **8x8** by default, also
+   6x6/7x7. Compare its middle pixel with the matching position in the inferred
+   [empty-box reference](contest/dress_background.png), including dotted and edge backgrounds.
    Drag detected accessories using **4 pickup / 12 drag / 5 release frames**.
 3. Fit navigation and dressing into **20 game seconds / 1,197 frames** from entry.
    Start another page only if its full tap/release/render cycle fits; otherwise

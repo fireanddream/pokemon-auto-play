@@ -1,6 +1,9 @@
 """Main-run accessory dressing and the fresh Dance 1 entry handoff."""
 
 import math
+from pathlib import Path
+
+from PIL import Image
 
 from contest.dance_timings import fixed_timing
 from contest.inputs import whole
@@ -15,12 +18,23 @@ TRANSITION_SECONDS = _DRESS["dance_transition_a_mash_game_seconds"]
 POLL_SECONDS = _DRESS["dance_entry_poll_game_seconds"]
 AUTO_SECONDS = _DRESS["accessory_budget_game_seconds"]
 DRESS_GRID = 8
+DRESS_BOX = (6, 16, 122, 143)
+DRESS_BACKGROUND = Path(__file__).with_name("dress_background.png")
 PICKUP_FRAMES = _DRESS["accessory_pickup_hold_frames"]
 DRAG_FRAMES = _DRESS["accessory_drag_frames"]
 DRAG_RELEASE_FRAMES = _DRESS["accessory_release_frames"]
 PAGE_WAIT_FRAMES = _DRESS["page_render_wait_frames"]
 INITIAL_PAGE_TAPS = (0, 7)
 PAGE_FLIP_LIMIT = 14
+
+
+def read_background():
+    """Load the full native empty-box reference, independent of the selected grid."""
+    left, top, right, bottom = DRESS_BOX
+    with Image.open(DRESS_BACKGROUND) as image:
+        if image.format != "PNG" or image.mode != "RGB" or image.size != (right - left, bottom - top):
+            raise ValueError("The accessory background must be an RGB PNG matching the full native box.")
+        return image.copy()
 
 
 def dress_plan(*, host_timeout, transition_seconds=None,
@@ -59,14 +73,19 @@ def dress_plan(*, host_timeout, transition_seconds=None,
     initial_page_frames = values["page_tap_hold_frames"] + values["page_tap_release_frames"] + page_wait_frames
     if dress_frames < INITIAL_PAGE_TAPS[1] * initial_page_frames + drag_release_frames:
         raise ValueError("The dressing window must cover initial page navigation and the released-input tail.")
+    left, top, right, bottom = DRESS_BOX
+    centers = [{"row": row + 1, "column": column + 1,
+                "x": math.floor(left + (column + 0.5) * (right - left) / dress_grid + 0.5),
+                "y": math.floor(top + (row + 0.5) * (bottom - top) / dress_grid + 0.5)}
+               for row in range(dress_grid) for column in range(dress_grid)]
+    with read_background() as background:
+        for center in centers:
+            center["background_rgb"] = list(background.getpixel((center["x"] - left, center["y"] - top)))
     automatic = {"enabled": True, "game_seconds": dress_seconds, "budget_frames": dress_frames,
         "frame_rate": FRAME_RATE, "speed_percent": 100, "frame_limit": False, "grid_size": dress_grid,
-        "rectangle": {"left": 14, "top": 35, "right": 114, "bottom": 131},
-        "background_rgb": [121, 247, 215], "background_sample": {"x": 20, "y": 43},
-        "centers": [{"row": row + 1, "column": column + 1,
-                     "x": math.floor(14 + (column + 0.5) * 100 / dress_grid + 0.5),
-                     "y": math.floor(35 + (row + 0.5) * 96 / dress_grid + 0.5)}
-                    for row in range(dress_grid) for column in range(dress_grid)],
+        "rectangle": {"left": left, "top": top, "right": right, "bottom": bottom},
+        "background_reference": {"path": DRESS_BACKGROUND.as_posix(), "source": "inferred_full_box_png"},
+        "centers": centers,
         "destination": {"x": 192, "y": 80},
         "motion": {"pickup_frames": pickup_frames, "drag_frames": drag_frames,
                    "release_frames": drag_release_frames,
@@ -84,7 +103,7 @@ def dress_plan(*, host_timeout, transition_seconds=None,
                                   "heart_rgb": [156, 49, 99], "pearl_rgb": [255, 115, 222]},
                         "Master": {"limit": 20, "x": 208, "y": 128}},
         "indicator_rgb": {"pearl": [8, 189, 239], "heart": [231, 0, 115]},
-        "scan_policy": "one center sample per cell, once per page, from one fresh paused framebuffer",
+        "scan_policy": "one center sample per cell against its reference PNG pixel, once per page, from one fresh paused framebuffer",
         "deadline_policy": f"count emulator frames from Stage 3; Finish when full or after {PAGE_FLIP_LIMIT} collection page flips, otherwise at the frame-budget deadline",
         "drag_success_checks": False}
     mash_frames = round(transition_seconds * FRAME_RATE)
@@ -119,7 +138,8 @@ def place_accessories(emulator, client, plan, work, source_frame, initial_page_t
     """The runtime supplies the shared deadline, save ownership, and speed policy."""
     controller = emulator.controller
     automatic, pages = plan["automatic_dressing"], []
-    summary = {key: automatic[key] for key in ("enabled", "grid_size", "game_seconds", "budget_frames", "motion", "speed_percent", "page_flip_limit")}
+    summary = {key: automatic[key] for key in ("enabled", "grid_size", "game_seconds", "budget_frames", "motion",
+        "speed_percent", "page_flip_limit", "rectangle", "background_reference")}
     pages_path = work / "dress-pages.json"
     summary["pages_manifest"] = str(pages_path)
     navigation = {"chosen_taps": initial_page_taps, "executed_taps": 0, "executed_frames": 0,
@@ -141,7 +161,8 @@ def place_accessories(emulator, client, plan, work, source_frame, initial_page_t
            grid_size=automatic["grid_size"], motion=automatic["motion"], speed_percent=100)
 
     def save_pages():
-        write_json(pages_path, {"grid_size": automatic["grid_size"], "background_rgb": automatic["background_rgb"],
+        write_json(pages_path, {"grid_size": automatic["grid_size"], "rectangle": automatic["rectangle"],
+            "background_reference": automatic["background_reference"], "centers": automatic["centers"],
             "initial_navigation": navigation, "checks": pages})
 
     while True:

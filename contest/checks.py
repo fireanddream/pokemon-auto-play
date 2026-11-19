@@ -21,6 +21,7 @@ RUNTIME_SOURCES = {
         "stage1_load.py", "stage2_bag.py", "stage2_prep.py", "stage3_enter.py", "stage4_dress.py", "stage6_act.py",
         "super_contest.py", "timing_profiles.py", "timing_profiles/CPUJ.json", "timing_profiles/CPUE.json",
         "acting_pixels.lua", "acting_plan.lua", "bag_contest.lua", "dance_pixels.lua", "dress_pixels.lua",
+        "dress_background.png",
         "memory_boundary.lua", "party_contest.lua", "rank_dance.lua", "resource_root.lua", "screen_checks.lua",
         "sections.lua", "stage4_dress.lua", "super_contest.lua",
     ),
@@ -94,6 +95,7 @@ def validate_installation(program, rom, *, root=ROOT):
     if os.name != "nt":
         raise RuntimeError("The emulator-control backend currently requires Windows.")
     from PIL import Image
+    from contest.stage4_dress import read_background
 
     root = Path(root).resolve()
     program, rom = Path(program).resolve(), Path(rom).resolve()
@@ -109,8 +111,10 @@ def validate_installation(program, rom, *, root=ROOT):
         _require_file(root / relative)
     _require_file(launcher_path(root))
     for name in ("super_contest.py", "super_contest.lua", "checks.py",
-                 "timing_profiles/CPUJ.json", "timing_profiles/CPUE.json"):
+                 "timing_profiles/CPUJ.json", "timing_profiles/CPUE.json", "dress_background.png"):
         _require_file(HERE / name)
+    with read_background():
+        pass
     battery = program.parent / "Battery" / f"{rom.stem}.dsv"
     _require_file(battery)
     if not battery.stat().st_size:

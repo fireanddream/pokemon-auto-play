@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 from zipfile import ZipFile
 
-from tests.support.paths import temporary_directory
+from tests.support.paths import ROOT, temporary_directory
 from tests.release import runner as release_runner
 from tools import package_contest, prepare_dependencies
 
@@ -47,7 +47,10 @@ class ReleasePackagingChecks(unittest.TestCase):
             for name in names:
                 path = self.root / folder / name
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("{}\n" if path.suffix == ".json" else "fixture\n", encoding="utf-8", newline="\n")
+                if path.suffix == ".png":
+                    path.write_bytes((ROOT / folder / name).read_bytes())
+                else:
+                    path.write_text("{}\n" if path.suffix == ".json" else "fixture\n", encoding="utf-8", newline="\n")
         (self.root / "contest/dance_timings.json").write_text("{}\n", encoding="utf-8", newline="\n")
         (self.root / "contest/retired_runner.py").write_text("raise RuntimeError('not shipped')\n", encoding="utf-8", newline="\n")
         (self.root / "wheels/fixture.whl").write_bytes(b"synthetic wheel placeholder")
@@ -82,6 +85,9 @@ class ReleasePackagingChecks(unittest.TestCase):
             self.assertIn("contest/wheels/fixture.whl", names)
             self.assertIn("contest/wheels/manifest.json", names)
             self.assertIn("contest/readme.md", names)
+            self.assertIn("contest/dress_background.png", names)
+            self.assertEqual(archive.read("contest/dress_background.png"),
+                (ROOT / "contest/dress_background.png").read_bytes())
             self.assertNotIn("contest/readme.txt", names)
             self.assertNotIn("contest/requirements.txt", names)
             self.assertNotIn("contest/dance_timings.json", names)
@@ -108,7 +114,9 @@ class ReleaseWheelCoverageChecks(unittest.TestCase):
             for name in ("readme.md", "ALGORITHM.md", "buyable-poffin-guide.md"):
                 archive.writestr("contest/" + name, "# Fixture document\n")
             for name in release_runner.RUNTIME_MEMBERS:
-                archive.writestr(name, "{}\n" if Path(name).suffix == ".json" else "fixture\n")
+                content = (ROOT / name).read_bytes() if Path(name).suffix == ".png" else (
+                    "{}\n" if Path(name).suffix == ".json" else "fixture\n")
+                archive.writestr(name, content)
             archive.writestr("contest/wheels/manifest.json", json.dumps(manifest) + "\n")
             for version in wheel_versions:
                 archive.writestr("contest/wheels/" + wheel_name(version), synthetic_wheel())
@@ -130,6 +138,14 @@ class ReleaseWheelCoverageChecks(unittest.TestCase):
         self.checks.inspect_archive(self.make_archive(versions, versions))
         self.assertEqual(self.checks.result["bundled_python_versions"], list(versions))
         self.assertEqual(self.checks.result["bundled_wheels"], [wheel_name(version) for version in versions])
+
+    def test_unlisted_png_is_still_excluded_from_the_release(self):
+        versions = prepare_dependencies.PYTHON_VERSIONS
+        archive = self.make_archive(versions, versions)
+        with ZipFile(archive, "a") as output:
+            output.writestr("contest/private-capture.png", b"private capture")
+        with self.assertRaisesRegex(RuntimeError, "excluded binary"):
+            self.checks.inspect_archive(archive)
 
 
 class CachedWheelPreparationChecks(unittest.TestCase):

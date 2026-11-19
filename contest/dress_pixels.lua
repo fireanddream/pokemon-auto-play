@@ -1,4 +1,4 @@
--- One center sample per accessory cell and one rank-dependent heart/pearl sample.
+-- One reference-matched center per accessory cell and one rank-dependent heart/pearl sample.
 local M = {}
 
 local function rgb(raw, x, y)
@@ -27,12 +27,13 @@ function M.read_page(raw, settings, rank)
         grid_size = settings.grid_size, readable = label ~= "unreadable", full = label == "heart",
         last_indicator = {x = last.x, y = last.y, rgb = {r, g, b}, label = label,
             heart_rgb = heart, pearl_rgb = pearl},
-        background_rgb = settings.background_rgb, cells = {}, items = {}}
+        rectangle = settings.rectangle, background_reference = settings.background_reference, cells = {}, items = {}}
     for index, center in ipairs(settings.centers) do
         r, g, b = rgb(raw, center.x, center.y + 192)
-        local empty = same(r, g, b, settings.background_rgb)
+        local expected = assert(center.background_rgb, "Accessory centers require their empty-box reference RGB")
+        local empty = same(r, g, b, expected)
         result.cells[index] = {row = center.row, column = center.column,
-            x = center.x, y = center.y, rgb = {r, g, b}, empty = empty}
+            x = center.x, y = center.y, rgb = {r, g, b}, background_rgb = expected, empty = empty}
         if not empty then
             result.items[#result.items + 1] = {x = center.x, y = center.y,
                 row = center.row, column = center.column}

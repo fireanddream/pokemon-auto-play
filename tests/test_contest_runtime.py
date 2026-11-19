@@ -1614,7 +1614,7 @@ class PersistentLuaChecks(unittest.TestCase):
                 harness.begin(4, plan, initial_page_taps=initial_taps)
                 harness.call("init")
                 harness.clock.lua.run("for _,center in ipairs(" + literal(automatic["centers"]) + ") do "
-                    "pixel(center.x,center.y+192," + literal(automatic["background_rgb"]) + ") end; "
+                    "pixel(center.x,center.y+192,center.background_rgb) end; "
                     f"pixel({check['x']},{check['y']},{literal(pearl)}); return 'ready'")
                 commands = []
 
@@ -1770,6 +1770,116 @@ class DressUpPixelChecks(unittest.TestCase):
         image = Image.new("RGB", (256, 384), (81, 81, 81))
         image.paste((255, 101, 150), (194, 350, 249, 376))
         self.assertFalse(self.read(image, "Normal")["confirmed"])
+
+
+class AccessoryGridPixelChecks(unittest.TestCase):
+    def setUp(self):
+        self.lua = Lua51()
+        self.addCleanup(self.lua.close)
+        self.lua.run(f"pixels=dofile({literal((ROOT / 'contest/dress_pixels.lua').as_posix())}); "
+            f"json=dofile({literal((ROOT / 'lua/json.lua').as_posix())}); return 'ready'")
+
+    def background(self):
+        green, pale, white = (121, 247, 215), (182, 255, 239), (223, 255, 255)
+        image = Image.new("RGB", (116, 127), (121, 81, 113))
+        for x in (0, 115):
+            image.putpixel((x, 0), (255, 56, 174))
+        for box in ((5, 2, 111, 3), (4, 3, 112, 4), (5, 124, 111, 125)):
+            image.paste(white, box)
+        image.paste(green, (4, 4, 112, 124))
+        edges = {20: (white, pale), 21: (pale, white), 22: (green, pale), 23: (pale, green),
+                 136: (pale, green), 137: (green, pale), 138: (pale, white), 139: (white, pale)}
+        for y, colors in edges.items():
+            for x in range(10, 118):
+                image.putpixel((x - 6, y - 16), colors[x % 2])
+        dot = ((None, pale, pale, None), (pale, white, white, pale),
+               (pale, white, white, pale), (None, pale, pale, None))
+        for left in range(14, 111, 8):
+            for dy, row in enumerate(dot):
+                for dx, color in enumerate(row):
+                    if color is not None:
+                        image.putpixel((left + dx - 6, 25 + dy - 16), color)
+        return image
+
+    def image(self, settings):
+        image = Image.new("RGB", (256, 384), (0, 0, 0))
+        with self.background() as background:
+            image.paste(background, (6, 208))
+        check = settings["full_checks"]["Master"]
+        image.putpixel((check["x"], check["y"]), tuple(settings["indicator_rgb"]["pearl"]))
+        return image
+
+    def read(self, image, settings):
+        data = image.convert("RGB").tobytes()
+        parts = []
+        for color, run in groupby(zip(data[0::3], data[1::3], data[2::3])):
+            count = sum(1 for _ in run)
+            parts.append(f"string.rep(string.char(0,{color[0]},{color[1]},{color[2]}),{count})")
+        raw = "string.char(255,254,1,0,1,128,1,0,0,0,0)..table.concat({" + ",".join(parts) + "})"
+        return json.loads(self.lua.run(f"local page=pixels.read_page({raw},{literal(settings)},'Master'); "
+            "page.cells=setmetatable(page.cells,json.array_metatable); "
+            "page.items=setmetatable(page.items,json.array_metatable); return json.encode(page)"))
+
+    def test_reference_contains_the_entire_clean_box_not_only_grid_samples(self):
+        with stage4_dress.read_background() as actual, self.background() as expected:
+            self.assertEqual((actual.mode, actual.size), ("RGB", (116, 127)))
+            self.assertEqual(actual.info["touchscreen_origin"], "6,16")
+            self.assertEqual(actual.tobytes(), expected.tobytes())
+
+    def test_full_box_centers_match_background_for_every_supported_grid(self):
+        corners = {6: ((16, 27), (112, 132)), 7: ((14, 25), (114, 134)), 8: ((13, 24), (115, 135))}
+        for grid, (first, last) in corners.items():
+            with self.subTest(grid=grid):
+                settings = stage4_dress.dress_plan(host_timeout=300, dress_grid=grid)["automatic_dressing"]
+                centers = settings["centers"]
+                self.assertEqual(settings["rectangle"], {"left": 6, "top": 16, "right": 122, "bottom": 143})
+                self.assertEqual(len(centers), grid * grid)
+                self.assertEqual((centers[0]["x"], centers[0]["y"]), first)
+                self.assertEqual((centers[-1]["x"], centers[-1]["y"]), last)
+                with self.background() as background:
+                    for center in centers:
+                        self.assertEqual(center["background_rgb"],
+                            list(background.getpixel((center["x"] - 6, center["y"] - 16))))
+                page = self.read(self.image(settings), settings)
+                self.assertEqual(page["items"], [])
+                self.assertEqual(len(page["cells"]), grid * grid)
+                self.assertTrue(all(cell["empty"] for cell in page["cells"]))
+                self.assertTrue(page["readable"])
+                self.assertFalse(page["full"])
+                self.assertEqual(page["direct_read_frames"], 0)
+                self.assertEqual(page["background_reference"], settings["background_reference"])
+
+    def test_only_changed_center_pixels_queue_drags_including_dots_and_edges(self):
+        for grid in (6, 7, 8):
+            with self.subTest(grid=grid):
+                settings = stage4_dress.dress_plan(host_timeout=300, dress_grid=grid)["automatic_dressing"]
+                centers = settings["centers"]
+                first = next((center for center in centers if center["background_rgb"] != [121, 247, 215]), centers[0])
+                edge = centers[-1]
+                image = self.image(settings)
+                color = (121, 247, 215) if first["background_rgb"] != [121, 247, 215] else (255, 0, 0)
+                image.putpixel((first["x"], first["y"] + 192), color)
+                image.putpixel((edge["x"], edge["y"] + 192), (255, 0, 0))
+                neighbor = (first["x"] + 1, first["y"])
+                self.assertNotIn(neighbor, {(center["x"], center["y"]) for center in centers})
+                image.putpixel((neighbor[0], neighbor[1] + 192), (255, 0, 0))
+                page = self.read(image, settings)
+                self.assertEqual(page["items"], [{key: center[key] for key in ("x", "y", "row", "column")}
+                    for center in (first, edge)])
+                self.assertEqual(sum(not cell["empty"] for cell in page["cells"]), 2)
+                self.assertEqual(page["direct_read_frames"], 0)
+
+    def test_missing_or_wrong_native_background_is_rejected(self):
+        with temporary_directory() as folder:
+            path = Path(folder) / "background.png"
+            with patch.object(stage4_dress, "DRESS_BACKGROUND", path):
+                with self.assertRaises(FileNotFoundError):
+                    stage4_dress.dress_plan(host_timeout=300)
+                for mode, size in (("RGB", (116, 126)), ("RGBA", (116, 127))):
+                    with self.subTest(mode=mode, size=size):
+                        Image.new(mode, size).save(path)
+                        with self.assertRaisesRegex(ValueError, "RGB PNG"):
+                            stage4_dress.dress_plan(host_timeout=300)
 
 
 class ActingPixelChecks(unittest.TestCase):
