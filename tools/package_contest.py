@@ -12,7 +12,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-CODE_SUFFIXES = {".py", ".lua", ".json"}
+from contest.checks import RUNTIME_SOURCES
 
 
 def release_readme():
@@ -45,19 +45,13 @@ def stage_release(destination):
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
 
-    for folder in ("contest", "host", "lua"):
-        for source in sorted((ROOT / folder).iterdir()):
-            if source.is_file() and source.suffix in CODE_SUFFIXES:
-                copy(source)
-    for source in sorted((ROOT / "contest/timing_profiles").glob("*.json")):
-        copy(source)
+    for folder, names in RUNTIME_SOURCES.items():
+        for name in names:
+            copy(ROOT / folder / name)
     copy(ROOT / "contest" / "debug" / ".gitkeep")
     copy(wheels / "manifest.json")
     for name in json.loads((wheels / "manifest.json").read_text(encoding="utf-8"))["wheels"]:
         copy(wheels / name)
-    copy(ROOT / "lua" / "PLATINUM-LICENSE.txt")
-    for name in ("region-memory-results.txt", "scarf-test-results.txt"):
-        copy(ROOT / "contest" / name)
     algorithm = (ROOT / "ALGORITHM.md").read_text(encoding="utf-8")
     algorithm = algorithm.replace("](run_contest.py)", "](../run_contest.py)").replace("](contest/", "](")
     (support / "ALGORITHM.md").write_text(algorithm, encoding="utf-8", newline="\n")

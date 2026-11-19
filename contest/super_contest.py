@@ -16,7 +16,7 @@ import time
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from contest import rank_dance, sections, stage1_load, stage2_prep, stage3_enter, stage4_dress, stage5_dance, stage6_act
+from contest import rank_dance, sections, stage1_load, stage2_prep, stage3_enter, stage4_dress, stage6_act
 from contest.artifacts import cleanup_run_folders
 from contest.dance_timings import all_fixed_timings
 from contest.runtime import ACTING_ENTRY_SLOT, DIAGNOSTIC_SLOT, ContestRuntime, checkpoint_identity
@@ -43,7 +43,7 @@ acting_round_seconds = stage6_act.ROUND_SECONDS
 acting_final_seconds = stage6_act.FINAL_SECONDS
 OSD_SETTLE_SECONDS = section(None, "stage5_dancing")["native_overlay_settle_host_seconds"]
 STAGES = {1: stage1_load, 2: stage2_prep, 3: stage3_enter,
-          4: stage4_dress, 5: stage5_dance, 6: stage6_act}
+          4: stage4_dress, 5: rank_dance, 6: stage6_act}
 
 
 def chain_plan(*, debug=debug,
@@ -67,20 +67,19 @@ def chain_plan(*, debug=debug,
     if isinstance(offset_frames, bool) or not isinstance(offset_frames, int):
         raise ValueError("The dance input offset must be whole emulator frames.")
     acting = stage6_act.acting_plan(host_timeout=stage_timeout, round_seconds=acting_round_seconds,
-        final_seconds=acting_final_seconds, from_stage5=True, uncapped=True, source_slot=ACTING_ENTRY_SLOT, timing_profile=profile)
-    dressing = stage4_dress.dress_plan(host_timeout=stage_timeout, from_stage3=True,
+        final_seconds=acting_final_seconds, timing_profile=profile)
+    dressing = stage4_dress.dress_plan(host_timeout=stage_timeout,
         dress_grid=dress_grid, dress_seconds=dress_seconds, pickup_frames=dress_pickup_frames,
         drag_frames=dress_drag_frames, drag_release_frames=dress_release_frames,
         page_wait_frames=dress_page_wait_frames, timing_profile=profile)
     acting_round_seconds = acting["rounds"][0]["mash_game_seconds"]
     acting_final_seconds = acting["rounds"][-1]["mash_game_seconds"]
-    dressing["automatic_dressing"]["frame_limit"] = False
-    facts = {1: "Twelve central player/receptionist pixels; one paused Options/Bag/party/accessory snapshot confirms Text Speed = Fast, HP > 0, Sheen > 0, at least two moves, and not an Egg; startup warnings cover accessory copies < 10, Sheen < 255, and missing scarves.",
-        2: "Validated first-party ribbon flags, ordered Items pocket, and required held-item result.",
+    facts = {1: "Twelve central player/receptionist pixels after X/read/X; one paused Options/Bag/party/accessory snapshot confirms Text Speed = Fast, HP > 0, Sheen > 0, at least two moves, and not an Egg; startup warnings cover accessory copies < 10, Sheen < 255, and missing scarves.",
+        2: "Reuse the accepted X-protected party/Items snapshot to select the ribbon and plan scarf inputs; no post-equip memory read.",
         3: "All 5/10/15/20 rank-selected empty accessory slots on the native top screen; no button or text matching.",
         4: "Zero-frame Stage 3 handoff, fresh accessory grid/rank marker, counted dressing deadline, and a readable green Dance 1 demo pointer.",
         5: "Fixed category/rank metrics and cue spacing, early-targeted midpoints, non-fatal cue/input skips, one first-button feedback result, six counted responses, input-free lead dances, and the scripted B transition.",
-        6: "Profile-selected counted input-free entry frames, confirmed native pause, all 15 empty star slots and available move categories matched in the first capture, four fresh judge readings, completed contest, overworld, and target ribbon."}
+        6: "Reuse accepted party facts; prepare rendering input-free, confirm native pause and all 15 empty star slots, cache move categories/hearts once per attempt, read judges/order each round, then X/read party and Bag/X after every completed contest before the closed-menu overworld check."}
     return {"game": profile["game_code"], "timing_profile": profile, "debug": debug,
         "uncapped": True, "total_timeout_seconds": total_timeout, "stage_timeout_seconds": stage_timeout,
         "runtime": {"host_callers": 1, "lua_windows": 1, "lua_attachments": 1, "checkpoint_engines": 1,
@@ -90,9 +89,6 @@ def chain_plan(*, debug=debug,
         "deadline_policy": "fresh stage budget per visit, capped by the original whole-run deadline",
         "native_osd_settle_host_seconds": osd_settle_seconds,
         "dance_offset_frames": offset_frames,
-        "dance_pointer_calibration_frames": 0,
-        "dance_observation_policy": "scheduled",
-        "dance_first_feedback_policy": "warn_and_continue",
         "dance_timings": all_fixed_timings(timing_profile=profile), "dance_rank_selection": "current accepted contest target.category and target.rank",
         "dance_midpoint_policy": "target x=127 with floored travel; correct early captures input-free, re-anchor at fresh midpoints, and skip unusable inputs locally",
         "dance_feedback_policy": "check only Dance 1's first input with bounded recovery; recognize the Excellent bubble palette, count every other feedback outcome as Miss, warn and continue; skipped inputs remain separately accounted",
@@ -403,21 +399,13 @@ def wait(run_name):
 
 
 def check(*, lua_dll=None):
-    from contest.checks import check_sources, launcher_path
-    from contest import artifacts, dance_timings, messages, platinum, rank_dance, runtime, timing_profiles
-    from host import controller, dialogs
+    from contest.checks import RUNTIME_SOURCES, check_sources, launcher_path
 
-    modules = (*STAGES.values(), sections, artifacts, dance_timings, messages, platinum,
-        rank_dance, runtime, timing_profiles, controller, dialogs)
-    python_files = [Path(module.__file__) for module in modules]
-    python_files.extend((Path(__file__), launcher_path(), HERE / "checks.py"))
-    python_files.extend(ROOT / "host" / name for name in ("bootstrap.py", "lua51.py", "windows.py"))
+    directories = {"contest": HERE, "host": ROOT / "host", "lua": ROOT / "lua"}
+    sources = [directories[folder] / name for folder, names in RUNTIME_SOURCES.items() for name in names]
+    python_files = [path for path in sources if path.suffix == ".py"] + [launcher_path()]
+    lua_files = [path for path in sources if path.suffix == ".lua"]
     check_profiles()
-    names = ("resource_root.lua", "super_contest.lua", "sections.lua", "acting_plan.lua", "stage1_load.lua",
-        "stage2_prep.lua", "bag_contest.lua", "party_contest.lua", "stage3_enter.lua", "stage4_dress.lua",
-        "dress_pixels.lua", "dance_master.lua", "rank_dance.lua", "dance_pixels.lua", "stage6_act.lua", "screen_checks.lua")
-    lua_files = [HERE / name for name in names]
-    lua_files.extend(sorted((ROOT / "lua").glob("*.lua")))
     check_sources(python_files, lua_files, lua_dll=lua_dll)
     print("Persistent contest Python/Lua syntax OK")
 

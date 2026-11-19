@@ -1,6 +1,7 @@
-"""Contest deadlines, standalone helpers, and the master-owned persistent runtime."""
+"""The main contest runner's connection, deadlines, native helpers, and cleanup."""
 
 import filecmp
+import json
 from pathlib import Path
 import shutil
 import time
@@ -73,25 +74,103 @@ class TimedSlots(StateSlots):
         return super().load(slot, refresh=refresh, timeout=timeout, checkpoint_visit=checkpoint_visit)
 
 
-def setup_speed(emulator, *, inherited_uncapped=False):
-    if inherited_uncapped:
-        return {**emulator.set_frame_limit(False), "source": "accepted_chain_speed"}
-    return emulator.restore_normal_speed()
+def lua_value(value):
+    if value is None:
+        return "nil"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=True)
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, (list, tuple)):
+        return "{" + ",".join(lua_value(item) for item in value) + "}"
+    if isinstance(value, dict):
+        return "{" + ",".join(f"[{lua_value(key)}]={lua_value(item)}" for key, item in value.items()) + "}"
+    raise TypeError(type(value).__name__)
 
 
-def finish_speed(emulator, *, handoff=False):
-    return emulator.set_frame_limit(False) if handoff else emulator.restore_normal_speed()
+def attach(controller, attachment):
+    """Attach the persistent bridge once and wait for its fresh ready publication."""
+    session = controller.session()
+    old_dialog = session.get("lua_window", 0)
+    if controller.USER32.IsWindow(old_dialog):
+        stop_button = controller.USER32.GetDlgItem(old_dialog, 312)
+        if stop_button and controller.USER32.IsWindowEnabled(stop_button):
+            controller.send(old_dialog, 0x111, 312, stop_button)
+            while controller.USER32.IsWindowEnabled(stop_button):
+                controller.remaining()
+                time.sleep(0.01)
+    started = time.time_ns()
+    controller.load_lua(attachment)
+    dialog = controller.session()["lua_window"]
+    stop_button = controller.USER32.GetDlgItem(dialog, 312)
+    if not controller.USER32.IsWindowEnabled(stop_button):
+        controller.send(dialog, 0x111, 311, controller.USER32.GetDlgItem(dialog, 311))
+    while True:
+        controller.remaining()
+        try:
+            ready = controller.STATUS.stat().st_mtime_ns >= started
+            status = json.loads(controller.STATUS.read_text(encoding="utf-8"))
+        except (FileNotFoundError, PermissionError, json.JSONDecodeError):
+            ready, status = False, {}
+        if ready and status.get("bridge") == "pt-super-contest" and status.get("checkpoint_protocol") == 1:
+            break
+        time.sleep(0.01)
+    controller.set_pause(True)
+
+
+def settle_native_osd(controller, seconds):
+    """Let native messages expire while the accepted game frame remains paused."""
+    started = time.monotonic()
+    if seconds:
+        controller.set_pause(True)
+        until = time.monotonic() + seconds
+        while time.monotonic() < until:
+            time.sleep(min(controller.remaining(), max(0, until - time.monotonic())))
+        if not controller.paused(controller.session()):
+            controller.set_pause(True)
+            raise RuntimeError("Native pause was lost while settling the save overlay.")
+    return time.monotonic() - started
+
+
+def settle_native_overlay(controller, capture, seconds, *, name):
+    """Bind a paused host wait to fresh released-input captures at one frame/epoch."""
+    if not seconds:
+        return None
+    message = "Native overlay settling must retain released inputs and a fresh capture at the same paused frame and epoch."
+
+    def confirmed_image(packet):
+        observation, image = packet["observation"], packet["observation"]["image"]
+        if (packet.get("emulator_paused") is not True or observation.get("released") is not True
+                or image["frame"] != packet["frame"] or image["epoch"] != packet["epoch"]
+                or image["source"] != "fresh_zero_frame_framebuffer"
+                or image["capture_callback"] != "paused_lua_menu" or image["direct_read_frames"] != 0):
+            raise RuntimeError(message)
+        return image
+
+    before = capture(f"overlay-before-{name}")
+    before_image = confirmed_image(before)
+    elapsed = settle_native_osd(controller, seconds)
+    after = capture(f"overlay-settled-{name}")
+    image = confirmed_image(after)
+    if after["frame"] != before["frame"] or after["epoch"] != before["epoch"]:
+        raise RuntimeError(message)
+    return {"section": name, "method": "paused_native_save_overlay_wait",
+        "requested_host_seconds": seconds, "elapsed_host_seconds": elapsed, "emulator_frames": 0,
+        "emulator_paused": True, "input_policy": "none", "frame": after["frame"], "epoch": after["epoch"],
+        "before": before_image, "capture": image}
 
 
 def automatic_review(request, check):
-    """Only readable local pixel evidence can bypass the external paused review."""
+    """Retain and return the confirmed local pixel verdict, or False if unreadable."""
     if check.get("source") != "local_reference_pixels" or check.get("confirmed") is not True:
         return False
     review = {key: request[key] for key in ("run_id", "frame", "epoch")}
     review.update(verdict="pass", source="local_reference_pixels", pixel_check=check,
                   note=f"Fresh paused {check['expected']} pixels match the reviewed native reference.")
     write_json(Path(request["review_path"]), review)
-    return True
+    return review
 
 
 class ContestRuntime:
@@ -99,13 +178,13 @@ class ContestRuntime:
 
     def __init__(self, run_id, work, settings, started, *, controller=None):
         self.run_id, self.work, self.settings, self.started = run_id, Path(work), settings, started
-        self.total_deadline = started + settings["total_timeout_seconds"] if settings.get("host_timeouts_enabled", True) else None
+        self.total_deadline = started + settings["total_timeout_seconds"]
         self.controller = controller or TimedController(ControllerConfig(rom=ROM))
         self.controller.live_deadline = self.total_deadline
         self.emulator = DeSmuME(self.controller)
-        self.native_saves_enabled = settings["save_policy"].get("enabled", True)
+        self.native_saves_enabled = settings["save_policy"]["enabled"]
         self.emulator.states = TimedSlots(self.controller, saves_enabled=self.native_saves_enabled,
-            loads_enabled=settings["save_policy"].get("loads_enabled", True))
+            loads_enabled=False)
         self.client = CheckpointClient(self.emulator, self.work, run_id)
         self.owned = self.attached = self.finalized = False
         self.originals, self.accepted_slots = {}, {}
@@ -113,11 +192,9 @@ class ContestRuntime:
         self.target, self.party, self.overworld = None, None, None
         self.unavailable_move_slots = None
         self.bag_context = {"opened_once": False, "cursor_position": 1}
-        self.dance_handoff = None
         self.active_work, self.stage, self.section_visit = self.work, None, None
         self.stage_started, self.stage_deadline = started, self.total_deadline
         self.rendering_before, self.speed_phase = None, None
-        self.artifacts = None
         self.lifecycle = {"lua_attachments": 0, "checkpoint_engines": 0,
                           "speed_transitions": [], "terminal_cleanups": 0}
         self.on_progress = None
@@ -162,22 +239,15 @@ class ContestRuntime:
         if self.on_progress is not None:
             self.on_progress(phase, stage=self.stage, section_visit=self.section_visit, **details)
 
-    def register(self, path, *, kind="scratch", protected=False):
-        if self.artifacts is not None:
-            self.artifacts.register(path, kind=kind, protected=protected)
-        return Path(path)
-
     def json(self, name, value):
         path = self.active_work / name
         write_json(path, value)
         return path
 
     def lua(self, name, value):
-        from contest.dance_master import lua_value
-
         path = self.active_work / name
         path.write_text("return " + lua_value(value) + "\n", encoding="utf-8", newline="\n")
-        return self.register(path, kind="generated_configuration")
+        return path
 
     def validate_startup(self):
         game = identify_rom(self.controller.ROM)
@@ -193,15 +263,10 @@ class ContestRuntime:
         self.settings["game_language_tested"] = game["tested"]
         return game, battery
 
-    def setup(self, *, resume_measurement=False, fresh_start=False):
-        from contest.dance_master import attach
-
+    def setup(self, *, fresh_start=False):
         self.check()
         game, battery = self.validate_startup()
         existing = None if fresh_start else self.confirm_ownership()
-        if resume_measurement and (existing is None or self.settings.get("mode") != "measurement"
-                or not self.settings.get("resume_paused")):
-            raise RuntimeError("Paused continuation belongs to an existing measurement emulator.")
         if existing is None:
             if fresh_start:
                 self.controller.launch(self.controller.ROM, check_existing=False)
@@ -229,13 +294,11 @@ class ContestRuntime:
         attachment = Path(__file__).resolve().with_name("super_contest.lua")
         mailbox = self.controller.config.mailbox_dir
         if mailbox != ROOT / "tmp":
-            from contest.dance_master import lua_value
-
             wrapper = self.work / "attach.lua"
             wrapper.write_text("CONTEST_MAILBOX_DIR = " + lua_value(mailbox.as_posix())
                 + "\ndofile(" + lua_value(attachment.as_posix()) + ")\n", encoding="utf-8", newline="\n")
-            attachment = self.register(wrapper, kind="generated_configuration")
-        attach(self.controller, attachment, bridge="pt-super-contest")
+            attachment = wrapper
+        attach(self.controller, attachment)
         self.attached = True
         self.lifecycle["lua_attachments"] += 1
         session = self.controller.session()
@@ -243,11 +306,11 @@ class ContestRuntime:
         if self._one_lua_window(session) != [session["lua_window"]]:
             raise RuntimeError("The persistent bridge is not the sole Lua window.")
         self.lifecycle["lua_window"] = session["lua_window"]
-        if existing is not None and not resume_measurement:
+        if existing is not None:
             self.emulator.command("reset", timeout=None, deadline=self.total_deadline)
             self.controller.state_changed("reset")
         self.position = self.client.command("init-run", self.run_id, self.work.as_posix(),
-            self.settings["debug"], self.settings["dance_observation_policy"],
+            self.settings["debug"],
             self.lua("timing-profile.lua", self.settings["timing_profile"]).as_posix())
         self.lifecycle["checkpoint_engines"] += 1
         self.controller.USER32.SetForegroundWindow(window)
@@ -273,8 +336,7 @@ class ContestRuntime:
         self.check()
         self.stage, self.section_visit = stage, visit
         self.stage_started = time.monotonic()
-        self.stage_deadline = min(self.stage_started + self.settings["stage_timeout_seconds"], self.total_deadline) \
-            if self.total_deadline is not None else None
+        self.stage_deadline = min(self.stage_started + self.settings["stage_timeout_seconds"], self.total_deadline)
         self.controller.live_deadline = self.stage_deadline
         self.active_work = self.work / "visits" / f"s{stage}-{visit:03d}"
         self.active_work.mkdir(parents=True, exist_ok=False)
@@ -313,7 +375,6 @@ class ContestRuntime:
             if previous is not None:
                 previous.parent.mkdir(exist_ok=True)
                 shutil.copy2(native, previous)
-                self.register(previous, kind="slot_backup", protected=True)
             self.originals[slot] = previous
 
     def acknowledge(self, response, *, slot):
@@ -336,21 +397,21 @@ class ContestRuntime:
         return accepted
 
     def review(self, capture, expected, *, filename):
-        from contest.stage1_load import await_review
-
-        image = self.register(self.active_work / filename, kind="capture")
+        image = self.active_work / filename
         self.controller.screenshot(image)
         request = {"run_id": self.run_id, "frame": capture["frame"], "epoch": capture["epoch"],
             "stage": self.stage, "section_visit": self.section_visit, "image": str(image),
             "review_path": str(self.active_work / "review.json"), "expected": expected,
             "automatic_check": capture["observation"]["automatic_check"]}
         self.json("review-request.json", request)
-        if not automatic_review(request, request["automatic_check"]):
+        review = automatic_review(request, request["automatic_check"])
+        if not review:
             self.record("endpoint_unreadable", review_request=str(self.active_work / "review-request.json"), image=str(image))
             name = "loaded_overworld_screenshot" if self.stage == 1 else "dress_up_entry_screenshot"
             raise RuntimeError(CHECK_MESSAGES[name])
         self.record("endpoint_review", review_request=str(self.active_work / "review-request.json"), image=str(image))
-        return await_review(self.controller, request), image
+        self.check()
+        return review, image
 
     def finalize(self, *, error=None, emulator_closed=False):
         if self.finalized:
@@ -384,7 +445,7 @@ class ContestRuntime:
                         if slot is not None:
                             self.protect_slot(slot)
                         retained = self.client.stop(error, slot=slot)
-                        self.controller.screenshot(self.register(self.active_work / "failure.png", kind="capture"))
+                        self.controller.screenshot(self.active_work / "failure.png")
                         return retained
 
                     attempt("stopped_evidence", stopped_evidence)
@@ -422,7 +483,7 @@ class ContestRuntime:
                         self.protect_slot(slot)
                     self.controller.set_pause(True)
                     retained = self.client.stop("; ".join(result["errors"]), slot=slot)
-                    self.controller.screenshot(self.register(self.active_work / "failure.png", kind="capture"))
+                    self.controller.screenshot(self.active_work / "failure.png")
                     return retained
 
                 attempt("cleanup_failure_evidence", retain_cleanup_failure)

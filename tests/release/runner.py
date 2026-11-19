@@ -14,14 +14,15 @@ from zipfile import ZipFile
 
 from host.bootstrap import bundled_wheels
 from host.lua51 import Lua51
+from contest.checks import RUNTIME_SOURCES
 from run_contest import clean_diagnostic
 from tests.support.paths import ROOT, fixture_path, lua_dll_path
 from tools.prepare_dependencies import PYTHON_VERSIONS, check_wheel_coverage
 
 
-CHECK_MODULES = ("super_contest", "dance_master", "debug_contest", "rank_dance",
-    "rank_speed_probe", "scarf_tester", "stage2_prep", "stage3_enter", "stage4_dress",
-    "stage5_dance", "stage6_act")
+CHECK_MODULES = ("super_contest",)
+RUNTIME_MEMBERS = {"contest/" + (name if folder == "contest" else folder + "/" + name)
+    for folder, names in RUNTIME_SOURCES.items() for name in names}
 
 
 def safe_output(text):
@@ -133,12 +134,17 @@ class ReleaseChecks:
             documents = {"contest/" + name for name in ("readme.md", "ALGORITHM.md", "buyable-poffin-guide.md")}
             if not documents.issubset(names):
                 raise RuntimeError("Release ZIP is missing its current Markdown documentation.")
+            if not RUNTIME_MEMBERS.issubset(names):
+                raise RuntimeError("Release ZIP is missing a retained main-runner dependency.")
             for name in names:
                 path = PurePosixPath(name)
                 if path.is_absolute() or ".." in path.parts or "\\" in name:
                     raise RuntimeError("Release ZIP contains an invalid member path.")
                 if path.name in {"requirements.txt", "readme.txt"}:
                     raise RuntimeError(f"Release ZIP contains an obsolete file: {name}")
+                if path.suffix in {".py", ".lua", ".json"} and name not in RUNTIME_MEMBERS \
+                        and name not in {"run_contest.py", "contest/wheels/manifest.json"}:
+                    raise RuntimeError(f"Release ZIP contains code or timing data outside the main runtime: {name}")
                 if any(part in {"states", "evidence", ".venv", "tmp", ".tmp", "tests", "__pycache__"} for part in path.parts):
                     raise RuntimeError(f"Release ZIP contains private/generated data: {name}")
                 if path.suffix.lower() in {".exe", ".dll", ".nds", ".dsv", ".sav", ".png", ".pyc"} or re.search(r"\.ds[0-9]$", name, re.I):
@@ -256,8 +262,8 @@ def verify_release(archive=None, *, lua_dll=None, output=safe_output):
         checks.run_stage("release archive", lambda: checks.inspect_archive(Path(archive)))
         checks.run_stage("offline setup, reuse, and repair", checks.environment_checks)
         checks.run_stage("complete offline suite with bundled Pillow", checks.offline_suite)
-        checks.run_stage("all source check commands", lambda: checks.module_checks(ROOT))
-        checks.run_stage("all packaged check commands", lambda: checks.module_checks(checks.bundle))
+        checks.run_stage("main source check command", lambda: checks.module_checks(ROOT))
+        checks.run_stage("main packaged check command", lambda: checks.module_checks(checks.bundle))
         from tests.release.windows_ui import verify_windowless
 
         checks.run_stage("native windowless errors and progress", lambda: verify_windowless(checks))

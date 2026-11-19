@@ -2,11 +2,11 @@
 local directory = assert(debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("^(.*)/"))
 local root = dofile(directory .. "/resource_root.lua")
 local bag_reader = dofile(directory .. "/bag_contest.lua").new(memory, emu.gamecode)
-local party_reader = dofile(directory .. "/party_contest.lua").new(memory, emu.gamecode)
 local screen_checks = dofile(directory .. "/screen_checks.lua")
 local acting_pixels = dofile(directory .. "/acting_pixels.lua")
 local acting_plan = dofile(directory .. "/acting_plan.lua")
 local platinum = dofile(root .. "/lua/platinum.lua")
+local memory_boundary = dofile(directory .. "/memory_boundary.lua")
 local M = {}
 
 function M.definitions()
@@ -38,10 +38,7 @@ function M.definitions()
     return {
         ["stage-1-load"] = {checks = readiness, branches = {pass = "finish"}},
         ["stage-2-prep"] = {checks = {
-            {id = "validated_first_party", field = "party.read_valid", expected = true},
-            {id = "same_first_party", field = "party.species_id", context = "source_species_id"},
-            {id = "same_ribbon_flags", field = "party.owned_ribbon_bits", context = "owned_ribbon_bits"},
-            {id = "prepared_held_item", field = "party.held_item_id", context = "expected_item_id"},
+            {id = "validated_first_party", field = "source_party.read_valid", expected = true},
             {id = "scripted_section_complete", field = "scripted_section_complete", expected = true},
         }, branches = {pass = "finish"}},
         ["stage-3-enter"] = {checks = screen_rules("dress_up_entry_screenshot"), branches = {pass = "finish"}},
@@ -94,7 +91,7 @@ end
 function M.new(config, runtime)
     local api, adapter, engine = runtime.api, runtime.adapter, runtime.engine
     local stage = config.stage == 6 and "setup" or config.stage == 2 and "inspect" or "inputs"
-    local latest, pending, captured, screen, initial, prep, current_plan, source_party, entry_moves, result_party
+    local latest, pending, captured, screen, initial, prep, current_plan, source_party, entry_moves, result_memory
     local round_index, completed_rounds, move_cursor, judge_cursor = 0, 0, 1, 1
     local pause_plan, settled
     local readiness_checks = 0
@@ -115,9 +112,15 @@ function M.new(config, runtime)
             released = api.state.command_done and api.state.buttons == "" and not api.state.stylus_touch}
     end
 
+    local function read_memory(include_readiness, startup_party, scope)
+        return memory_boundary.read(api.state, adapter, runtime.is_paused(), scope, function(frame)
+            return bag_reader.snapshot(frame, include_readiness, startup_party)
+        end)
+    end
+
     function section.observation(frame)
         return {frame = frame, game = game(), trial = trial(), target = config.target,
-            source_context = config.source_context}
+            source_context = config.source_context, party_context = config.party_context}
     end
 
     function section.snapshot(frame)
@@ -128,7 +131,10 @@ function M.new(config, runtime)
             return result
         end
         if config.stage == 2 then
-            result = bag_reader.snapshot(frame)
+            result.party, result.bag, result.memory_read = initial.party, initial.bag, initial.memory_read
+            result.access = {source = "accepted_x_menu_memory_before_preparation",
+                direct_read_frames = 0, injects_inputs = false, live_memory_read = false}
+            result.source_party = initial.party
             result.target, result.bag_context = prep.target, prep.bag_context
             result.scripted_section_complete = api.state.command_done and api.state.buttons == ""
                 and frame == initial.frame + prep.emulator_frames
@@ -161,7 +167,8 @@ function M.new(config, runtime)
             elseif capture_kind == "result" then
                 result.screen = acting_pixels.match_points(raw, config.overworld.points)
                 result.screen.expected, result.screen.reference = "loaded_overworld", config.overworld.reference
-                result.party = result_party
+                result.party, result.bag, result.access = result_memory.party, result_memory.bag, result_memory.access
+                result.memory_read = result_memory.memory_read
                 result.same_first_party = result.party.species_id == source_party.species_id and not result.party.is_egg
                 result.target_acquired = result.party.ribbon_flags[config.target.ribbon_bit + 1]
             end
@@ -179,6 +186,7 @@ function M.new(config, runtime)
                 local readiness = initial
                 result.party, result.bag, result.access = readiness.party, readiness.bag, readiness.access
                 result.options, result.accessories = readiness.options, readiness.accessories
+                result.memory_read = readiness.memory_read
                 result.image = captured.image
             end
         end
@@ -210,23 +218,19 @@ function M.new(config, runtime)
     function section.checkpoint(action, args)
         local observation
         if action == "inspect" and config.stage == 1 then
-            initial = bag_reader.snapshot(adapter.frame(), true)
+            assert(not initial, "Read startup memory once inside the X menu")
+            initial = read_memory(true, nil, "startup_readiness")
             observation = initial
         elseif action == "inspect" and config.stage == 6 then
+            assert(not result_memory, "Read contest-finish memory once inside the X menu")
             finish_round()
-            result_party = party_reader.read_first(adapter.frame())
-            observation = {frame = adapter.frame(), party = result_party}
+            result_memory = read_memory(false, config.startup_party, "contest_finish_items_and_ribbons")
+            observation = result_memory
         elseif action == "inspect" then
             assert(config.stage == 2 and stage == "inspect", "Inspect the current Stage 2 source once")
-            if config.accepted_readiness then
-                initial = config.accepted_readiness
-                assert(initial.frame == adapter.frame() and initial.image.epoch == adapter.epoch(),
-                    "The shared readiness snapshot no longer matches the paused game")
-            else
-                local image = runtime.image(config.work .. "/stage2-source.gd", adapter.frame())
-                initial = bag_reader.snapshot(adapter.frame())
-                initial.image = image
-            end
+            initial = assert(config.accepted_readiness, "Preparation requires accepted X-protected source data")
+            assert(initial.frame == adapter.frame() and initial.image.epoch == adapter.epoch(),
+                "The shared readiness snapshot no longer matches the paused game")
             initial.epoch = adapter.epoch()
             observation = initial
         elseif action == "init-prep" then
@@ -242,6 +246,9 @@ function M.new(config, runtime)
                 and api.state.command_done and api.state.stop_reason == "combo_complete"
                 and adapter.frame() == config.source_frame + config.total_emulator_frames,
                 "Complete the counted section before reviewing its endpoint")
+            if config.stage == 1 then
+                memory_boundary.closed(initial, api.state, adapter.frame(), adapter.epoch(), runtime.is_paused())
+            end
             local image, raw = runtime.image(config.work .. "/stage" .. config.stage .. ".gd", adapter.frame())
             captured = {frame = image.frame, epoch = image.epoch, raw = raw, image = image,
                 check = screen_checks.read(raw, config.stage == 1 and "loaded_overworld" or "dress_up_entry",
@@ -258,7 +265,7 @@ function M.new(config, runtime)
             else
                 assert(stage == "review" and not pending and #args == 6, "Expected the current endpoint review")
                 assert((args[1] == "pass" or args[1] == "fail")
-                    and (args[2] == "visual_review" or args[2] == "local_reference_pixels")
+                    and args[2] == "local_reference_pixels"
                     and args[3] ~= "" and args[4] ~= "", "Supply the actual verdict, image, and visual note")
                 assert(tonumber(args[5]) == captured.frame and tonumber(args[6]) == captured.epoch
                     and adapter.frame() == captured.frame and adapter.epoch() == captured.epoch,
@@ -276,11 +283,9 @@ function M.new(config, runtime)
                 and type(config.handoff_render_frames) == "number" and config.handoff_render_frames >= 1
                 and config.handoff_render_frames == math.floor(config.handoff_render_frames) and adapter.frame() == config.source_frame,
                 "Begin Acting at the current accepted Stage 5 handoff")
-            source_party = party_reader.read_first(adapter.frame())
-            assert(source_party.read_valid and not source_party.is_egg
-                and source_party.ribbon_flags[config.target.ribbon_bit + 1] == false,
-                "The Acting source must have an eligible first Pokemon missing the target ribbon")
-            config.unavailable_move_slots = config.unavailable_move_slots or source_party.unavailable_move_slots
+            source_party = memory_boundary.party(config.party_context, emu.gamecode(), config.target)
+            assert(config.startup_party, "Acting requires the accepted startup party facts")
+            config.unavailable_move_slots = config.unavailable_move_slots or config.startup_party.unavailable_move_slots
             api.finish()
             stage = "prepare-render"
             observation = section.observation(adapter.frame())
@@ -342,6 +347,7 @@ function M.new(config, runtime)
                 round_index, capture_kind = round_index + 1, "round"
             else
                 assert(round_index == 4 and completed_rounds == 4, "Complete all four Acting rounds first")
+                memory_boundary.closed(result_memory, api.state, adapter.frame(), adapter.epoch(), runtime.is_paused())
                 capture_kind = "result"
             end
             latest = engine:visit(capture_kind == "round" and "stage-6-round" or "stage-6-act",

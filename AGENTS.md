@@ -27,6 +27,7 @@ Platinum contest automation. Follow the user's scope; region acceptance is separ
 ## Contest contracts
 
 - Follow the [integrated design](ALGORITHM.md#integrated-runner-design),
+  [locked main-runner-only consolidation](ALGORITHM.md#locked-main-runner-only-consolidation),
   [save policy](ALGORITHM.md#stage-checkpoints-and-resume), and
   [test retention policy](ALGORITHM.md#test-statistics-and-retention).
 - Stage 5 uses [entry-anchored midpoint scheduling](ALGORITHM.md#stage-5-dancing).

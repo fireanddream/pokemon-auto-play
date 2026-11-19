@@ -81,9 +81,13 @@ class CheckLayoutChecks(unittest.TestCase):
                     self.assertFalse(any(name == "tests" or name.startswith("tests.") for name in names), path.name)
 
     def test_primary_check_runs_when_the_test_package_is_unavailable(self):
-        with patch.dict("sys.modules", {"tests": None}), redirect_stdout(io.StringIO()) as output:
+        with patch.dict("sys.modules", {"tests": None}), redirect_stdout(io.StringIO()) as output, \
+                patch.object(checks, "check_sources", wraps=checks.check_sources) as sources:
             super_contest.check(lua_dll=DLL)
         self.assertIn("Persistent contest Python/Lua syntax OK", output.getvalue())
+        python, lua = sources.call_args.args
+        self.assertIn("dance_response.py", {path.name for path in python})
+        self.assertIn("memory_boundary.lua", {path.name for path in lua})
 
 
 class LauncherPreflightChecks(unittest.TestCase):

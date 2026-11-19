@@ -43,24 +43,28 @@ class ReleasePackagingChecks(unittest.TestCase):
         for relative in ("contest/debug/.gitkeep", "contest/region-memory-results.txt",
                 "contest/scarf-test-results.txt", "lua/PLATINUM-LICENSE.txt"):
             (self.root / relative).write_text("fixture\n", encoding="utf-8", newline="\n")
+        for folder, names in package_contest.RUNTIME_SOURCES.items():
+            for name in names:
+                path = self.root / folder / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n" if path.suffix == ".json" else "fixture\n", encoding="utf-8", newline="\n")
+        (self.root / "contest/dance_timings.json").write_text("{}\n", encoding="utf-8", newline="\n")
+        (self.root / "contest/retired_runner.py").write_text("raise RuntimeError('not shipped')\n", encoding="utf-8", newline="\n")
         (self.root / "wheels/fixture.whl").write_bytes(b"synthetic wheel placeholder")
         value = {"requirements": "Pillow\n", "platform": "win_amd64",
             "python_versions": [f"{sys.version_info.major}.{sys.version_info.minor}"], "wheels": ["fixture.whl"]}
         (self.root / "wheels/manifest.json").write_text(json.dumps(value) + "\n", encoding="utf-8", newline="\n")
         self.output = self.root / "tmp/release.zip"
 
-    def test_failed_verification_never_creates_the_final_archive(self):
-        with patch("tests.release.verify_release", side_effect=RuntimeError("release checks failed")) as verify:
-            with self.assertRaisesRegex(RuntimeError, "release checks failed"):
-                package_contest.build_zip(self.output)
-        verify.assert_called_once()
-        self.assertFalse(self.output.exists())
-
-    def test_unsuccessful_result_cannot_publish_the_candidate(self):
-        with patch("tests.release.verify_release", return_value={"outcome": "fail"}):
-            with self.assertRaisesRegex(RuntimeError, "requested ZIP was not created"):
-                package_contest.build_zip(self.output)
-        self.assertFalse(self.output.exists())
+    def test_failed_verification_never_publishes_the_final_archive(self):
+        for error, message in ((RuntimeError("release checks failed"), "release checks failed"),
+                (None, "requested ZIP was not created")):
+            with self.subTest(raised=error is not None), patch("tests.release.verify_release",
+                    side_effect=error, return_value={"outcome": "fail"}) as verify:
+                with self.assertRaisesRegex(RuntimeError, message):
+                    package_contest.build_zip(self.output)
+                verify.assert_called_once()
+                self.assertFalse(self.output.exists())
 
     def test_success_publishes_the_exact_verified_candidate_with_bundled_files(self):
         candidates = []
@@ -80,6 +84,10 @@ class ReleasePackagingChecks(unittest.TestCase):
             self.assertIn("contest/readme.md", names)
             self.assertNotIn("contest/readme.txt", names)
             self.assertNotIn("contest/requirements.txt", names)
+            self.assertNotIn("contest/dance_timings.json", names)
+            self.assertNotIn("contest/retired_runner.py", names)
+            self.assertNotIn("contest/scarf-test-results.txt", names)
+            self.assertTrue(release_runner.RUNTIME_MEMBERS.issubset(names))
             self.assertNotIn("private/", archive.read("run_contest.py").decode("utf-8"))
 
 
@@ -99,6 +107,8 @@ class ReleaseWheelCoverageChecks(unittest.TestCase):
             archive.writestr("run_contest.py", 'DESMUME_PATH = ""\nROM_PATH = ""\nRELEASE = "0.9 pre-release"\n')
             for name in ("readme.md", "ALGORITHM.md", "buyable-poffin-guide.md"):
                 archive.writestr("contest/" + name, "# Fixture document\n")
+            for name in release_runner.RUNTIME_MEMBERS:
+                archive.writestr(name, "{}\n" if Path(name).suffix == ".json" else "fixture\n")
             archive.writestr("contest/wheels/manifest.json", json.dumps(manifest) + "\n")
             for version in wheel_versions:
                 archive.writestr("contest/wheels/" + wheel_name(version), synthetic_wheel())

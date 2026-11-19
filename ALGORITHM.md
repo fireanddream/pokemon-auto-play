@@ -35,7 +35,8 @@ Lua. Gameplay is uncapped; messages appear in Lua and startup details in `tmp/st
 Load the battery save, dismiss the connection prompt, and verify the closed-menu
 hall from a fresh paused image. Use **X -> read party/Bag/options -> X**, with
 **12 held / 90 released frames** per menu input. Non-Fast text speed, an ineligible
-first Pokemon, or unreadable required data stops here. Stage 2 reuses this snapshot.
+first Pokemon, or unreadable required data stops here. Stage 2 reuses this snapshot;
+startup-only facts (HP, moves, Sheen, options, and position reference) remain cached.
 
 Warn once and continue for **fewer than 10 accessory copies** (duplicates count),
 **Sheen below 255**, or missing scarves. Count scarves in the Items pocket and the
@@ -43,9 +44,12 @@ first Pokemon's held item. An unreadable accessory count warns as unknown.
 
 ## Stage 2: Preparation
 
-Read ribbons and select the first missing target. Equip its scarf if available;
-otherwise keep the target and continue. Verify an equip/swap, stopping on mismatch.
-Track Bag opening/cursor state and refresh item positions after scarf transfers.
+Use the fresh X-protected party/Bag snapshot from startup or the last contest finish
+to select the first missing ribbon and equip its scarf if available; otherwise keep
+the target and continue. Keep the existing cached Bag opening/cursor prediction,
+including its last-copy removal adjustment.
+Collection preparation does not reread memory after equipping, predict inventory,
+or compare items with a cache.
 
 ## Stage 3: Contest entry
 
@@ -110,7 +114,7 @@ Check only **Dance 1's first input**: baseline before pressing, feedback after
 **2 held / 10 released frames** (press +11). Excellent uses cyan/yellow/pink bubble
 colors, not text. Recover absent/stale feedback frame-by-frame within its existing
 window for one final Excellent/Miss judgment. Misses warn and continue; skipped
-inputs are separate and never replaced by later checks. Diagnostic tools can check all inputs.
+inputs are separate and never replaced by later checks. Debug runs use the same first-input check.
 
 Leave dances 7-8 input-free for `2 * cycle_frames + extra_switch_frames`, then tap B
 for **18 game seconds / 1,077 frames**, **10 held / 20 released**, toward Acting.
@@ -145,18 +149,23 @@ Base segments last **60 / 140 game seconds** for JPN rounds 1-3 / final round an
 results; English uses **65 / 150**. Initial entry and final/results have no readiness
 loop. Selection uses raw hearts, not simulated move effects.
 
-Confirm the closed-menu overworld, use **X -> read -> X** to check the target ribbon,
-and acknowledge before returning to Stage 2. Each new Acting entry resets round/
-move/judge to **1 / 1 / 1** and rereads moves. After **5 consecutive ribbon misses**,
+After every completed contest (win or loss), use **X -> read party/Bag -> X** once,
+then confirm the closed-menu overworld and acknowledge before returning to Stage 2.
+Read actual held item, Bag quantities/order, and ribbons for the next preparation;
+retain full stored-record validation without rereading startup-only facts. Acting
+entry reuses the last accepted party read instead of reading memory again.
+Each new Acting entry resets round/move/judge to **1 / 1 / 1** and refreshes only
+move-scoring pixels. After **5 consecutive ribbon misses**,
 warn once about stats/moves and continue under the original deadline; a win resets the streak.
 
 ### Stage 6 retry render preparation
 
-Use **accepted paused source -> input-free preparation -> confirmed native pause ->
-fresh zero-frame capture -> analysis**. Direct handoffs advance **10 emulator frames**;
-standalone loads/retries unpause for **one full host second**, confirming positive
-frame progress and the same epoch. Count preparation under the existing deadline.
-Cached images cannot prove readiness; unreadable required captures stay paused with evidence.
+Use **accepted paused source -> 10 input-free emulator frames -> confirmed native
+pause -> fresh zero-frame capture -> analysis**, in the same epoch and under the
+existing deadline. Every retry completes the contest and reenters from the overworld;
+there is no loaded-state Acting path. Cached images cannot prove readiness, and
+unreadable required captures stay paused with evidence. Acting reuses the accepted
+current-run party context; missing or inconsistent facts stop without an entry memory read.
 
 ## Runner planning and checkpoints
 
@@ -181,8 +190,7 @@ Paused Lua `gui.gdscreenshot()` captures add zero frames; preparation is counted
 `debug=0` makes **no quick saves**, even on failure/cleanup. `debug=1` retains accepted
 states and restores temporary diagnostic slot 9 at cleanup. Routine checks acknowledge
 without saves; these receipts cannot satisfy state-required checkpoints. Savestates
-are not in-game saves or direct memory writes. Prepared tools preserve sources and
-back up/restore temporary slot 10.
+are not in-game saves or direct memory writes. There is no prepared-state or isolated-stage resume path.
 
 Stage 3->4 and 4->5 add zero handoff/render frames. Dance save overlays settle for
 **3 host seconds** paused with inputs released; fresh before/after captures must
@@ -195,6 +203,9 @@ party/Bag decoding is shared. Header acceptance/offline checks do not prove live
 HP decoding honors the plaintext flag and requires a consistent pair:
 **0 <= current <= maximum <= 714, maximum > 0**; conflicts stop paused.
 Accessory quantities/flags exclude backdrops.
+All contest memory callers use profile Stage 2 X timings, a native paused read with
+buttons/stylus released and zero frame progress, then close X before acceptance.
+No X-button history is checked. Unreadable reads stay paused at their actual source.
 
 ## Regional timing profiles
 
@@ -218,6 +229,40 @@ speed, and cleanup. Stage/dance/Acting helpers own game rules. `host/` owns nati
 controls/receipts; `lua/` owns the input bridge, checkpoint engine, and memory helpers.
 Adapters own targets, timings, slots, and screen policy; shared checkpoints stay game-independent.
 
+### Locked main-runner-only consolidation
+
+Every live run uses the full collection loop, including debugging. Do not add
+isolated-stage, prepared-source, scarf-only, dance-only measurement/debug, or
+AVI-specific execution paths or compatibility wrappers. Offline tests exercise
+retained helpers and the actual main-engine boundaries.
+Offline tests of retained helpers and main-engine boundaries remain supported.
+
+- **One gameplay engine:** `sections.py` and the persistent `super_contest.lua` /
+  `sections.lua` dispatcher, with the main Dressing and `rank_dance` adapters. Keep
+  modular stage helpers; do not merge everything into another monolithic script.
+- **One lifecycle:** `ContestRuntime` owns connection, native setup, deadlines,
+  speed, slot protection, and terminal cleanup. Debugging uses the existing main
+  runner's save/evidence policy, not a different stage order or execution engine.
+- **One timing source:** regional `fixed_dance_metrics` drives dancing. No production
+  historical-motion reads, per-contest calibration, live speed fitting, or alternate
+  observation/feedback modes. Preserve
+  profile schema/keys, current defaults, timing units, and the first-input feedback contract.
+- **Same safety contracts:** preserve accepted current-state handoffs, fresh paused
+  evidence, Stage 6 render-before-analysis, input accounting, save ownership, and
+  existing deadlines. Retries still finish the contest and reenter from the overworld.
+
+`runtime.py` owns attachment, Lua serialization, and paused overlay settling.
+`dance_response.py` owns fresh pointer/cue reads and fixed-spacing response plans;
+`rank_dance.lua` owns all Stage 5 checkpoints, including the Acting handoff.
+`memory_boundary.lua` carries accepted party facts inside the current run.
+`checks.py` declares the retained sources used by main `--check` and packaging.
+
+Keep `contest/dance_timings.json` as historical evidence, not a runtime or release
+dependency. Preserve prepared states, private evidence, and attribution. Remove tests
+solely for retired paths, without keeping obsolete APIs to satisfy them. Verification
+uses the offline suite, main `--check`/`--plan-only`, and release gate; live verification
+requires a separately agreed main-runner attempt. Gameplay timing and guard limits stay unchanged.
+
 ## Run folders and cleanup
 
 Keep current mailbox/capture/receipt/results in `tmp/contest/contest-<timestamp>/`
@@ -228,7 +273,7 @@ first. Scratch/dependencies stay project-local; prepared states/evidence remain 
 ## Verification
 
 Run `python -B -m tests` (offline suite) or `python -B -m tests --release` (complete gate).
-Use existing runner/component `--check`, `--help`, and `--plan-only` entries.
+Use the main runner's `--check`, `--help`, and `--plan-only` entries.
 Offline tests use real Lua with simulated emulator callbacks, not live gameplay proof.
 `tests/README.md` owns details; new/expanded retained tests need an agreed reason.
 
@@ -242,9 +287,10 @@ cache) for all six Python-version wheels. Stage with
 ZIP creation publishes only the candidate passing the complete gate;
 `--lua-dll "path/to/lua51.dll"` supplies a matching DLL if needed.
 
-Extraction contains `run_contest.py` and `contest/` (modules, profiles, wheels,
+Extraction contains `run_contest.py` and `contest/` (retained modules, profiles, wheels,
 `readme.md`, `ALGORITHM.md`, Poffin guide). Paths start empty; `.venv`/`tmp` are
-created locally. Emulator files, ROMs, private states/evidence, and debug contents are excluded.
+created locally. Emulator files, ROMs, private states/evidence, historical motion data,
+old statistics, and debug contents are excluded.
 
 ## Test statistics and retention
 

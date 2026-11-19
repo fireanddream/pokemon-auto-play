@@ -133,8 +133,9 @@ function M.round(config, number, move_cursor, judge_cursor, frame, stars, moves,
     local menu_frames = #menu * (timing.hold_frames + timing.release_frames)
     local total = menu_frames + mash
     if number == 4 then
-        steps[#steps + 1] = "X:" .. timing.hold_frames .. ":" .. timing.release_frames
-        total = total + timing.hold_frames + timing.release_frames
+        -- Open the result-read menu using profile timings, independent of move-input overrides.
+        steps[#steps + 1] = config.memory_x_input
+        total = total + config.memory_x_frames
     end
     return {round = number, selectable = true, move = move, judge = judge, previous_move = move_cursor,
         excluded_previous_move = last_move, acting_position = acting_order.position,

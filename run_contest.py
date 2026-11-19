@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Saved after selection. Use full file paths with forward slashes; clear to select again.
 DESMUME_PATH = "D:/Program Files (x86)/Pokemon Stuff/Pokemon auto play/desmume-0.9.13-win64/DeSmuME_0.9.13_x64.exe"
-ROM_PATH = "D:/Program Files (x86)/Pokemon Stuff/Pokemon auto play/desmume-0.9.13-win64/Roms/Pokemon - Platinum Version (Europe).nds"
+ROM_PATH = "D:/Program Files (x86)/Pokemon Stuff/Pokemon auto play/desmume-0.9.13-win64/Roms/Pokemon - Platinum Version (USA) (Rev 1).nds"
 debug = 0
 
 import argparse
@@ -17,7 +17,7 @@ import subprocess
 import sys
 import traceback
 
-RELEASE = "0.9 pre-release"
+RELEASE = "0.91"
 SCRIPT = Path(__file__).resolve()
 SUPPORT = SCRIPT.parent / "contest"
 MODULE_ROOT = SUPPORT if (SUPPORT / "host" / "paths.py").is_file() else SCRIPT.parent

@@ -14,6 +14,25 @@ from contest.platinum import identify_rom
 
 
 HERE = Path(__file__).resolve().parent
+RUNTIME_SOURCES = {
+    "contest": (
+        "__init__.py", "artifacts.py", "checks.py", "dance_response.py", "dance_timings.py", "inputs.py",
+        "messages.py", "platinum.py", "pt_dance_read.py", "rank_dance.py", "runtime.py", "sections.py",
+        "stage1_load.py", "stage2_bag.py", "stage2_prep.py", "stage3_enter.py", "stage4_dress.py", "stage6_act.py",
+        "super_contest.py", "timing_profiles.py", "timing_profiles/CPUJ.json", "timing_profiles/CPUE.json",
+        "acting_pixels.lua", "acting_plan.lua", "bag_contest.lua", "dance_pixels.lua", "dress_pixels.lua",
+        "memory_boundary.lua", "party_contest.lua", "rank_dance.lua", "resource_root.lua", "screen_checks.lua",
+        "sections.lua", "stage4_dress.lua", "super_contest.lua",
+    ),
+    "host": (
+        "__init__.py", "bootstrap.py", "checkpoints.py", "controller.py", "dialogs.py", "emulator.py",
+        "lua51.py", "paths.py", "rtc.py", "savestates.py", "windows.py",
+    ),
+    "lua": (
+        "bridge_io.lua", "checkpoint_desmume.lua", "checkpoint_master.lua", "input_bridge.lua",
+        "input_sequences.lua", "json.lua", "platinum.lua", "PLATINUM-LICENSE.txt",
+    ),
+}
 
 
 def launcher_path(root=ROOT):
@@ -55,12 +74,6 @@ def check_sources(python_files, lua_files, *, lua_dll=None, root=ROOT):
         for path in lua_files:
             lua.compile_file(path)
     return {"python_files": len(python_files), "lua_files": len(lua_files)}
-
-
-def check_module(filename, lua_names, message, *, lua_dll=None):
-    path = Path(filename).resolve()
-    check_sources([path], [path.parent / name for name in lua_names], lua_dll=lua_dll)
-    print(message)
 
 
 def _require_file(path):

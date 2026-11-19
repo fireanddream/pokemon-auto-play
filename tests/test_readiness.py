@@ -125,13 +125,15 @@ class PartyValidationDiagnosticChecks(unittest.TestCase):
         self.lua = Lua51()
         self.addCleanup(self.lua.close)
 
-    def fixture(self, code, *, actual_plain, flagged_plain, invalid=False, damaged=False):
+    def fixture(self, code, *, actual_plain, flagged_plain, invalid=False, damaged=False,
+                held=260, ribbon_bits=(0,), moves=(49, 98, 225, 432), sheen=255, hp=(30, 100), encrypted_prefix=None):
         data = 0x02080000
         address = data + 0xD094
         words = [0] * 64
-        words[0], words[1], words[13] = 330, 260, 255 * 256
-        words[16:20] = [49, 98, 225, 432]
-        words[44] = 1
+        words[0], words[1], words[13] = 330, held, sheen * 256
+        words[16:20] = moves
+        bits = sum(1 << bit for bit in ribbon_bits)
+        words[44], words[45] = bits & 0xFFFF, bits >> 16
         stored = sum(words) % 0x10000
         if damaged:
             words[1] += 1
@@ -139,12 +141,14 @@ class PartyValidationDiagnosticChecks(unittest.TestCase):
         for word in words:
             key = (key * 0x41C64E6D + 0x6073) % 0x100000000
             encoded.append(word if actual_plain else word ^ (key >> 16))
+        if encrypted_prefix is not None:
+            encoded[encrypted_prefix:] = words[encrypted_prefix:]
         data_pointer, trainer_pointer = {
             "CPUJ": (0x0210112C, 0x021BFB94), "CPUE": (0x02101D2C, 0x021C0794),
         }[code]
         values = {data_pointer: data, trainer_pointer: SAVE, data + 0xD090: 1,
             address: 0, address + 4: 1 + 2 * flagged_plain + 4 * invalid, address + 6: stored,
-            address + 0x8E: 30, address + 0x90: 100}
+            address + 0x8E: hp[0], address + 0x90: hp[1]}
         values.update({address + 8 + index * 2: word for index, word in enumerate(encoded)})
         self.lua.run(f"""
             values = {literal(values)}
@@ -161,9 +165,9 @@ class PartyValidationDiagnosticChecks(unittest.TestCase):
             return 'ready'
         """)
 
-    def read(self):
+    def read(self, *, startup_party=None, frame=77):
         return json.loads(self.lua.run(f"""
-            local ok, result = pcall(reader.read_first, 77)
+            local ok, result = pcall(reader.read_first, {frame}, {literal(startup_party)})
             return dofile({literal((ROOT / 'lua/json.lua').as_posix())})
                 .encode({{ok=ok, result=result, reads=reads}})
         """))
@@ -200,6 +204,31 @@ class PartyValidationDiagnosticChecks(unittest.TestCase):
                     self.fixture(code, actual_plain=plain, flagged_plain=plain, damaged=True)
                     self.check_failure(self.read(), code, body_plain=plain, matches=False, invalid=False)
 
+    def test_contest_finish_reads_current_items_ribbons_but_reuses_startup_only_facts(self):
+        for code in ("CPUJ", "CPUE"):
+            for plain in (False, True):
+                with self.subTest(code=code, plain=plain):
+                    self.fixture(code, actual_plain=plain, flagged_plain=plain)
+                    startup = self.read()["result"]
+                    self.fixture(code, actual_plain=plain, flagged_plain=plain, held=261,
+                        ribbon_bits=(0, 4), moves=(0, 0, 0, 0), sheen=0, hp=(0, 0))
+                    result = self.read(startup_party=startup, frame=88)
+                    self.assertTrue(result["ok"])
+                    self.assertEqual(result["reads"], 71)
+                    party = result["result"]
+                    self.assertEqual((party["held_item_id"], party["owned_ribbon_bits"]), (261, [0, 4]))
+                    self.assertEqual((party["frame"], party["static_read_frame"], party["read_scope"]), (88, 77, "items_and_ribbons"))
+                    for field in ("is_egg", "current_hp", "max_hp", "hp_encoding", "sheen", "moves", "move_count", "unavailable_move_slots"):
+                        self.assertEqual(party[field], startup[field])
+
+    def test_startup_facts_cannot_bypass_a_partially_encrypted_contest_finish_record(self):
+        for code in ("CPUJ", "CPUE"):
+            with self.subTest(code=code):
+                self.fixture(code, actual_plain=False, flagged_plain=False)
+                startup = self.read()["result"]
+                self.fixture(code, actual_plain=False, flagged_plain=False, held=261, encrypted_prefix=41)
+                self.check_failure(self.read(startup_party=startup), code, body_plain=False, matches=False, invalid=False)
+
     def test_invalid_record_flag_is_reported_independently_of_the_checksum(self):
         for plain in (False, True):
             for damaged in (False, True):
@@ -213,6 +242,115 @@ class PartyValidationDiagnosticChecks(unittest.TestCase):
                 with self.subTest(code=code, actual_plain=plain):
                     self.fixture(code, actual_plain=plain, flagged_plain=not plain)
                     self.check_failure(self.read(), code, body_plain=not plain, matches=False, invalid=False, alternate=True)
+
+
+class AcceptedPartyHandoffChecks(unittest.TestCase):
+    def setUp(self):
+        self.lua = Lua51()
+        self.addCleanup(self.lua.close)
+        self.lua.run(f"boundary=dofile({literal((ROOT / 'contest/memory_boundary.lua').as_posix())}); "
+            f"json=dofile({literal((ROOT / 'lua/json.lua').as_posix())}); return 'ready'")
+
+    def context(self, code="CPUJ"):
+        return {"game_code": code,
+            "party": {"frame": 77, "read_valid": True, "data_validation_passed": True, "party_slot": 1,
+                "species_id": 330, "held_item_id": 260, "is_egg": False, "current_hp": 30, "max_hp": 100,
+                "sheen": 255, "moves": [49, 0, 432, 0], "move_count": 2, "unavailable_move_slots": [2, 4],
+                "ribbon_flags": [False] * 20},
+            "memory_read": {"frame": 77, "epoch": 2, "source": "x_menu_paused_memory", "direct_read_frames": 0},
+            "accepted_at": {"checkpoint": "stage-1-load", "run_id": "party-handoff-check", "visit": 1,
+                "frame": 281, "epoch": 2, "status": "complete", "proceed": True}}
+
+    def lua_party(self, context, target):
+        return json.loads(self.lua.run(f"local ok, result=pcall(boundary.party, {literal(context)}, 'CPUJ', {literal(target)}); "
+            "return json.encode({ok=ok, result=result})"))
+
+    def test_acknowledged_party_facts_are_reused_without_entry_memory_reads(self):
+        for code in ("CPUJ", "CPUE"):
+            with self.subTest(code=code):
+                context = self.context(code)
+                record = {**context["accepted_at"], "snapshot": {"game": {"code": code},
+                    "source_party": context["party"], "memory_read": context["memory_read"]}}
+                result = json.loads(self.lua.run(f"local record={literal(record)}; local accepted=boundary.context(record); "
+                    f"local party=boundary.party(accepted, {literal(code)}, {{party_slot=1,ribbon_bit=3}}); "
+                    "return json.encode({context=accepted,party=party,record=record})"))
+                self.assertEqual(result["context"], context)
+                self.assertEqual(result["party"], context["party"])
+                self.assertEqual(result["record"], record)
+        context = self.context()
+        self.assertEqual(self.lua_party(context, {"party_slot": 1, "ribbon_bit": 3})["result"], context["party"])
+
+    def test_missing_unaccepted_or_inconsistent_party_facts_are_rejected_by_main_boundary(self):
+        changes = (("game_code", "CPUE"), ("party", None), ("memory_read", None), ("accepted_at", None),
+            ("accepted_at.checkpoint", "stage-5-dance"), ("accepted_at.status", "awaiting_ack"),
+            ("accepted_at.proceed", False), ("accepted_at.run_id", ""), ("accepted_at.visit", 0),
+            ("accepted_at.frame", 76), ("accepted_at.epoch", 3), ("memory_read.frame", 78),
+            ("memory_read.source", "unprotected_memory"), ("memory_read.direct_read_frames", 1),
+            ("memory_read.direct_read_frames", False),
+            ("party.read_valid", False), ("party.data_validation_passed", False), ("party.party_slot", 2),
+            ("party.party_slot", True),
+            ("party.species_id", 0), ("party.held_item_id", 537), ("party.is_egg", True),
+            ("party.current_hp", 0), ("party.current_hp", True), ("party.current_hp", 101),
+            ("party.max_hp", 715), ("party.sheen", 0), ("party.moves", [49, 0, 432]),
+            ("party.moves", [49, 0, 468, 0]), ("party.move_count", 3),
+            ("party.unavailable_move_slots", []), ("party.unavailable_move_slots", [4, 2]),
+            ("party.unavailable_move_slots", [2, 2]), ("party.ribbon_flags", [False] * 19),
+            ("party.ribbon_flags", [0] + [False] * 19))
+        target = {"party_slot": 1, "ribbon_bit": 3}
+        for path, value in ((None, None), *changes):
+            with self.subTest(field=path, value=value):
+                context = self.context() if path else None
+                if path:
+                    fields, parent = path.split("."), context
+                    for field in fields[:-1]:
+                        parent = parent[field]
+                    parent[fields[-1]] = value
+                self.assertFalse(self.lua_party(context, target)["ok"])
+        for target in ({"party_slot": 2, "ribbon_bit": 3}, {"party_slot": True, "ribbon_bit": 3}, {"party_slot": 1, "ribbon_bit": 20},
+                {"party_slot": 1, "ribbon_bit": True}):
+            with self.subTest(target=target):
+                self.assertFalse(self.lua_party(self.context(), target)["ok"])
+
+
+class MemoryBoundaryChecks(unittest.TestCase):
+    def setUp(self):
+        self.lua = Lua51()
+        self.addCleanup(self.lua.close)
+        self.lua.run(f"boundary=dofile({literal((ROOT / 'contest/memory_boundary.lua').as_posix())}); "
+            f"json=dofile({literal((ROOT / 'lua/json.lua').as_posix())}); "
+            "frame, epoch, reads=77, 2, 0; adapter={frame=function() return frame end, epoch=function() return epoch end}; "
+            "return 'ready'")
+        self.state = {"command_done": True, "error": "", "buttons": "", "stylus_touch": False}
+
+    def test_memory_reads_add_zero_frames_and_close_acceptance_needs_no_button_history(self):
+        result = json.loads(self.lua.run(f"result=boundary.read({literal(self.state)}, adapter, true, 'test_party', "
+            "function(at) reads=reads+1; return {frame=at} end); return json.encode(result)"))
+        self.assertEqual(result, {"frame": 77, "epoch": 2, "memory_read": {"frame": 77, "epoch": 2,
+            "source": "x_menu_paused_memory", "scope": "test_party", "direct_read_frames": 0}})
+        closed = {**self.state, "stop_reason": "combo_complete", "command_start_frame": 77, "command_end_frame": 179}
+        self.assertEqual(self.lua.run(f"frame=179; boundary.closed(result, {literal(closed)}, frame, epoch, true); "
+            "return reads .. ':' .. frame"), "1:179")
+
+    def test_running_held_or_changed_reads_fail_without_a_retry_or_extra_frames(self):
+        cases = ((False, self.state, ""), (True, {**self.state, "command_done": False}, ""),
+            (True, {**self.state, "error": "unreadable"}, ""), (True, {**self.state, "buttons": "A"}, ""),
+            (True, {**self.state, "stylus_touch": True}, ""), (True, self.state, "frame=frame+1"),
+            (True, self.state, "epoch=epoch+1"), (True, self.state, "error('Unreadable party')"))
+        for paused, state, change in cases:
+            with self.subTest(paused=paused, state=state, change=change):
+                changed = change + "; " if change else ""
+                result = json.loads(self.lua.run(f"frame, epoch, reads=77, 2, 0; local ok, result=pcall(boundary.read, "
+                    f"{literal(state)}, adapter, {literal(paused)}, 'test_party', function(at) reads=reads+1; "
+                    f"{changed}return {{frame=at}} end); return json.encode({{ok=ok, reads=reads, frame=frame}})"))
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["reads"], int(bool(change)))
+                self.assertEqual(result["frame"], 78 if change == "frame=frame+1" else 77)
+        closed = {**self.state, "stop_reason": "combo_complete", "command_start_frame": 77, "command_end_frame": 179}
+        for frame, epoch, state in ((77, 2, closed), (179, 3, closed),
+                (179, 2, {**closed, "command_start_frame": 78}), (179, 2, {**closed, "buttons": "X"})):
+            with self.subTest(closed_frame=frame, epoch=epoch, state=state):
+                self.assertEqual(self.lua.run(f"return tostring(pcall(boundary.closed, {{frame=77, epoch=2}}, "
+                    f"{literal(state)}, {frame}, {epoch}, true))"), "false")
 
 
 class ReadinessWarningChecks(unittest.TestCase):

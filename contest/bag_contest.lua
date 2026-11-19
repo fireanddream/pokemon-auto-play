@@ -1,4 +1,4 @@
--- Items-pocket and optional startup-readiness snapshot; zero-frame reads only.
+-- Items pocket and party snapshot; contest-finish reads reuse startup-only party facts.
 local directory = assert(debug.getinfo(1, "S").source:sub(2):gsub("\\", "/"):match("^(.*)/"))
 local root = dofile(directory .. "/resource_root.lua")
 local core = dofile(root .. "/lua/pt_rng_readers.lua")
@@ -18,10 +18,10 @@ function M.new(memory_api, game_code)
         assert(address % 4 == 0 and address >= 0x02000000 and address + size <= 0x02400000,
             "The Bag memory address could not be read reliably")
     end
-    return {snapshot = function(frame, include_readiness)
+    return {snapshot = function(frame, include_readiness, startup_party)
         local _, game, pointers = reader:addresses()
         assert(game.supported, "Pokemon Platinum Bag memory is unavailable")
-        local pokemon = first.read_first(frame)
+        local pokemon = first.read_first(frame, startup_party)
         pokemon.held_item = M.item_name(pokemon.held_item_id)
         local save = pointers.trainer.value
         span(save, 0x20064)

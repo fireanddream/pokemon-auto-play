@@ -1,7 +1,7 @@
 """Persistent contest transitions, paired retries, counted pages, and owned cleanup."""
 
 from copy import deepcopy
-from contextlib import redirect_stdout
+from contextlib import contextmanager, ExitStack, redirect_stdout
 import io
 from itertools import groupby, product
 import json
@@ -14,9 +14,8 @@ from unittest.mock import Mock, patch
 
 from PIL import Image
 
-from contest import dance_master, debug_contest, rank_dance, rank_speed_probe, sections, stage1_load, stage2_prep, stage3_enter, stage4_dress, stage5_dance, stage6_act, super_contest
-from contest.dance_timings import RANKS, calibrated_timing, fixed_timing, pointer_calibration, timing_for
-from contest.artifacts import OwnedArtifacts, cleanup_stale
+from contest import dance_response, rank_dance, sections, stage1_load, stage2_prep, stage3_enter, stage4_dress, stage6_act, super_contest
+from contest.dance_timings import RANKS, fixed_timing
 from contest.messages import abort_message
 from contest.pt_dance_read import BUTTONS, CUE_SIDE_OFFSET, EMPTY_PROFILE, FILLED_PROFILES, LEFT_SPRITES, POINTER_SPRITES, RIGHT_SPRITES, _match, layout_for
 from contest.runtime import ContestRuntime, TimedController, TimedSlots
@@ -65,8 +64,8 @@ def paint_acting_panel(image, position, colors):
 class ContestClock:
     """Real dispatcher/sections/checkpoints; selected memory and visual inputs are simulated."""
 
-    def __init__(self, rank="Master", observation_policy="scheduled", *, debug=super_contest.debug):
-        profile = timing_for(rank)
+    def __init__(self, rank="Master", *, debug=super_contest.debug):
+        profile = fixed_timing("Cool", rank)
         tier = RANKS.index(profile["rank"])
         self.target = {**TARGET, "rank": profile["rank"], "ribbon_bit": tier, "rank_down_presses": tier}
         dressing = stage4_dress.dress_plan(host_timeout=300)["automatic_dressing"]
@@ -76,12 +75,12 @@ class ContestClock:
         self.clock = BridgeClock(ROOT / "lua" / "input_bridge.lua", game_code="CPUJ")
         self.config_id, self.boundary, self.preparation = 0, None, None
         self.saved_checkpoints, self.log_checkpoints = [], []
-        self.observation_policy = observation_policy
         self.work = (ROOT / "tmp" / "offline-contest-runtime").as_posix()
         self.clock.lua.run(f"""
             local real_dofile, real_loadfile, old_open = dofile, loadfile, io.open
             configs, engine_count, registrations, stars_read, move_reads, page_reads = {{}}, 0, {{}}, 0, 0, 0
             bag_snapshots, options_snapshots, accessory_snapshots, options_save = 0, 0, 0, 0x02040000
+            party_snapshots = 0
             memory_values[0x02060034], memory_values[0x02060038], memory_values[0x0206003C] = 1, 52, 0x64
             memory_values[0x02060104], memory_values[0x02060108], memory_values[0x0206010C] = 14, 0x83C, 0x5000
             memory_values[0x02045808] = 0x55
@@ -149,15 +148,30 @@ class ContestClock:
                 end
                 local next_target = won and {{category='Beauty', rank='Normal', ribbon_bit=4,
                     required_scarf_id=261, category_down_presses=1, rank_down_presses=0, party_slot=1}} or target
-                return {{frame=at, species_id=151, held_item_id=held_item, held_item='Red Scarf',
+                return {{frame=at, party_slot=1, species_id=151, held_item_id=held_item, held_item='Red Scarf',
                     read_valid=true, data_validation_passed=true, is_egg=false, ribbon_flags=flags,
-                    current_hp=100, max_hp=100, sheen=party_sheen, move_count=4, moves={{1,2,3,4}}, unavailable_move_slots={{}},
+                    current_hp=100, max_hp=100, sheen=party_sheen, move_count=4, moves={{1,2,3,4}},
+                    unavailable_move_slots=setmetatable({{}}, {{__json_array=true}}),
                     owned_ribbon_bits=bits, owned_count=count, all_ribbons_owned=false, next_target=next_target}}
+            end
+            function read_party(at, startup_party)
+                party_snapshots = party_snapshots + 1
+                if party_unreadable then error('The first Pokemon failed stored-data validation') end
+                local value = party(at)
+                if startup_party then
+                    for _, field in ipairs({{'is_egg','current_hp','max_hp','hp_encoding','sheen',
+                        'moves','move_count','unavailable_move_slots'}}) do value[field] = startup_party[field] end
+                    value.static_read_frame = startup_party.static_read_frame or startup_party.frame
+                    value.read_scope = 'items_and_ribbons'
+                else
+                    value.static_read_frame, value.read_scope = at, 'startup_readiness'
+                end
+                return value
             end
             dofile = function(path)
                 if path:match('/bag_contest%.lua$') then
                     local options_reader = real_dofile({literal((ROOT / 'lua/platinum.lua').as_posix())})
-                    return {{new=function() return {{snapshot=function(at, include_options)
+                    return {{new=function() return {{snapshot=function(at, include_options, startup_party)
                         bag_snapshots = bag_snapshots + 1
                         local items = {{}}
                         for index=1,6 do items[index]={{position=index,item_id=index,quantity=2}} end
@@ -173,11 +187,12 @@ class ContestClock:
                             accessory_snapshots = accessory_snapshots + 1
                             accessories = options_reader.read_accessories(memory, options_save, at)
                         end
-                        return {{frame=at,game={{code='CPUJ',supported=true}},party=party(at),bag={{items=items}},
+                        return {{frame=at,game={{code='CPUJ',supported=true}},party=read_party(at, startup_party),
+                            bag={{pocket='Items',items=items,count=#items,position_base=1}},
                             options=options,accessories=accessories,access={{direct_read_frames=0,injects_inputs=false}}}}
                     end}} end}}
                 elseif path:match('/party_contest%.lua$') then
-                    return {{new=function() return {{read_first=function(at) return party(at) end}} end}}
+                    return {{new=function() return {{read_first=read_party}} end}}
                 elseif path:match('/screen_checks%.lua$') then
                     local module = real_dofile(path)
                     module.read=function(_, expected)
@@ -205,13 +220,9 @@ class ContestClock:
                     return module
                 elseif path:match('/dance_pixels%.lua$') then
                     return {{bar=function()
-                        if measurement_pointer_bounds then
-                            return {{found=true,first_x=8,last_x=measurement_pointer_bounds[1],
-                                position_bounds=measurement_pointer_bounds,white_flash=false}}
-                        end
-                        if measurement_unreadable then return {{found=false,first_x=256,last_x=-1,white_flash=true}} end
-                        if calibration_pointer_x or rank_pointer_override then
-                            local x = calibration_pointer_x or rank_pointer_override
+                        if rank_unreadable then return {{found=false,first_x=256,last_x=-1,white_flash=true}} end
+                        if entry_pointer_x or rank_pointer_override then
+                            local x = entry_pointer_x or rank_pointer_override
                             return {{found=true,first_x=8,last_x=x,position_bounds={{x,x}},white_flash=false}}
                         end
                         if not rank_visual_origin then return {{}} end
@@ -258,8 +269,9 @@ class ContestClock:
             dofile({literal((ROOT / 'contest/super_contest.lua').as_posix())})
             return 'ready'
         """)
-        self.call("init-run", "integrated-check", self.work,
-            0 if observation_policy in ("measurement", "debug_inputs") else debug, observation_policy)
+        profile_path = self.work + "/timing-profile.lua"
+        self.clock.lua.run(f"configs[{literal(profile_path)}]={literal(super_contest.load_profile())}; return 'ready'")
+        self.call("init-run", "integrated-check", self.work, debug, profile_path)
 
     def close(self):
         self.clock.close()
@@ -294,7 +306,7 @@ class ContestClock:
         record = pending["checkpoint"]
         saving = record["save_required"]
         slots = {"stage-2-prep": 2, "stage-4-dress": 4, "stage-5-dance": 5, "stage-6-act": 6}
-        slot = slots.get(record["checkpoint"], 10 if self.observation_policy in ("measurement", "debug_inputs") else 9)
+        slot = slots.get(record["checkpoint"], 9)
         suffix = f"ds{slot % 10}" if saving else "json"
         arguments = [record["run_id"], record["visit"], record["frame"], record["epoch"],
             f"{self.work}/checkpoints/visit-{record['visit']}.{suffix}", "true"]
@@ -311,7 +323,7 @@ class ContestClock:
         if self.stage == 1:
             self.read_memory()
         capture = self.call("capture")
-        return self.acknowledge(self.call("visit", "pass", "visual_review", f"{self.work}/review.png", "Native fixture accepted.",
+        return self.acknowledge(self.call("visit", "pass", "local_reference_pixels", f"{self.work}/review.png", "Native fixture accepted.",
             capture["frame"], capture["epoch"]))
 
     def read_memory(self):
@@ -335,7 +347,17 @@ class ContestClock:
         self.call("init-prep", self.config(prep))
         if prep["inputs"]:
             self.clock.command("combo", "inputs", *prep["inputs"])
-        self.clock.lua.run(f"held_item={prep['expected_item_id']}; return 'ready'")
+        if prep["inputs"]:
+            self.clock.lua.run(f"""
+                local previous, required = held_item, {prep['expected_item_id']}
+                scarf_quantities[required] = scarf_quantities[required] - 1
+                if scarf_quantities[required] == 0 then scarf_quantities[required] = nil end
+                if previous >= 260 and previous <= 264 then
+                    scarf_quantities[previous] = (scarf_quantities[previous] or 0) + 1
+                end
+                held_item = required
+                return 'ready'
+            """)
         self.acknowledge(self.call("visit"))
         self.preparation = deepcopy(self.boundary)
         return initial, prep
@@ -348,17 +370,12 @@ class ContestClock:
         self.clock.command("combo", "inputs", *plan["inputs"])
         self.review()
 
-    def dress(self, taps, *, finish=False, calibrate=False, change_calibration=None):
-        plan = stage4_dress.dress_plan(host_timeout=300, from_stage3=True, transition_seconds=1 / stage4_dress.FRAME_RATE)
+    def dress(self, taps, *, finish=False):
+        plan = stage4_dress.dress_plan(host_timeout=300, transition_seconds=1 / stage4_dress.FRAME_RATE)
         dressing = plan["automatic_dressing"]
         self.full_check = dressing["full_checks"][self.boundary["snapshot"]["target"]["rank"]]
         self.pearl = self.full_check.get("pearl_rgb", dressing["indicator_rgb"]["pearl"])
         self.heart = self.full_check.get("heart_rgb", dressing["indicator_rgb"]["heart"])
-        if calibrate:
-            plan["pointer_calibration_frames"] = 60
-        else:
-            plan["require_demo_pointer"] = True
-        self.calibration_advance, self.calibration_inputs = None, []
         config, handoff = self.begin(4, plan, initial_page_taps=taps)
         self.call("init")
         if taps:
@@ -373,35 +390,20 @@ class ContestClock:
             self.clock.command("dress-transition")
             self.clock.command("observe-frames", 60)
             self.call("check-dance")
-            self.clock.lua.run("calibration_pointer_x=8; return 'ready'")
+            self.clock.lua.run("entry_pointer_x=8; return 'ready'")
             capture = self.call("capture")
-            calibration, pointer_x = None, 8
-            if calibrate:
-                first = {"frame": capture["frame"], "epoch": capture["epoch"], "pointer_x": 8,
-                    "path": config["work"] + "/pointer-calibration-start.gd", "source": "offline_pointer_fixture"}
-                self.clock.lua.run(f"mock_files[{literal(first['path'])}] = native_raw; return 'ready'")
-                self.call("calibration-start", self.config(first))
-                self.clock.reset_measurement()
-                self.calibration_advance = self.clock.command("calibrate-pointer")
-                self.calibration_inputs = self.clock.trace()
-                self.clock.lua.run("calibration_pointer_x=28; return 'ready'")
-                capture = self.call("capture")
-                last = {**first, "frame": capture["frame"], "pointer_x": 28, "path": config["work"] + "/stage4.gd"}
-                calibration, pointer_x = pointer_calibration(first, last), 28
-                if change_calibration:
-                    change_calibration(calibration)
             evidence = {"frame": capture["frame"], "epoch": capture["epoch"], "dance": 1,
                 "source": "fresh_zero_frame_left_tip_pixels", "path": config["work"] + "/stage4.gd",
-                "phase": "demo", "frame_range": [0, 0], "pointer_calibration": calibration,
-                "pointer": {"status": "exact", "position_bounds": [pointer_x, pointer_x]}}
+                "phase": "demo", "frame_range": [0, 0],
+                "pointer": {"status": "exact", "position_bounds": [8, 8]}}
             self.acknowledge(self.call("visit", self.config(evidence)))
-            self.clock.lua.run("calibration_pointer_x=nil; return 'ready'")
+            self.clock.lua.run("entry_pointer_x=nil; return 'ready'")
         return config, handoff, progress
 
     def act(self, *, win=False, rounds=4, move_categories=None, move_hearts=None, star_counts=None,
-            acting_positions=None, entry_change=None, after_entry=None, before_round=None):
-        plan = stage6_act.acting_plan(host_timeout=300, hold_frames=1, release_frames=1, from_stage5=True,
-                                     round_seconds=1, final_seconds=1, source_slot=5)
+            acting_positions=None, entry_change=None, after_entry=None, before_round=None, before_result=None):
+        plan = stage6_act.acting_plan(host_timeout=300, hold_frames=1, release_frames=1,
+                                     round_seconds=1, final_seconds=1)
         self.begin(6, plan, attempt=1, overworld={"points": [[1, 1, 0, 0, 0]], "reference": {"source": "native_fixture"}})
         self.call("begin-attempt")
         self.clock.command("advance", 10)
@@ -441,34 +443,27 @@ class ContestClock:
                 after_entry(self)
         if rounds == 4:
             self.clock.lua.run(f"won={literal(win)}; return 'ready'")
+            if before_result:
+                before_result(self)
             self.call("inspect")
-            self.clock.command("combo", "inputs", "X:1:1")
+            self.clock.command("combo", "inputs", plan["memory_x_input"])
             self.acknowledge(self.call("result-visit"))
         return plans
 
-    def ranked_dance(self, *, feedback_policy="first_button_only", bad_feedback=None, early_midpoint_x=None,
+    def ranked_dance(self, *, bad_feedback=None, early_midpoint_x=None,
                       feedback_delays=None, missing_feedback=(), cue_side_offset_pixels=None, final_response_x=None,
-                      midpoint_diagnostics=False, midpoint_positions=None, post_fix_pointer_x=None,
+                       midpoint_positions=None, post_fix_pointer_x=None,
                        selected_inputs=None, changed_cues=(), missed_inputs=None, unreadable_midpoints=(), missed_feedback=None,
                        transition_seconds=1 / stage4_dress.FRAME_RATE, changed_paused_framebuffer=False,
                        rejected_plans=(), handoff_faults=(), counted_display_hold=False):
-        recording = feedback_policy == "record_all_buttons"
         target = self.boundary["snapshot"]["target"]
-        calibration = None if recording else self.boundary["snapshot"].get("pointer_calibration")
-        fixed = debug_contest.fixed_timing(target["category"], target["rank"]) if recording else (
-            fixed_timing(target["category"], target["rank"]) if calibration is None and self.observation_policy == "scheduled" else None)
-        entry_x = self.boundary["snapshot"]["visual"]["x"] if recording else self.boundary["snapshot"]["screen"]["pointer"]["position_bounds"][0]
+        fixed = fixed_timing(target["category"], target["rank"])
+        entry_x = self.boundary["snapshot"]["screen"]["pointer"]["position_bounds"][0]
         plan = rank_dance.stage5_plan(rank=target["rank"], source_frame=self.boundary["frame"], host_timeout=300,
-            transition_seconds=transition_seconds, feedback_policy=feedback_policy,
-            offset_frames=debug_contest.DEFAULT_OFFSET_FRAMES if recording else rank_dance.DEFAULT_OFFSET_FRAMES,
-            pointer_calibration=calibration, fixed_timing=fixed,
-            entry_pointer_x=entry_x,
-            first_feedback_policy="warn_and_continue",
-            observation_policy="scheduled" if recording else self.observation_policy,
-            midpoint_diagnostics=midpoint_diagnostics)
+            transition_seconds=transition_seconds, offset_frames=rank_dance.DEFAULT_OFFSET_FRAMES,
+            fixed_timing=fixed, entry_pointer_x=entry_x)
         profile = plan["rank_timing"]
         tolerant = plan["tolerant_inputs"]
-        scheduled_feedback = plan["scheduled_feedback_recovery"]
         self.begin(5, plan)
         self.call("init")
         timelines = []
@@ -485,17 +480,13 @@ class ContestClock:
                 self.clock.command("wait-gap")
             if number == 1:
                 expected_midpoint = plan["midpoint_timing"]["frames"][0]
-            elif scheduled_feedback:
+            else:
                 previous = self.rank_plans[-1]
                 origin = previous.get("counted_midpoint_anchor") or previous
                 anchor = previous["fallback_midpoint_frame"] if previous.get("skip_reason") else origin["frame"] \
                     + math.floor((127 - origin["pointer_x"]) / profile["pixels_per_frame"])
                 expected_midpoint = anchor + profile["cycle_frames"] + gap
-            else:
-                first = self.rank_midpoints[0]["frame"]
-                expected_midpoint = first + (number - 1) * profile["cycle_frames"] \
-                    + ((number - 1) // 2) * profile["extra_switch_frames"]
-            self.clock.lua.run("measurement_unreadable=false; rank_pointer_override=nil; rank_visual_origin=frame; rank_feedback_due=frame+99999; rank_feedback_events=nil; capture_frames={}; return 'ready'")
+            self.clock.lua.run("rank_unreadable=false; rank_pointer_override=nil; rank_visual_origin=frame; rank_feedback_due=frame+99999; rank_feedback_events=nil; capture_frames={}; return 'ready'")
             observed = self.clock.command("observe-demo")
             pointer_x = (midpoint_positions or {}).get(number, 128)
             if midpoint_positions:
@@ -576,12 +567,11 @@ class ContestClock:
                 if number in unreadable_midpoints:
                     resolved = rank_dance.skipped_response({"frame": midpoint["frame"], "epoch": midpoint["epoch"],
                         "midpoint_timing": midpoint["observation"]["midpoint_timing"]}, number, plan, "unreadable_midpoint")
-                    self.clock.lua.run("measurement_unreadable=true; return 'ready'")
-                if scheduled_feedback:
-                    resolved.update(rank_dance.feedback_schedule(resolved,
-                        delay_frames=plan["first_feedback_delay_frames"], rank_timing=profile))
+                    self.clock.lua.run("rank_unreadable=true; return 'ready'")
+                resolved.update(rank_dance.feedback_schedule(resolved,
+                    delay_frames=plan["first_feedback_delay_frames"], rank_timing=profile))
             self.rank_plans.append(resolved)
-            if self.observation_policy == "scheduled" and number == 1 and not recording:
+            if number == 1:
                 resolved["first_feedback_frame"] = next((press["frame"] + plan["first_feedback_delay_frames"]
                     for index, press in enumerate(resolved["presses"], 1) if press.get("input_index", index) == 1), None)
             submitted = {**resolved, "epoch": resolved["epoch"] + 1} if number in rejected_plans else resolved
@@ -639,7 +629,7 @@ class ContestClock:
                     return 'ready'
                 """)
             if recovering:
-                if number == 1 and not recording:
+                if number == 1:
                     checkpoint("rank-dance-offset", midpoint["frame"])
                 mirrored = self.clock.command("mirror")
             else:
@@ -650,7 +640,7 @@ class ContestClock:
                 self.clock.lua.run(f"{callback}=saved_feedback_callback; return 'ready'")
             if mirrored.get("error"):
                 raise AssertionError(mirrored["error"])
-            if number == 1 and not recording and not recovering:
+            if number == 1 and not recovering:
                 if changed_paused_framebuffer:
                     self.clock.lua.run("pixel(240,181,{4,5,6}); return 'ready'")
                 checkpoint("rank-dance-offset", mirrored["frame"])
@@ -664,8 +654,6 @@ class ContestClock:
             captures["buttons"] = self.clock.trace()[-(mirrored["frame"] - midpoint["frame"]):]
             self.rank_captures.append(captures)
             checkpoint("rank-dance-finish", mirrored["frame"])
-        if feedback_policy in ("all_buttons", "record_all_buttons"):
-            return timelines
         faults = set(handoff_faults)
         def handoff_action(action, *args, expected, name):
             if action in faults:
@@ -674,7 +662,7 @@ class ContestClock:
                     "gui.gdscreenshot=saved; error('Handoff capture failed') end; return 'ready'")
             result = self.clock.command(action, *args)
             if result.get("stop_reason") != expected:
-                raise rank_speed_probe.ReviewNeeded("The handoff capture did not complete.")
+                raise dance_response.ReviewNeeded("The handoff capture did not complete.")
             return result
 
         rank_dance.stage5_handoff(SimpleNamespace(action=handoff_action, command=self.call, record=Mock()), plan)
@@ -687,8 +675,8 @@ class ContestClock:
 
 
 class PersistentLuaChecks(unittest.TestCase):
-    def harness(self, rank="Master", observation_policy="scheduled", *, debug=super_contest.debug):
-        harness = ContestClock(rank, observation_policy, debug=debug)
+    def harness(self, rank="Master", *, debug=super_contest.debug):
+        harness = ContestClock(rank, debug=debug)
         self.addCleanup(harness.close)
         return harness
 
@@ -720,6 +708,108 @@ class PersistentLuaChecks(unittest.TestCase):
         self.assertEqual(initial["party"], snapshot["party"])
         self.assertEqual(harness.clock.lua.run("return bag_snapshots .. ':' .. options_snapshots .. ':' .. accessory_snapshots"), "1:1:1")
         self.assertEqual(harness.clock.trace(), [])
+
+    def test_host_preparation_accepts_counted_inputs_without_a_post_equip_item_check(self):
+        harness = self.harness(debug=0)
+        loading = stage1_load.load_plan(boot_wait_frames=1, hold_frames=1, start_wait_frames=1,
+            a_wait_frames=1, b_wait_frames=1)
+        harness.begin(1, loading)
+        harness.clock.command("combo", "inputs", *loading["inputs"])
+        harness.review()
+        with temporary_directory() as folder:
+            runtime = SimpleNamespace(settings=super_contest.chain_plan(debug=0), active_work=Path(folder),
+                stage=2, section_visit=2, run_id="integrated-check", stage_deadline=time.monotonic() + 300,
+                target=None, bag_context={"opened_once": False, "cursor_position": 1}, json=Mock(),
+                start_section=lambda plan: harness.begin(2, plan), command=harness.call,
+                lua=lambda name, value: Path(harness.config(value)))
+
+            def action(action, *args, expected, name):
+                result = harness.clock.command(action, *args)
+                self.assertEqual(result["stop_reason"], expected)
+                harness.clock.lua.run("party_unreadable=true; return 'ready'")
+                return result
+
+            def acknowledge(pending, *, slot):
+                self.assertEqual(slot, 2)
+                result = harness.acknowledge(pending)
+                runtime.boundary = {"checkpoint": result["checkpoint"], "save_state": None, "receipt": "prep.json"}
+                return result
+
+            runtime.action, runtime.acknowledge = action, acknowledge
+            result = sections.prep(runtime)
+        self.assertEqual(result["outcome"], "pass")
+        self.assertEqual(result["planned_item_id"], 260)
+        self.assertEqual(result["source_party"]["held_item_id"], 0)
+        self.assertNotIn("final_party", result)
+        self.assertEqual(runtime.bag_context, {"opened_once": True, "cursor_position": 7})
+        self.assertEqual(harness.clock.lua.run("return party_snapshots .. ':' .. bag_snapshots"), "1:1")
+
+    def test_fresh_scarf_order_and_last_copy_cursor_need_no_inventory_prediction_or_guard(self):
+        for opened, held, quantity, old_stack, cursor in ((False, 0, 1, False, 1),
+                (True, 261, 1, True, 1), (True, 261, 1, False, 2), (True, 0, 2, False, 2)):
+            with self.subTest(opened=opened, held=held, quantity=quantity, old_stack=old_stack):
+                snapshot = {"party": {"species_id": 151, "held_item_id": held, "next_target": TARGET},
+                    "bag": {"items": [{"position": 1, "item_id": held if old_stack else 1, "quantity": 2},
+                        {"position": 2, "item_id": 260, "quantity": quantity}]}}
+                original = deepcopy(snapshot)
+                bag = Stage2BagState(opened)
+                plan = stage2_prep.prep_plan(snapshot, bag_state=bag)
+                self.assertEqual(plan["bag_context"], {"opened_once": True, "cursor_position": cursor})
+                self.assertEqual(tuple(step.split(":")[0] for step in plan["inputs"][:len(bag.opening_buttons())]),
+                    bag.opening_buttons())
+                self.assertEqual(bag.opened_once, opened)
+                self.assertEqual(snapshot, original)
+        for held, target, mode in ((260, TARGET, "correct_scarf_held"),
+                (0, TARGET, "scarf_unavailable"), (0, None, "all_ribbons_owned")):
+            with self.subTest(mode=mode):
+                snapshot = {"party": {"species_id": 151, "held_item_id": held, "next_target": target}, "bag": {"items": []}}
+                plan = stage2_prep.prep_plan(snapshot, bag_state=Stage2BagState(), cursor=5)
+                self.assertEqual((plan["mode"], plan["inputs"]), (mode, []))
+                self.assertEqual(plan["bag_context"], {"opened_once": False, "cursor_position": 5})
+        harness = self.harness(debug=0)
+        harness.clock.lua.run("scarf_quantities[260]=1; return 'ready'")
+        harness.prepare_entry()
+        before = harness.preparation["snapshot"]
+        self.assertEqual(before["party"]["held_item_id"], 0)
+        self.assertIn(260, [item["item_id"] for item in before["bag"]["items"]])
+        harness.dress(0, finish=True)
+        harness.ranked_dance()
+        harness.act(win=True, before_result=lambda value: value.clock.lua.run("held_item=264; return 'ready'"))
+        fresh = deepcopy(harness.boundary["snapshot"])
+        self.assertEqual(fresh["party"]["held_item_id"], 264)
+        self.assertNotIn(260, [item["item_id"] for item in fresh["bag"]["items"]])
+        self.assertNotIn("item_guard", fresh)
+        messages = harness.clock.lua.run("return table.concat(lua_messages, '\\n')")
+        self.assertNotIn("item mismatch", messages.lower())
+        self.assertNotIn("scarf equip failed", messages.lower())
+        initial, plan = harness.prepare()
+        self.assertEqual(initial["bag"], fresh["bag"])
+        self.assertEqual(plan["target_position"], 7)
+        self.assertEqual(plan["mode"], "equip_scarf")
+        self.assertEqual(plan["inputs"][:2], ["X:12:90", "A:12:90"])
+        self.assertFalse(any(step.startswith(("up:", "down:")) for step in plan["inputs"]))
+        self.assertEqual(harness.boundary["snapshot"]["party"]["held_item_id"], 264)
+        self.assertEqual(harness.clock.lua.run("return party_snapshots .. ':' .. bag_snapshots"), "2:2")
+
+    def test_unreadable_contest_finish_memory_stays_paused_without_a_fallback_read(self):
+        harness = self.harness(debug=0)
+        harness.prepare_entry()
+        harness.dress(0, finish=True)
+        harness.ranked_dance()
+
+        def fail_result_read(value):
+            value.clock.lua.run("party_unreadable=true; return 'ready'")
+            value.clock.reset_measurement()
+
+        with self.assertRaisesRegex(AssertionError, "failed stored-data validation"):
+            harness.act(before_result=fail_result_read)
+        frame = int(harness.clock.lua.run("return tostring(frame)"))
+        self.assertEqual(harness.clock.trace(), [])
+        self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
+        stopped = harness.call("abort", "Unreadable contest-finish record")
+        self.assertEqual(stopped["frame"], frame)
+        self.assertEqual(stopped["checkpoint"]["snapshot"]["image"]["frame"], frame)
+        self.assertEqual(harness.clock.lua.run("return party_snapshots .. ':' .. bag_snapshots"), "2:2")
 
     def test_startup_warnings_print_once_and_continue_from_the_accepted_snapshot(self):
         cases = (("low preparation", "party_sheen=254; memory_values[0x02045808]=9; scarf_quantities[264]=nil", 3),
@@ -794,7 +884,7 @@ class PersistentLuaChecks(unittest.TestCase):
                 harness.read_memory()
                 harness.clock.reset_measurement()
                 capture = harness.call("capture")
-                pending = harness.call("visit", "pass", "visual_review", f"{harness.work}/review.png",
+                pending = harness.call("visit", "pass", "local_reference_pixels", f"{harness.work}/review.png",
                     "Native fixture accepted.", capture["frame"], capture["epoch"])
                 record = pending["checkpoint"]
                 self.assertEqual(record["decision"], "abort")
@@ -818,7 +908,7 @@ class PersistentLuaChecks(unittest.TestCase):
                 self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
                 self.assertEqual(harness.clock.trace(), [])
 
-    def test_host_and_lua_save_slots_4_5_6_in_order_for_completed_misses_and_wins_only_in_debug(self):
+    def test_startup_result_reads_reentry_and_debug_save_ownership_share_one_runtime(self):
         for debug in (0, 1):
             with self.subTest(debug=debug), temporary_directory() as folder:
                 work, saved_slots = Path(folder), []
@@ -852,52 +942,93 @@ class PersistentLuaChecks(unittest.TestCase):
                 harness.acknowledge = acknowledge
                 with patch.object(StateSlots, "save", autospec=True, side_effect=native_save) as native:
                     harness.prepare_entry()
+                    startup_party = deepcopy(harness.preparation["snapshot"]["party"])
+                    self.assertEqual(harness.clock.lua.run(
+                        "return party_snapshots .. ':' .. bag_snapshots .. ':' .. options_snapshots .. ':' .. accessory_snapshots"),
+                        "1:1:1:1")
                     self.assertEqual(saved_slots, [2] if debug else [])
                     for win in (False, True):
                         if win:
-                            harness.prepare()
+                            previous = deepcopy(harness.boundary)
+                            harness.clock.lua.run("party_unreadable=true; return 'ready'")
+                            initial, prep = harness.prepare()
+                            self.assertEqual(initial["frame"], previous["frame"])
+                            self.assertEqual(initial["party"], previous["snapshot"]["party"])
+                            self.assertEqual(initial["bag"], previous["snapshot"]["bag"])
+                            self.assertEqual(prep["inputs"], [])
+                            self.assertEqual(prep["bag_context"], {"opened_once": True, "cursor_position": 7})
+                            self.assertFalse(harness.boundary["snapshot"]["access"]["live_memory_read"])
                             harness.enter()
+                            self.assertGreater(harness.boundary["visit"], previous["visit"])
+                        expected_reads = 1 + int(win)
+                        harness.clock.lua.run("party_unreadable=true; return 'ready'")
                         harness.dress(0, finish=True)
                         harness.ranked_dance()
                         self.assertEqual(saved_slots[-2:], [4, 5] if debug else [])
-                        harness.act(win=win)
+
+                        def allow_result_read(value):
+                            self.assertEqual(value.clock.lua.run("return party_snapshots .. ':' .. bag_snapshots"),
+                                f"{expected_reads}:{expected_reads}")
+                            self.assertEqual(value.clock.trace()[-102:], ["X"] * 12 + [""] * 90)
+                            value.clock.lua.run("party_unreadable=false; return 'ready'")
+
+                        harness.act(win=win, before_result=allow_result_read)
+                        snapshot = harness.boundary["snapshot"]
                         self.assertEqual(harness.boundary["decision"], "hit" if win else "miss")
+                        self.assertEqual(harness.boundary["branch"], "success" if win else "retry-contest")
                         self.assertEqual(harness.boundary["epoch"], 0)
-                        self.assertEqual(harness.boundary["snapshot"]["trial"]["completed_rounds"], 4)
+                        self.assertEqual(snapshot["trial"]["completed_rounds"], 4)
                         self.assertEqual(harness.boundary["save_required"], bool(debug))
                         self.assertEqual(runtime.boundary["save_state"]["slot"] if debug else runtime.boundary["save_state"],
                             6 if debug else None)
+                        self.assertEqual(harness.clock.lua.run(
+                            "return party_snapshots .. ':' .. bag_snapshots .. ':' .. options_snapshots .. ':' .. accessory_snapshots"),
+                            f"{expected_reads + 1}:{expected_reads + 1}:1:1")
+                        read = snapshot["memory_read"]
+                        self.assertEqual((read["source"], read["frame"], read["epoch"], read["direct_read_frames"]),
+                            ("x_menu_paused_memory", snapshot["party"]["frame"], harness.boundary["epoch"], 0))
+                        self.assertEqual(harness.boundary["frame"] - read["frame"], 102)
+                        self.assertEqual(snapshot["party"]["static_read_frame"], startup_party["frame"])
+                        for field in ("moves", "move_count", "unavailable_move_slots", "current_hp", "max_hp", "sheen"):
+                            self.assertEqual(snapshot["party"][field], startup_party[field])
+                        self.assertEqual(harness.clock.trace()[-102:], ["X"] * 12 + [""] * 90)
                     self.assertEqual(saved_slots, [2, 4, 5, 6] * 2 if debug else [])
                     self.assertEqual(native.call_count, len(saved_slots))
                 self.assertEqual({path.suffix for path in (work / "StateSlots").iterdir()},
                     {".ds2", ".ds4", ".ds5", ".ds6"} if debug else set())
+                counts = harness.counters()
+                self.assertEqual(counts["engines"], 1)
+                self.assertEqual(counts["callbacks"], {"registerbefore": 1, "registerafter": 1, "registermenustart": 1})
+                rejected = harness.clock.checkpoint("state-changed", "load", harness.boundary["visit"])
+                self.assertIn("Quick-loads are disabled", rejected["error"])
+                self.assertEqual((rejected["frame"], rejected["epoch"]), (harness.boundary["frame"], 0))
 
     def test_acting_handoff_selects_native_slot_5_and_allows_a_state_free_source(self):
         for debug in (0, 1):
             with self.subTest(debug=debug), temporary_directory() as folder:
                 work = Path(folder)
-                source = work / "entry.gd"
-                source.write_bytes(b"accepted entry pixels")
                 saved = {"retained_path": str(work / "accepted.ds5"), "slot": 5} if debug else None
-                checkpoint = {"checkpoint": "stage-5-dance", "frame": 500, "epoch": 0}
-                handoff = {"entry_pointer": {"status": "exact", "position_bounds": [64, 64]}, "source_frame": 100,
-                    "rank_timing": fixed_timing("Cool", "Master"), "source_image": {"path": str(source)}}
-                runtime = SimpleNamespace(settings=super_contest.chain_plan(debug=debug), target=TARGET, dance_handoff=handoff,
+                checkpoint = {"checkpoint": "stage-5-dance", "frame": 500, "epoch": 0, "snapshot": {}}
+                source = {"checkpoint": "stage-4-dress", "frame": 100, "epoch": 0,
+                    "snapshot": {"screen": {"pointer": {"status": "exact", "position_bounds": [64, 64]}}}}
+                runtime = SimpleNamespace(settings=super_contest.chain_plan(debug=debug), target=TARGET,
                     active_work=work, stage=5, run_id="handoff-check", section_visit=1,
-                    boundary={"checkpoint": checkpoint, "receipt": str(work / "accepted.json"), "save_state": saved},
-                    register=lambda path, **_: path, start_section=Mock(), command=Mock(return_value={"checkpoint": checkpoint}),
+                    boundary={"checkpoint": source, "receipt": str(work / "source.json"), "save_state": None},
+                    start_section=Mock(), command=Mock(return_value={"checkpoint": checkpoint}),
                     acknowledge=Mock(), action=Mock(return_value={}), json=Mock())
+                runtime.acknowledge.side_effect = lambda *_, **__: setattr(runtime, "boundary",
+                    {"checkpoint": checkpoint, "receipt": str(work / "accepted.json"), "save_state": saved})
                 last = {"checkpoint": {"snapshot": {"trial": {"total_input_count": 24, "total_excellent_count": 1,
                     "total_skipped_inputs": 0, "total_miss_count": 0}, "offset_check": {}}}}
                 with patch("contest.rank_dance.stage5_responses", return_value=([], last)):
                     result = sections.dance(runtime)
                 runtime.acknowledge.assert_called_once_with({"checkpoint": checkpoint}, slot=5)
-                acting = runtime.json.call_args.args[1]
-                self.assertEqual(acting["source_state"], saved["retained_path"] if debug else None)
-                self.assertEqual((acting["source_frame"], acting["source_epoch"]), (500, 0))
+                self.assertEqual(runtime.start_section.call_args.args[0]["source_frame"], 100)
+                self.assertEqual(result["checkpoint"], checkpoint)
+                runtime.json.assert_not_called()
                 self.assertEqual(result["save_state"], saved)
 
-    def test_custom_entry_is_inert_and_requires_a_fresh_confirmed_endpoint(self):
+    def test_main_entry_requires_a_fresh_confirmed_endpoint(self):
         self.assertIs(sections.RUNNERS[3], sections.enter)
         self.assertEqual(super_contest.chain_plan()["sections"][2]["callable"], "contest.sections.enter")
         for confirmed in (True, False):
@@ -913,8 +1044,9 @@ class PersistentLuaChecks(unittest.TestCase):
                 runtime = SimpleNamespace(active_work=Path(folder), settings=super_contest.chain_plan(), stage=3,
                     run_id="integrated-check", target=source["snapshot"]["target"], section_visit=1,
                     boundary={"checkpoint": source, "save_state": None, "receipt": str(Path(folder) / "source.json")},
-                    register=lambda path, **_: path, json=lambda name, value: write_json(Path(folder) / name, value),
+                    json=lambda name, value: write_json(Path(folder) / name, value), record=Mock(), check=lambda: 300,
                     controller=SimpleNamespace(screenshot=lambda path: Image.new("RGB", (256, 384)).save(path)))
+                runtime.review = lambda capture, expected, filename: ContestRuntime.review(runtime, capture, expected, filename=filename)
 
                 def begin(plan):
                     config, handoff = harness.begin(3, plan)
@@ -938,19 +1070,19 @@ class PersistentLuaChecks(unittest.TestCase):
                 runtime.command, runtime.acknowledge = harness.call, acknowledge
                 harness.clock.lua.run(f"offline_screen_confirmed={literal(confirmed)}; return 'ready'")
                 if confirmed:
-                    result = sections.custom_enter(runtime)
+                    result = sections.enter(runtime)
                     self.assertTrue(result["stage3_accepted"])
                     self.assertIsNone(result["save_state"])
-                    self.assertEqual(result["dress_up_capture"]["direct_read_frames"], 0)
+                    self.assertEqual(result["screen_evidence"]["source"], "local_reference_pixels")
                     self.assertEqual(result["input_frames"], stage3_enter.entry_plan("Cool", "Master", host_timeout=300)["total_emulator_frames"])
                     self.assertEqual(harness.boundary["checkpoint"], "stage-3-enter")
                     self.assertTrue(harness.boundary["snapshot"]["screen"]["fresh_visual_binding"])
                 else:
-                    with self.assertRaisesRegex(RuntimeError, "Continuous enrollment did not reach dress-up"):
-                        sections.custom_enter(runtime)
+                    with self.assertRaisesRegex(RuntimeError, "Contest entry did not reach"):
+                        sections.enter(runtime)
                     self.assertEqual(harness.boundary["checkpoint"], "stage-2-prep")
                     request = json.loads((Path(folder) / "review-request.json").read_text(encoding="utf-8"))
-                    self.assertFalse(request["screen"]["confirmed"])
+                    self.assertFalse(request["automatic_check"]["confirmed"])
                     self.assertTrue(Path(request["image"]).is_file())
                 self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
 
@@ -982,8 +1114,6 @@ class PersistentLuaChecks(unittest.TestCase):
         source_frame = harness.boundary["frame"]
         _, handoff, _ = harness.dress(0, finish=True)
         self.assertEqual((handoff["frame"], handoff["handoff"]["emulator_frames"]), (source_frame, 0))
-        self.assertEqual(harness.calibration_inputs, [])
-        self.assertIsNone(harness.calibration_advance)
         entry = harness.boundary["frame"]
         timelines = harness.ranked_dance(early_midpoint_x=126, bad_feedback=(1, 2, "Good"), changed_paused_framebuffer=True)
         snapshot = harness.boundary["snapshot"]
@@ -1041,7 +1171,7 @@ class PersistentLuaChecks(unittest.TestCase):
         self.assertIn("Quick-loads are disabled", rejected["error"])
         self.assertEqual(rejected["epoch"], 0)
 
-    def test_acting_types_and_hearts_are_cached_but_order_is_read_each_round(self):
+    def test_acting_scoring_is_cached_for_four_rounds_and_refreshed_on_contest_reentry(self):
         harness = self.harness()
         harness.prepare_entry()
         harness.dress(0, finish=True)
@@ -1071,33 +1201,7 @@ class PersistentLuaChecks(unittest.TestCase):
                 (snapshot["image"]["frame"], snapshot["image"]["epoch"], snapshot["image"]["path"]))
             self.assertEqual(order["direct_read_frames"], 0)
         self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (7, 1))
-
-    def test_round_four_skips_last_used_move_with_entry_categories_cached(self):
-        harness = self.harness()
-        harness.prepare_entry()
-        harness.dress(0, finish=True)
-        harness.ranked_dance()
-        categories = ["Cool", "Cool", "Cool", "Beauty"]
-        plans = harness.act(move_categories=categories,
-            acting_positions=[1, 3, 4, 2],
-            star_counts=[[0, 0, 0], [1, 2, 0], [0, 1, 2], [0, 0, 4]],
-            after_entry=lambda value: value.clock.lua.run("paint_acting_moves({'Cute','Cute','Cute','Cute'}); return 'ready'"))
-        self.assertEqual([plan["move"] for plan in plans], [1, 2, 1, 2])
-        self.assertEqual([plan["previous_move"] for plan in plans], [1, 1, 2, 1])
-        self.assertTrue(plans[3]["matching_category_override"])
-        self.assertEqual(plans[3]["menu_buttons"], ["right", "A", "right", "right", "A"])
-        first = harness.act_snapshots[0]["move_categories"]
-        self.assertEqual(first["categories"], categories)
-        self.assertTrue(all(snapshot["move_categories"] == first for snapshot in harness.act_snapshots))
-        self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (7, 1))
-
-    def test_contest_reentry_reads_new_categories_from_a_fresh_current_state_capture(self):
-        harness = self.harness()
-        harness.prepare_entry()
-        harness.dress(0, finish=True)
-        harness.ranked_dance()
-        harness.act(move_categories=["Beauty", "Tough", "Smart", "Cool"])
-        original = harness.act_snapshots[0]["move_categories"]
+        original = first["move_categories"]
         harness.prepare()
         harness.enter()
         harness.dress(0, finish=True)
@@ -1112,55 +1216,44 @@ class PersistentLuaChecks(unittest.TestCase):
         self.assertEqual(harness.act_snapshots[1]["move_categories"], fresh)
         self.assertEqual(harness.counters()["moves"], 2)
 
-    def test_unreadable_entry_move_fill_warns_once_and_uses_recognized_moves(self):
-        harness = self.harness()
-        harness.prepare_entry()
-        harness.dress(0, finish=True)
-        harness.ranked_dance()
-        captured = {}
+    def test_unreadable_entry_fill_or_hearts_warn_once_and_reuse_recognized_moves(self):
+        for field, change in (("fill", "pixel(18,220,{132,132,132})"),
+                ("hearts", "pixel(62,242,{255,41,0})")):
+            with self.subTest(field=field):
+                harness = self.harness()
+                harness.prepare_entry()
+                harness.dress(0, finish=True)
+                harness.ranked_dance()
+                captured = {}
 
-        def obstruct(value):
-            value.clock.lua.run("pixel(18,220,{132,132,132}); return 'ready'")
-            captured["frame"] = int(value.clock.lua.run("return tostring(frame)"))
+                def obstruct(value):
+                    value.clock.lua.run(change + "; return 'ready'")
+                    captured["frame"] = int(value.clock.lua.run("return tostring(frame)"))
 
-        plans = harness.act(move_hearts=[6, 1, 4, 3], entry_change=obstruct)
-        self.assertEqual([plan["move"] for plan in plans], [3, 4, 3, 4])
-        self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
-        self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (7, 1))
-        snapshot = harness.act_snapshots[0]
-        self.assertFalse(snapshot["move_categories"]["readable"])
-        self.assertEqual(snapshot["move_categories"]["categories"][0], "unreadable")
-        self.assertEqual(snapshot["image"]["frame"], captured["frame"])
-        self.assertEqual(snapshot["move_categories"]["unrecognized_move_slots"], [1])
-        self.assertTrue(all(plan["selectable"] and not plan["unrecognized_fallback"] for plan in plans))
-        messages = json.loads(harness.clock.lua.run(f"return dofile({literal((ROOT / 'lua/json.lua').as_posix())}).encode(lua_messages)"))
-        warnings = [message for message in messages if "Acting: WARN - Move slot " in message]
-        self.assertEqual(warnings, snapshot["move_categories"]["warnings"])
-        self.assertEqual(len(warnings), 1)
-        self.assertEqual(snapshot["trial"]["completed_rounds"], 0)
-
-    def test_unreadable_entry_hearts_warn_once_and_use_recognized_moves(self):
-        harness = self.harness()
-        harness.prepare_entry()
-        harness.dress(0, finish=True)
-        harness.ranked_dance()
-
-        def obstruct(value):
-            value.clock.lua.run("pixel(62,242,{255,41,0}); return 'ready'")
-
-        plans = harness.act(move_hearts=[6, 1, 4, 3], entry_change=obstruct)
-        self.assertEqual([plan["move"] for plan in plans], [3, 4, 3, 4])
-        snapshot = harness.act_snapshots[0]
-        self.assertTrue(snapshot["move_categories"]["categories_readable"])
-        self.assertFalse(snapshot["move_categories"]["hearts_readable"])
-        self.assertEqual(snapshot["move_categories"]["hearts"][0], -1)
-        self.assertTrue(snapshot["plan"]["selectable"])
-        messages = json.loads(harness.clock.lua.run(f"return dofile({literal((ROOT / 'lua/json.lua').as_posix())}).encode(lua_messages)"))
-        warnings = [message for message in messages if "Acting: WARN - Move slot " in message]
-        self.assertEqual(warnings, snapshot["move_categories"]["warnings"])
-        self.assertEqual(len(warnings), 1)
-        self.assertIn("unrecognized raw hearts", warnings[0])
-        self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
+                plans = harness.act(rounds=2, move_hearts=[6, 1, 4, 3], entry_change=obstruct)
+                self.assertEqual([plan["move"] for plan in plans], [3, 4])
+                self.assertEqual((harness.counters()["stars"], harness.counters()["moves"]), (3, 1))
+                snapshot = harness.act_snapshots[0]
+                moves = snapshot["move_categories"]
+                self.assertFalse(moves["readable"])
+                self.assertEqual(moves["unrecognized_move_slots"], [1])
+                self.assertEqual(harness.act_snapshots[1]["move_categories"], moves)
+                self.assertEqual(snapshot["image"]["frame"], captured["frame"])
+                self.assertEqual(snapshot["trial"]["completed_rounds"], 0)
+                self.assertTrue(all(plan["selectable"] and not plan["unrecognized_fallback"] for plan in plans))
+                messages = json.loads(harness.clock.lua.run(
+                    f"return dofile({literal((ROOT / 'lua/json.lua').as_posix())}).encode(lua_messages)"))
+                warnings = [message for message in messages if "Acting: WARN - Move slot " in message]
+                self.assertEqual(warnings, moves["warnings"])
+                self.assertEqual(len(warnings), 1)
+                if field == "fill":
+                    self.assertEqual(moves["categories"][0], "unreadable")
+                else:
+                    self.assertTrue(moves["categories_readable"])
+                    self.assertFalse(moves["hearts_readable"])
+                    self.assertEqual(moves["hearts"][0], -1)
+                    self.assertIn("unrecognized raw hearts", warnings[0])
+                self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
 
     def test_no_recognized_moves_warn_and_fall_back_without_repeating_the_previous_move(self):
         harness = self.harness()
@@ -1220,29 +1313,14 @@ class PersistentLuaChecks(unittest.TestCase):
         self.assertEqual(harness.act_readiness[0]["pause_plan"]["phase"], "retry")
         self.assertEqual(harness.boundary["snapshot"]["trial"]["round"], 1)
 
-    def test_between_round_retries_and_settle_are_silent_in_both_lua_callers(self):
-        for standalone in (False, True):
-            with self.subTest(standalone=standalone):
-                harness = self.harness()
+    def test_between_round_retries_and_settle_are_silent_in_both_debug_modes(self):
+        for debug in (0, 1):
+            with self.subTest(debug=debug):
+                harness = self.harness(debug=debug)
                 harness.prepare_entry()
                 harness.dress(0, finish=True)
                 harness.ranked_dance()
-                if standalone:
-                    plan = stage6_act.acting_plan(host_timeout=300, from_stage5=True,
-                        hold_frames=1, release_frames=1, round_seconds=1, final_seconds=1)
-                    config = {**plan, "run_id": "integrated-check", "work": harness.work,
-                        "source_frame": harness.boundary["frame"], "target": harness.target,
-                        "source_context": {}, "overworld": {"points": [[1, 1, 0, 0, 0]], "reference": {}}}
-                    harness.clock.lua.run(f"assert(loadfile({literal((ROOT / 'contest/stage6_act.lua').as_posix())}))"
-                        f"({literal(config)}); paint_acting_moves({{'Beauty','Tough','Smart','Cute'}}); "
-                        "paint_acting_order(1); first_judge_capture=true; acting_fixture_round=nil; return 'ready'")
-                    harness.call("begin-attempt")
-                    harness.clock.command("advance", 10)
-                    harness.call("render-prepared")
-                    accepted = harness.acknowledge(harness.call("round-visit", 1))
-                    harness.clock.command("combo", "inputs", *accepted["checkpoint"]["snapshot"]["plan"]["steps"])
-                else:
-                    harness.act(rounds=1)
+                harness.act(rounds=1)
                 before_visit = harness.boundary["visit"]
                 before_messages = harness.clock.lua.run("return table.concat(lua_messages, '\\n')")
                 harness.clock.reset_measurement()
@@ -1312,14 +1390,6 @@ class PersistentLuaChecks(unittest.TestCase):
         self.assertNotIn("steps", snapshot["plan"])
         self.assertEqual(int(harness.clock.lua.run("return tostring(frame)")), snapshot["image"]["frame"])
         self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
-
-    def test_changed_calibration_cannot_be_acknowledged(self):
-        harness = self.harness()
-        harness.prepare_entry()
-        with self.assertRaisesRegex(AssertionError, "Checkpoint invariant failed"):
-            harness.dress(0, finish=True, calibrate=True, change_calibration=lambda value: value.update(pixels_per_frame=0.5))
-        self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
-        self.assertNotIn("stage-4-dress", [item["checkpoint"] for item in harness.log_checkpoints])
 
     def test_scheduled_first_feedback_recovers_or_expires_and_continues_without_later_checks(self):
         for missing in (False, True):
@@ -1417,14 +1487,13 @@ class PersistentLuaChecks(unittest.TestCase):
             source = harness.boundary
             plan = rank_dance.stage5_plan(rank="Master", source_frame=source["frame"], host_timeout=300,
                 fixed_timing=fixed_timing("Cool", "Master"), entry_pointer_x=source["snapshot"]["screen"]["pointer"]["position_bounds"][0],
-                first_feedback_policy="warn_and_continue", observation_policy="scheduled",
                 transition_seconds=1 / stage4_dress.FRAME_RATE)
             harness.begin(5, plan)
 
             def action(action, *args, expected=None, name=None):
                 result = harness.clock.command(action, *args)
                 if expected and result["stop_reason"] != expected:
-                    raise rank_speed_probe.ReviewNeeded("The counted dance action was interrupted.")
+                    raise dance_response.ReviewNeeded("The counted dance action was interrupted.")
                 return result
 
             def acknowledge(pending, *, slot):
@@ -1436,7 +1505,7 @@ class PersistentLuaChecks(unittest.TestCase):
                 boundary={"checkpoint": source, "save_state": None},
                 controller=SimpleNamespace(), emulator=SimpleNamespace(), command=harness.call, action=action,
                 acknowledge=acknowledge, record=Mock(), json=lambda name, value: write_json(Path(folder) / name, value))
-            with patch("contest.rank_dance.prepare_response", side_effect=rank_speed_probe.ReviewNeeded("Midpoint analysis failed")):
+            with patch("contest.rank_dance.prepare_response", side_effect=dance_response.ReviewNeeded("Midpoint analysis failed")):
                 responses, last = rank_dance.stage5_responses(runtime, plan)
             trial = last["checkpoint"]["snapshot"]["trial"]
             self.assertEqual((len(responses), trial["total_inputs"], trial["total_skipped_inputs"]), (6, 0, 24))
@@ -1476,7 +1545,7 @@ class PersistentLuaChecks(unittest.TestCase):
         """)
         harness.prepare_entry()
         seen = []
-        cases = ("Good", "Good", "Good", "Excellent", "Good", "Miss", "Good", None, "Good", "Good")
+        cases = ("Good", "Good", "Excellent", "Good")
         for index, label in enumerate(cases):
             with self.subTest(contest=index + 1, label=label):
                 if index:
@@ -1510,33 +1579,7 @@ class PersistentLuaChecks(unittest.TestCase):
                 self.assertTrue(all(captures["feedback"] == [] for captures in harness.rank_captures[1:]))
                 harness.act(win=True)
                 self.assertEqual(harness.boundary["decision"], "hit")
-        self.assertEqual(seen, list(range(3, 13)))
-
-    def test_ribbon_miss_reenters_from_the_current_overworld_in_both_debug_modes(self):
-        for debug in (0, 1):
-            with self.subTest(debug=debug):
-                harness = self.harness(debug=debug)
-                harness.prepare_entry()
-                harness.dress(7, finish=True)
-                harness.ranked_dance()
-                harness.act()
-                self.assertEqual(harness.boundary["decision"], "miss")
-                self.assertEqual(harness.boundary["branch"], "retry-contest")
-                current_frame = harness.boundary["frame"]
-                previous_visit = harness.boundary["visit"]
-                initial, prep = harness.prepare()
-                self.assertEqual(initial["frame"], current_frame)
-                self.assertEqual(initial["party"]["owned_ribbon_bits"], [0, 1, 2])
-                self.assertEqual(prep["bag_context"], {"opened_once": True, "cursor_position": 7})
-                self.assertEqual(prep["inputs"], [])
-                harness.enter()
-                self.assertGreater(harness.boundary["visit"], previous_visit)
-                self.assertEqual(harness.boundary["epoch"], 0)
-                rejected = harness.clock.checkpoint("state-changed", "load", previous_visit)
-                self.assertIn("Quick-loads are disabled", rejected["error"])
-                self.assertEqual((rejected["frame"], rejected["epoch"]), (harness.boundary["frame"], 0))
-                self.assertEqual(harness.counters()["engines"], 1)
-                self.assertEqual(harness.counters()["callbacks"], {"registerbefore": 1, "registerafter": 1, "registermenustart": 1})
+        self.assertEqual(seen, list(range(3, 3 + len(cases))))
 
     def test_initial_page_navigation_precedes_analysis_and_counts_every_frame(self):
         for taps in (0, 7):
@@ -1563,7 +1606,7 @@ class PersistentLuaChecks(unittest.TestCase):
                 harness = self.harness()
                 harness.prepare_entry()
                 source = harness.boundary["frame"]
-                plan = stage4_dress.dress_plan(host_timeout=300, from_stage3=True,
+                plan = stage4_dress.dress_plan(host_timeout=300,
                     dress_seconds=budget / stage4_dress.FRAME_RATE)
                 automatic = plan["automatic_dressing"]
                 check = automatic["full_checks"][harness.boundary["snapshot"]["target"]["rank"]]
@@ -1618,7 +1661,7 @@ class PersistentLuaChecks(unittest.TestCase):
         harness = self.harness()
         harness.prepare_entry()
         source = harness.boundary["frame"]
-        plan = stage4_dress.dress_plan(host_timeout=300, from_stage3=True,
+        plan = stage4_dress.dress_plan(host_timeout=300,
             dress_seconds=40 / stage4_dress.FRAME_RATE, page_wait_frames=0)
         harness.begin(4, plan, initial_page_taps=0)
         harness.call("init")
@@ -1636,64 +1679,17 @@ class PersistentLuaChecks(unittest.TestCase):
         finished = harness.clock.command("finish-dressing")
         self.assertEqual((finished["command_start_frame"], finished["command_end_frame"]), (source + 40, source + 43))
 
-    def test_debug_checks_every_fresh_excellent_and_stops_after_six_responses(self):
-        harness = self.harness(rank="Normal", observation_policy="diagnostic", debug=1)
-        harness.prepare_entry()
-        harness.dress(0, finish=True)
-        timelines = harness.ranked_dance(feedback_policy="all_buttons")
-        snapshot = harness.boundary["snapshot"]
-        trial = snapshot["trial"]
-        self.assertEqual(harness.boundary["checkpoint"], "rank-dance-finish")
-        self.assertEqual((trial["dance"], trial["total_input_count"], trial["total_judgment_count"],
-            trial["total_excellent_count"]), (6, 18, 18, 18))
-        self.assertEqual(snapshot["rank_timing"]["cue_side_offset_pixels"], 128)
-        self.assertEqual(trial["feedback_policy"], "all_buttons")
-        self.assertTrue(trial["feedback_policy_met"])
-        self.assertEqual((snapshot["offset_check"]["dance"], snapshot["offset_check"]["index"]), (1, 1))
-        for records in timelines:
-            self.assertEqual([item["frame"] - records[0]["frame"] for item in records[:3]], [0, 1, 2])
-            self.assertEqual([item["readable"] for item in records[:3]], [True, False, False])
-        endpoints = [record for record in harness.saved_checkpoints if record["checkpoint"] == "rank-dance-finish"]
-        self.assertEqual(len(endpoints), 6)
-        self.assertTrue(all(judgment["fresh_message"] and judgment["label"] == "Excellent"
-            for record in endpoints for judgment in record["snapshot"]["trial"]["judgments"]))
-        self.assertNotIn("stage-5-dance", [record["checkpoint"] for record in harness.saved_checkpoints])
-        self.assertEqual(harness.counters()["stars"], 0)
-        self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
-
-    def test_debug_later_bad_or_unreadable_feedback_finishes_every_response(self):
-        for index, label in ((2, "Good"), (3, None)):
-            with self.subTest(index=index, label=label):
-                harness = self.harness(rank="Normal", observation_policy="diagnostic", debug=1)
+    def test_partial_and_empty_responses_continue_after_a_first_feedback_miss(self):
+        for debug in (0, 1):
+            with self.subTest(debug=debug):
+                harness = self.harness(rank="Normal", debug=debug)
                 harness.prepare_entry()
                 harness.dress(0, finish=True)
-                harness.ranked_dance(feedback_policy="all_buttons", bad_feedback=(1, index, label))
-                trial = harness.boundary["snapshot"]["trial"]
-                self.assertEqual((trial["completed_dances"], trial["total_input_count"], trial["total_judgment_count"],
-                    trial["total_excellent_count"], trial["total_miss_count"]), (6, 18, 18, 17, 1))
-                finishes = [item for item in harness.saved_checkpoints if item["checkpoint"] == "rank-dance-finish"]
-                judgment = finishes[0]["snapshot"]["trial"]["judgments"][index - 1]
-                resolved = harness.rank_plans[0]
-                expected_frame = resolved["presses"][index]["frame"] - 1 if index < 3 else resolved["response_end_frame"]
-                self.assertEqual((judgment["label"], judgment["feedback_frame"]), ("Miss", expected_frame))
-                self.assertEqual(judgment["image"]["frame"], expected_frame)
-                self.assertEqual(judgment["image"]["direct_read_frames"], 0)
-                self.assertEqual([item["frame"] for item in finishes], [item["response_end_frame"] for item in harness.rank_plans])
-                self.assertTrue(trial["released"])
-                self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
-                self.assertTrue(all(item["proceed"] for item in finishes))
-
-    def test_diagnostic_partial_and_empty_responses_continue_after_a_first_feedback_miss(self):
-        for policy in ("first_button_only", "all_buttons"):
-            with self.subTest(policy=policy):
-                harness = self.harness(rank="Normal", observation_policy="diagnostic", debug=0)
-                harness.prepare_entry()
-                harness.dress(0, finish=True)
-                harness.ranked_dance(feedback_policy=policy, selected_inputs={1: [0], 6: []}, missing_feedback=((1, 1),))
+                harness.ranked_dance(selected_inputs={1: [0], 6: []}, missing_feedback=((1, 1),))
                 trial = harness.boundary["snapshot"]["trial"]
                 self.assertEqual((trial["completed_dances"], trial["total_inputs"], trial["total_skipped_inputs"]), (6, 13, 5))
                 self.assertEqual(trial["total_miss_count"], 1)
-                self.assertEqual(trial["total_judgment_count"], 13 if policy == "all_buttons" else 1)
+                self.assertEqual(trial["total_judgment_count"], 1)
                 finishes = [item for item in harness.log_checkpoints if item["checkpoint"] == "rank-dance-finish"]
                 self.assertEqual([item["frame"] for item in finishes], [item["response_end_frame"] for item in harness.rank_plans])
                 self.assertTrue(all(item["proceed"] for item in finishes))
@@ -2083,7 +2079,7 @@ class ActingMoveChecks(unittest.TestCase):
         executed = self.clock.command("combo", "inputs", *plan["steps"])
         expected = [value for button in menu for value in (button, "")] + [""]
         if plan["round"] == 4:
-            expected += ["X", ""]
+            expected += ["X"] * 12 + [""] * 90
         self.assertEqual(self.clock.trace(), expected)
         self.assertEqual(executed["command_start_frame"], plan["start_frame"])
         self.assertEqual(executed["command_end_frame"], plan["end_frame"])
@@ -2092,7 +2088,7 @@ class ActingMoveChecks(unittest.TestCase):
     def test_regional_bases_and_shared_retry_settle_durations(self):
         for code, base, final in (("CPUJ", 60, 140), ("CPUE", 65, 150)):
             with self.subTest(code=code):
-                plan = stage6_act.acting_plan(host_timeout=300, from_stage5=True,
+                plan = stage6_act.acting_plan(host_timeout=300,
                     timing_profile=super_contest.load_profile(code))
                 self.assertEqual([round_["mash_game_seconds"] for round_ in plan["rounds"]], [base, base, base, final])
                 values = plan["between_round_readiness"]
@@ -2247,9 +2243,8 @@ class ActingMoveChecks(unittest.TestCase):
 
 
 class RankTimingChecks(unittest.TestCase):
-    def test_main_fixed_profiles_cover_all_twenty_targets_and_keep_debug_recording_opt_in(self):
+    def test_main_fixed_profiles_cover_all_twenty_targets_and_check_only_first_feedback(self):
         planned = super_contest.chain_plan()
-        self.assertEqual(planned["dance_pointer_calibration_frames"], 0)
         self.assertEqual(list(planned["dance_timings"]), list(stage3_enter.CATEGORIES))
         expected = {
             "Normal/Super": (8 / 15, 480, 239, 225, 1199),
@@ -2272,457 +2267,29 @@ class RankTimingChecks(unittest.TestCase):
                     self.assertEqual((profile["category"], profile["rank"], profile["cues_per_dance"]),
                         (category, rank, 3 if rank == "Normal" else 4))
                     response = rank_dance.stage5_plan(rank=rank, source_frame=1000, host_timeout=300,
-                        fixed_timing=profile, entry_pointer_x=64, observation_policy="scheduled",
-                        first_feedback_policy=planned["dance_first_feedback_policy"])
+                        fixed_timing=profile, entry_pointer_x=64)
                     self.assertTrue(response["fixed_metrics"])
                     self.assertTrue(response["tolerant_inputs"])
-                    self.assertFalse(response["debug_inputs"])
                     self.assertEqual(response["feedback_policy"], "first_button_only")
                     self.assertEqual(response["required_excellent_judgments"], 0)
-                    debug_profile = debug_contest.fixed_timing(category, rank)
-                    self.assertEqual(debug_profile, profile)
                     self.assertEqual(profile["cue_side_offset_pixels"], expected_spacing[category][RANKS.index(rank)])
 
-    def test_stage4_host_calibrates_before_the_shared_final_handoff(self):
-        with temporary_directory() as folder:
-            work, clock, captures = Path(folder), {"frame": 900}, []
-            plan = stage4_dress.dress_plan(host_timeout=300, from_stage3=True,
-                transition_seconds=1 / stage4_dress.FRAME_RATE)
-            plan["pointer_calibration_frames"] = 60
-            controller = SimpleNamespace(live_deadline=None, remaining=lambda: None, screenshot=Mock())
-
-            def action(name, *args, **_):
-                start = clock["frame"]
-                frames, reason = {"dress-transition": (1, "A_mash_complete"),
-                    "observe-frames": (args[0] if args else 0, "observation_interval_complete"),
-                    "calibrate-pointer": (60, "pointer_calibration_complete")}[name]
-                clock["frame"] += frames
-                return {"stop_reason": reason, "command_start_frame": start, "command_end_frame": clock["frame"]}
-
-            def command(name, *args):
-                if name == "capture":
-                    captures.append(clock["frame"])
-                    (work / "stage4.gd").write_bytes(b"first pixels" if len(captures) == 1 else b"final pixels")
-                return {"frame": clock["frame"], "epoch": 2, "observation": {"tip": {"green": True},
-                    "transition": {"start_frame": 900, "total_frames": clock["frame"] - 900}}}
-
-            def reading(x, nominal):
-                return {"source": "fixture_pointer", "pointer": {"status": "exact", "position_bounds": [x, x]},
-                    "progress": {"phase": "demo", "frame_range": [nominal, nominal + 2], "nominal_frame": nominal}}
-
-            emulator = SimpleNamespace(controller=controller, command=Mock(side_effect=action))
-            client = SimpleNamespace(command=Mock(side_effect=command))
-            with patch("contest.stage4_dress.stacked_gd", return_value=object()), \
-                    patch("contest.stage4_dress.pointer_timing", side_effect=[reading(8, 0), reading(28, 36), reading(28, 60)]):
-                landing, pending = stage4_dress.locate_dance_entry(emulator, client, plan, work,
-                    record=Mock(), rank_timing=timing_for("Hyper"))
-            self.assertEqual(captures, [961, 1021])
-            self.assertEqual([call.args[0] for call in client.command.call_args_list],
-                             ["check-dance", "capture", "calibration-start", "capture", "visit"])
-            self.assertEqual((landing["frame"], pending["frame"], landing["no_input_wait_frames"]), (1021, 1021, 120))
-            self.assertEqual(landing["pointer_calibration"]["pixels_per_frame"], 1 / 3)
-            self.assertEqual(landing["rank_timing"]["response_frames"], 360)
-            self.assertEqual(landing["timing_anchor"]["response_start_frame"], 1321)
-            self.assertEqual((work / "pointer-calibration-start.gd").read_bytes(), b"first pixels")
-            self.assertEqual((work / "stage4.gd").read_bytes(), b"final pixels")
-
-    def test_calibration_replaces_travel_time_and_keeps_fixed_gap_estimates(self):
-        first = {"frame": 1000, "epoch": 2, "pointer_x": 8}
-        last = {"frame": 1060, "epoch": 2, "pointer_x": 28}
-        measured = pointer_calibration(first, last)
-        for rank, response, cycle, switch in (("Normal", 360, 750, 239), ("Super", 360, 750, 239),
-                ("Hyper", 360, 720, 216), ("Master", 360, 720, 216)):
-            with self.subTest(rank=rank):
-                profile = calibrated_timing(rank, measured)
-                self.assertEqual((profile["pixels_per_frame"], profile["response_frames"], profile["cycle_frames"],
-                    profile["extra_switch_frames"]), (1 / 3, response, cycle, switch))
-                self.assertFalse(profile["fixed_timing_estimates"]["measured_stop_gaps"])
-                self.assertEqual(profile["lead_dances_frames"], 2 * cycle + switch)
-                self.assertEqual(profile["stored_timing"]["cycle_frames"], timing_for(rank)["cycle_frames"])
-        plan = rank_dance.stage5_plan(rank="Hyper", source_frame=1060, host_timeout=300,
-            pointer_calibration=measured, observation_policy="scheduled")
-        self.assertEqual(plan["midpoint_timing"]["frames"], [1360, 2080, 3016, 3736, 4672, 5392])
-        with self.assertRaisesRegex(ValueError, "accepted pointer calibration endpoint"):
-            rank_dance.stage5_plan(rank="Hyper", source_frame=1000, host_timeout=300, pointer_calibration=measured)
-        for changed in ({"frame": 1061}, {"epoch": 3}, {"pointer_x": 128}):
-            with self.subTest(changed=changed), self.assertRaises(ValueError):
-                pointer_calibration(first, {**last, **changed})
-
-    def test_debug_measurement_targets_cover_all_categories_and_ranks_without_preparation(self):
-        default = debug_contest.debug_plan(measure_only=True)
-        input_default = debug_contest.debug_plan()
-        self.assertEqual(input_default["required_response_inputs"], 450)
-        self.assertEqual((default["target"]["category"], default["target"]["rank"]), ("Cool", "Normal"))
-        self.assertEqual([(target["category"], target["rank"]) for target in default["targets"]],
-            [(category, rank) for category in stage3_enter.CATEGORIES for rank in RANKS])
-        self.assertEqual([item["stage"] for item in default["sections"]], [1, 3, 4, 5])
-        self.assertEqual((default["entry_poll"]["wait_frames"], default["capture_wait_frames"]), (60, 120))
-        self.assertFalse(default["dressing"]["enabled"])
-        self.assertFalse(default["dance_button_recognition"] or default["dance_inputs"] or default["dance_memory_snapshots"])
-        self.assertEqual(timing_for("Great"), timing_for("Super"))
-        self.assertEqual(timing_for("Ultra"), timing_for("Hyper"))
-        for category_index, category in enumerate(stage3_enter.CATEGORIES):
-            for rank_index, rank in enumerate(RANKS):
-                with self.subTest(category=category, rank=rank):
-                    planned = debug_contest.debug_plan(category=category, rank=rank, measure_only=True)
-                    target = planned["target"]
-                    entry = stage3_enter.entry_plan(category, rank, host_timeout=300)
-                    self.assertEqual((target["category_down_presses"], target["rank_down_presses"]),
-                                     (entry["category_down_presses"], entry["rank_down_presses"]))
-                    self.assertEqual(planned["targets"], [default["targets"][category_index * 4 + rank_index]])
-                    self.assertNotIn("ribbon_bit", target)
-                    self.assertNotIn("required_scarf_id", target)
-                    self.assertNotIn("rank_timing", planned)
-                    inputs = debug_contest.debug_plan(category=category, rank=rank)
-                    self.assertEqual(inputs["input_timing"], {"hold_frames": 2, "release_frames": 10, "offset_frames": -7})
-                    self.assertEqual(inputs["feedback"]["delay_frames"], 11)
-                    response = rank_dance.stage5_plan(rank=rank, source_frame=1000, host_timeout=300,
-                        fixed_timing=inputs["fixed_timings"][0], entry_pointer_x=64,
-                        offset_frames=inputs["input_timing"]["offset_frames"],
-                        feedback_policy="record_all_buttons", observation_policy="scheduled")
-                    self.assertEqual((response["hold_frames"], response["feedback_release_frames"],
-                        response["offset_frames"], response["first_feedback_delay_frames"]), (2, 10, -7, 11))
-
-    def test_debug_capture_anchors_favor_early_arrival_for_every_speed_family(self):
+    def test_main_capture_anchors_favor_early_arrival_for_every_speed_family(self):
         cases = (("Cool", "Normal", 1118), ("Cool", "Master", 1113), ("Beauty", "Hyper", 1189),
             ("Cute", "Master", 1094), ("Smart", "Hyper", 1108), ("Tough", "Master", 1100))
         for category, rank, first in cases:
             with self.subTest(category=category, rank=rank):
-                profile = debug_contest.fixed_timing(category, rank)
+                profile = fixed_timing(category, rank)
                 plan = rank_dance.stage5_plan(rank=rank, source_frame=1000, host_timeout=300,
-                    fixed_timing=profile, entry_pointer_x=64, feedback_policy="record_all_buttons",
-                    observation_policy="scheduled", offset_frames=debug_contest.DEFAULT_OFFSET_FRAMES)
+                    fixed_timing=profile, entry_pointer_x=64, offset_frames=rank_dance.DEFAULT_OFFSET_FRAMES)
                 timing = plan["midpoint_timing"]
                 self.assertEqual(timing["frames"][0], first)
                 self.assertEqual(timing["accepted_pointer_pixels"], [128, 129])
                 self.assertLessEqual(64 + (first - 1000) * profile["pixels_per_frame"], 127)
                 self.assertEqual(len(timing["frames"]), 6)
                 near_line = rank_dance.stage5_plan(rank=rank, source_frame=1000, host_timeout=300,
-                    fixed_timing=profile, entry_pointer_x=127, feedback_policy="record_all_buttons",
-                    observation_policy="scheduled")
+                    fixed_timing=profile, entry_pointer_x=127)
                 self.assertGreater(near_line["midpoint_timing"]["frames"][0], 1000)
-
-    def test_beauty_midpoint_diagnostic_plan_repeats_four_ranks_ten_times(self):
-        planned = debug_contest.debug_plan(category="Beauty", loops=10, midpoint_diagnostics=True, no_timeout=True)
-        self.assertEqual((planned["loop_count"], planned["total_contests"], planned["required_midpoint_visits"],
-            planned["required_response_inputs"]), (10, 40, 240, 900))
-        self.assertEqual([(target["debug_loop"], target["category"], target["rank"]) for target in planned["targets"]],
-            [(loop, "Beauty", rank) for loop in range(1, 11) for rank in RANKS])
-        self.assertEqual(planned["input_timing"], {"hold_frames": 2, "release_frames": 10, "offset_frames": -7})
-        self.assertFalse(planned["host_timeouts_enabled"])
-        self.assertEqual(planned["midpoint_policy"]["early_policy"], "one_counted_input_free_adjustment")
-        self.assertEqual(planned["midpoint_policy"]["post_fix_policy"], "record_and_continue")
-        for rank in RANKS:
-            profile = debug_contest.fixed_timing("Beauty", rank)
-            base = dict(rank=rank, source_frame=1000, host_timeout=300, fixed_timing=profile,
-                entry_pointer_x=64, feedback_policy="record_all_buttons", observation_policy="scheduled", offset_frames=-7)
-            normal, diagnostic = rank_dance.stage5_plan(**base), rank_dance.stage5_plan(**base, midpoint_diagnostics=True)
-            self.assertEqual({key: value for key, value in diagnostic.items() if key != "midpoint_diagnostics"},
-                {key: value for key, value in normal.items() if key != "midpoint_diagnostics"})
-        with self.assertRaisesRegex(ValueError, "input debug pass"):
-            debug_contest.debug_plan(measure_only=True, midpoint_diagnostics=True)
-        with self.assertRaisesRegex(ValueError, "input debug runner"):
-            rank_dance.stage5_plan(rank="Hyper", source_frame=1000, host_timeout=300, midpoint_diagnostics=True)
-        for count in (0, -1, True, 1.5):
-            with self.subTest(count=count), self.assertRaisesRegex(ValueError, "loop count"):
-                debug_contest.debug_plan(loops=count)
-
-
-class DanceMeasurementChecks(unittest.TestCase):
-    def loaded(self, *, inputs=False, settings=None):
-        if settings is None:
-            settings = debug_contest.debug_plan(category="Cute", rank="Hyper") if inputs else debug_contest.debug_plan(measure_only=True)
-        harness = ContestClock(rank=settings["target"]["rank"], observation_policy="debug_inputs" if inputs else "measurement")
-        harness.target = settings["target"]
-        self.addCleanup(harness.close)
-        loading = stage1_load.load_plan()
-        harness.begin(1, loading, measurement_targets=settings["targets"], target=settings["target"])
-        harness.clock.command("combo", "inputs", *loading["inputs"])
-        harness.review()
-        self.assertEqual(harness.clock.trace()[-204:], (["X"] * 12 + [""] * 90) * 2)
-        self.assertEqual(harness.boundary["frame"], loading["total_emulator_frames"] + 204)
-        harness.clock.lua.run("mock_memory_reads=0; return 'ready'")
-        return harness, settings
-
-    def enter_dance(self, harness, settings, target, *, begin_measurement=True):
-        entry = stage3_enter.entry_plan(target["category"], target["rank"], host_timeout=300)
-        harness.begin(3, entry, target=target)
-        entered = harness.clock.command("combo", "inputs", *entry["inputs"])
-        self.assertEqual(entered["stop_reason"], "debug_entry_complete")
-        self.assertEqual(entered["command_end_frame"] - entered["command_start_frame"], entry["total_emulator_frames"])
-        harness.call("capture")
-        harness.acknowledge(harness.call("visit"))
-        source = harness.boundary["frame"]
-        harness.begin(4, {"entry_poll": settings["entry_poll"], "stylus": settings["dressing"]["finish"],
-            "transition": settings["transition"]})
-        harness.clock.reset_measurement()
-        transitioned = harness.clock.command("finish-dress")
-        self.assertEqual(transitioned["stop_reason"], "debug_transition_complete")
-        self.assertEqual(transitioned["command_end_frame"] - source, 3 + 2393)
-        self.assertEqual(harness.clock.trace()[:3], [""] * 3)
-        self.assertEqual(harness.clock.trace().count("A"), 800)
-        self.assertEqual(harness.counters()["touches"][-2:],
-            [{"frame": source + 1, "x": 230, "y": 173}, {"frame": source + 2, "x": 230, "y": 173}])
-        harness.clock.lua.run("measurement_unreadable=true; return 'ready'")
-        harness.clock.reset_measurement()
-        harness.clock.command("wait-entry")
-        self.assertEqual(harness.clock.trace(), [""] * 60)
-        harness.call("capture")
-        harness.clock.reset_measurement()
-        harness.clock.command("wait-entry")
-        self.assertEqual(harness.clock.trace(), [""] * 60)
-        harness.clock.lua.run("measurement_unreadable=false; rank_pointer_override=30; return 'ready'")
-        harness.call("capture")
-        harness.acknowledge(harness.call("visit"))
-        first = harness.boundary["snapshot"]
-        if begin_measurement:
-            harness.begin(5, {"capture_wait_frames": settings["capture_wait_frames"]})
-        harness.clock.reset_measurement()
-        return first
-
-    def sample(self, harness, x):
-        bounds = x if isinstance(x, list) else None
-        pointer = x if isinstance(x, int) else 30
-        harness.clock.lua.run(f"measurement_pointer_bounds={literal(bounds)}; "
-            f"measurement_unreadable={literal(x is None)}; rank_pointer_override={pointer}; return 'ready'")
-        result = harness.clock.command("observe")
-        self.assertEqual(result["stop_reason"], "debug_wait_complete")
-        self.assertEqual(result["frame"] - result["command_start_frame"], 120)
-        pending = harness.call("measurement-visit")
-        self.assertFalse(pending["checkpoint"]["save_required"])
-        self.assertNotIn("party", pending["checkpoint"]["snapshot"])
-        return pending
-
-    def test_twenty_contests_reload_only_the_new_baseline_and_finish_on_the_final_demo(self):
-        harness, settings = self.loaded()
-        baseline = deepcopy(harness.boundary)
-        for index, target in enumerate(settings["targets"]):
-            with self.subTest(target=target):
-                if index:
-                    harness.call("arm-measurement-reload", baseline["visit"])
-                    harness.clock.lua.run(f"frame={baseline['frame']}; return 'loaded'")
-                    loaded = harness.call("state-changed", "load", baseline["visit"])
-                    self.assertEqual((loaded["frame"], loaded["epoch"]), (baseline["frame"], index))
-                    harness.boundary = deepcopy(baseline)
-                first = self.enter_dance(harness, settings, target)
-                samples = [first]
-                positions = ([97, 143], 150, 210, 30, 90, 150, 210, 247, None, 30) if target["rank"] == "Hyper" \
-                    else (90, None, 210, 30, 90, 150, 210, 247, None, 30)
-                for x in positions:
-                    pending = self.sample(harness, x)
-                    samples.append(pending["checkpoint"]["snapshot"])
-                    harness.acknowledge(pending)
-                visual = harness.boundary["snapshot"]["visual"]
-                self.assertEqual((visual["pokemon"], visual["dance"], visual["phase"]), (2, 1, "demo"))
-                self.assertTrue(visual["finish_confirmed"])
-                self.assertEqual(harness.boundary["checkpoint"], "dance-measurement-finish")
-                self.assertEqual(harness.boundary["frame"] - first["frame"], 1200)
-                self.assertEqual(harness.clock.trace(), [""] * 1200)
-                metrics = debug_contest.summarize_measurements(samples)
-                self.assertEqual(metrics["pointer_speed"]["pixels_per_frame"], 0.5)
-                self.assertEqual(metrics["dance_1_to_dance_2"]["estimate_frames"], 0)
-                self.assertEqual(metrics["pokemon_1_to_pokemon_2"]["estimate_frames"], 240)
-                skipped_offset = 120 if target["rank"] == "Hyper" else 240
-                self.assertEqual(metrics["skipped_frames"], [first["frame"] + skipped_offset, first["frame"] + 1080])
-                self.assertFalse(any(sample["visual"].get("finish_confirmed") for sample in samples[:-1]))
-        self.assertEqual([record["checkpoint"] for record in harness.saved_checkpoints], ["stage-1-load"])
-        self.assertEqual(harness.clock.lua.run("return tostring(mock_memory_reads)"), "0")
-        counters = harness.counters()
-        self.assertEqual((counters["engines"], counters["pages"], counters["stars"]), (1, 0, 0))
-        self.assertEqual(counters["callbacks"], {"registerbefore": 1, "registerafter": 1, "registermenustart": 1})
-        final = harness.boundary["frame"]
-        rejected = harness.clock.checkpoint("arm-measurement-reload", baseline["visit"])
-        self.assertIn("another target pending", rejected["error"])
-        self.assertEqual(rejected["frame"], final)
-
-    def test_ambiguous_numbering_and_dance_inputs_cannot_advance_the_capture_sequence(self):
-        for interrupt in ("ambiguous", "input"):
-            with self.subTest(interrupt=interrupt):
-                harness, settings = self.loaded()
-                first = self.enter_dance(harness, settings, settings["target"])
-                if interrupt == "ambiguous":
-                    samples = [first]
-                    for x in (90, None, None, None, 30):
-                        pending = self.sample(harness, x)
-                        samples.append(pending["checkpoint"]["snapshot"])
-                        harness.acknowledge(pending)
-                    visual = samples[-1]["visual"]
-                    self.assertEqual(visual["sequence_status"], "ambiguous")
-                    self.assertFalse(visual.get("finish_confirmed"))
-                    self.assertIn(samples[-1]["frame"], debug_contest.summarize_measurements(samples)["skipped_frames"])
-                    before = samples[-1]["frame"]
-                else:
-                    before = first["frame"]
-                result = harness.clock.command("observe" if interrupt == "ambiguous" else "mirror")
-                self.assertIn("next input-free observation interval" if interrupt == "ambiguous"
-                    else "disabled in measurement mode", result["error"])
-                self.assertEqual(result["frame"], before)
-                self.assertTrue(all(not buttons for buttons in harness.clock.trace()))
-
-    def test_input_feedback_recovers_or_expires_without_moving_the_remaining_inputs(self):
-        for missing in ((), ((1, 2), (6, 4))):
-            with self.subTest(missing=missing):
-                harness, settings = self.loaded(inputs=True)
-                baseline = deepcopy(harness.boundary)
-                self.enter_dance(harness, settings, settings["target"], begin_measurement=False)
-                harness.ranked_dance(feedback_policy="record_all_buttons", bad_feedback=(2, 2, "Good"),
-                    feedback_delays={(1, 1): 14, (6, 4): 9}, missing_feedback=missing,
-                    cue_side_offset_pixels=128, final_response_x=248)
-                trial = harness.boundary["snapshot"]["trial"]
-                self.assertEqual((trial["total_input_count"], trial["total_judgment_count"], trial["total_miss_count"]), (24, 24, 1 + len(missing)))
-                self.assertEqual(trial["cue_side_offset_pixels"], 128)
-                self.assertTrue(trial["final_feedback_bound"] and trial["at_feedback_endpoint"])
-                finishes = [value for value in harness.log_checkpoints if value["checkpoint"] == "rank-dance-finish"]
-                for number, (result, planned) in enumerate(zip(finishes, harness.rank_plans), 1):
-                    captures = harness.rank_captures[number - 1]
-                    for judgment, press in zip(result["snapshot"]["trial"]["judgments"], planned["presses"]):
-                        self.assertEqual(judgment["input_frame"], press["frame"])
-                        first_held = press["frame"] - planned["frame"] - 1
-                        self.assertEqual(captures["buttons"][first_held:first_held + 12], [press["button"]] * 2 + [""] * 10)
-                        self.assertIn(press["frame"] + 11, captures["response"])
-                        self.assertEqual(judgment["release_frames_before_initial_capture"], 10)
-                        if (number, judgment["index"]) in missing:
-                            self.assertEqual(judgment["label"], "Miss")
-                            self.assertEqual(judgment["feedback_frame"], judgment["feedback_deadline_frame"])
-                first = finishes[0]["snapshot"]["trial"]["judgments"][0]
-                self.assertEqual((first["scheduled_feedback_frame"] - first["input_frame"], first["visible_delay_frames"]), (11, 14))
-                self.assertTrue(first["recovered_after_initial_capture"])
-                self.assertEqual(first["feedback_sample_count"], 4)
-                for result, planned in zip(finishes, harness.rank_plans):
-                    final = result["snapshot"]["trial"]["judgments"][-1]
-                    self.assertEqual(final["feedback_frame"], planned["presses"][-1]["frame"] + 11)
-                    self.assertEqual(final["feedback_frame"], planned["response_end_frame"] + 4)
-                    self.assertLess(final["feedback_frame"], planned["next_demo_frame"])
-                if not missing:
-                    self.assertEqual(trial["judgments"][-1]["visible_delay_frames"], 11)
-                    self.assertFalse(trial["judgments"][-1]["recovered_after_initial_capture"])
-                harness.call("arm-measurement-reload", baseline["visit"])
-                harness.clock.lua.run(f"frame={baseline['frame']}; return 'loaded'")
-                loaded = harness.call("state-changed", "load", baseline["visit"])
-                self.assertEqual((loaded["frame"], loaded["epoch"]), (baseline["frame"], 1))
-                self.assertEqual(harness.clock.lua.run("return tostring(mock_paused)"), "true")
-
-    def test_debug_first_miss_warns_without_main_warning_state(self):
-        harness, settings = self.loaded(inputs=True)
-        self.enter_dance(harness, settings, settings["target"], begin_measurement=False)
-        harness.clock.lua.run("lua_messages={}; return 'ready'")
-        harness.ranked_dance(feedback_policy="record_all_buttons", bad_feedback=(1, 1, "Good"))
-        snapshot = harness.boundary["snapshot"]
-        trial = snapshot["trial"]
-        self.assertEqual((trial["total_input_count"], trial["total_judgment_count"], trial["total_excellent_count"]), (24, 24, 23))
-        self.assertEqual(snapshot["offset_check"]["label"], "Miss")
-        self.assertNotIn("consecutive_good_contests", snapshot["offset_check"])
-        messages = json.loads(harness.clock.lua.run("return dofile('" + (ROOT / "lua/json.lua").as_posix()
-            + "').encode(lua_messages)"))
-        self.assertTrue(any("Dancing: WARN" in message and "Input 1 feedback: Miss" in message for message in messages))
-        status = json.loads(harness.clock.lua.run("return latest_status"))
-        self.assertNotIn("dance_first_feedback", status)
-
-    def test_debug_checkpoints_skip_residual_early_inputs_and_continue_late_responses(self):
-        for diagnostic in (False, True):
-            with self.subTest(diagnostic=diagnostic):
-                settings = debug_contest.debug_plan(category="Beauty", rank="Hyper", midpoint_diagnostics=diagnostic)
-                harness, settings = self.loaded(inputs=True, settings=settings)
-                baseline = deepcopy(harness.boundary)
-                self.enter_dance(harness, settings, settings["target"], begin_measurement=False)
-                arguments = dict(feedback_policy="record_all_buttons", midpoint_diagnostics=diagnostic,
-                    early_midpoint_x=127, post_fix_pointer_x=127, midpoint_positions={2: 130, 3: 129})
-                harness.ranked_dance(**arguments)
-                trial = harness.boundary["snapshot"]["trial"]
-                expected = 24 if diagnostic else 20
-                self.assertEqual((trial["total_input_count"], trial["total_judgment_count"]), (expected, expected))
-                self.assertEqual(trial["total_skipped_inputs"], 24 - expected)
-                starts = harness.rank_cue_trials
-                self.assertFalse(starts[0]["midpoint_within_line"] or starts[1]["midpoint_within_line"])
-                self.assertTrue(starts[2]["midpoint_within_line"])
-                self.assertTrue(all(item["midpoint_policy_met"] for item in starts))
-                self.assertEqual(starts[0]["midpoint_adjustment_count"], 1)
-                self.assertEqual([item["pointer_x"] for item in harness.rank_plans], [127, 130, 129, 128, 128, 128])
-                harness.call("arm-measurement-reload", baseline["visit"])
-                harness.clock.lua.run(f"frame={baseline['frame']}; return 'loaded'")
-                loaded = harness.call("state-changed", "load", baseline["visit"])
-                self.assertEqual((loaded["frame"], loaded["epoch"]), (baseline["frame"], 1))
-
-    def test_debug_partial_empty_changed_and_missed_inputs_finish_and_reload(self):
-        for rank, unreadable in (("Normal", ()), ("Master", ()), ("Normal", (1, 6)), ("Master", (1, 6))):
-            with self.subTest(rank=rank, unreadable=unreadable):
-                settings = debug_contest.debug_plan(category="Smart", rank=rank)
-                harness, settings = self.loaded(inputs=True, settings=settings)
-                baseline = deepcopy(harness.boundary)
-                self.enter_dance(harness, settings, settings["target"], begin_measurement=False)
-                count = 3 if rank == "Normal" else 4
-                harness.ranked_dance(feedback_policy="record_all_buttons", selected_inputs={1: [0], 6: []},
-                    changed_cues=((2, 2),), missed_inputs={4: 1}, missing_feedback=((3, 1),), unreadable_midpoints=unreadable)
-                trial = harness.boundary["snapshot"]["trial"]
-                expected = 4 * count - 1 - bool(unreadable)
-                self.assertEqual((trial["total_inputs"], trial["total_judgment_count"]), (expected, expected))
-                self.assertEqual(trial["total_skipped_inputs"], 6 * count - expected)
-                self.assertEqual(trial["total_miss_count"], 1)
-                self.assertEqual(trial["judgments"], [])
-                self.assertTrue(trial["debug_finish_bound"])
-                self.assertFalse(trial["final_feedback_bound"])
-                finishes = [item["snapshot"]["trial"] for item in harness.log_checkpoints if item["checkpoint"] == "rank-dance-finish"]
-                self.assertEqual([item["inputs"] for item in finishes], [0 if unreadable else 1, count - 1, count, count - 1, count, 0])
-                self.assertEqual(finishes[1]["skipped_inputs"][0]["reason"], "cue_pixels_changed_before_input")
-                self.assertEqual(finishes[3]["skipped_inputs"][0]["reason"], "missed_input_frame")
-                for number in unreadable:
-                    self.assertEqual(finishes[number - 1]["skipped_inputs"], [{"reason": "unreadable_midpoint", "count": count}])
-                    self.assertTrue(all(not buttons for buttons in harness.rank_captures[number - 1]["buttons"]))
-                harness.call("arm-measurement-reload", baseline["visit"])
-                harness.clock.lua.run(f"frame={baseline['frame']}; return 'loaded'")
-                loaded = harness.call("state-changed", "load", baseline["visit"])
-                self.assertEqual((loaded["frame"], loaded["epoch"]), (baseline["frame"], 1))
-
-    def test_debug_missed_feedback_windows_record_the_actual_callback_and_continue(self):
-        for callback in ("before_frame", "after_frame"):
-            with self.subTest(callback=callback):
-                settings = debug_contest.debug_plan(category="Smart", rank="Master")
-                harness, settings = self.loaded(inputs=True, settings=settings)
-                baseline = deepcopy(harness.boundary)
-                self.enter_dance(harness, settings, settings["target"], begin_measurement=False)
-                harness.ranked_dance(feedback_policy="record_all_buttons", missed_feedback={6: (3, callback)})
-                trial = harness.boundary["snapshot"]["trial"]
-                self.assertEqual((trial["total_inputs"], trial["total_judgment_count"], trial["total_skipped_inputs"]), (24, 24, 0))
-                self.assertEqual((trial["total_excellent_count"], trial["total_miss_count"]), (23, 1))
-                final = trial["judgments"][-1]
-                self.assertEqual(final["recovery_reason"], "missed_feedback_window")
-                self.assertEqual(final["feedback_frame"], final["feedback_deadline_frame"] + 1)
-                self.assertEqual(final["feedback_sample_count"], 0)
-                self.assertEqual(final["image"]["capture_callback"],
-                    "before_frame_feedback_recovery" if callback == "before_frame" else "after_frame_feedback")
-                self.assertEqual(trial["final_feedback_bound"], callback == "after_frame")
-                self.assertTrue(trial["debug_finish_bound"])
-                harness.call("arm-measurement-reload", baseline["visit"])
-                harness.clock.lua.run(f"frame={baseline['frame']}; return 'loaded'")
-                loaded = harness.call("state-changed", "load", baseline["visit"])
-                self.assertEqual((loaded["frame"], loaded["epoch"]), (baseline["frame"], 1))
-
-    def test_repeated_debug_targets_cross_the_loop_boundary_after_the_final_feedback_reload(self):
-        settings = debug_contest.debug_plan(category="Beauty", rank="Normal", loops=2, midpoint_diagnostics=True)
-        harness, settings = self.loaded(inputs=True, settings=settings)
-        baseline = deepcopy(harness.boundary)
-        for index, target in enumerate(settings["targets"]):
-            self.enter_dance(harness, settings, target, begin_measurement=False)
-            selected = {number: [] for number in range(1, 7)} if index else None
-            harness.ranked_dance(feedback_policy="record_all_buttons", midpoint_diagnostics=True, selected_inputs=selected)
-            self.assertEqual(harness.boundary["snapshot"]["target"]["debug_loop"], index + 1)
-            trial = harness.boundary["snapshot"]["trial"]
-            self.assertEqual((trial["total_inputs"], trial["total_judgment_count"], trial["total_skipped_inputs"]),
-                (0, 0, 18) if index else (18, 18, 0))
-            if index:
-                self.assertEqual(trial["judgments"], [])
-                self.assertTrue(trial["debug_finish_bound"])
-                self.assertFalse(trial["final_feedback_bound"])
-                self.assertTrue(all(not button for capture in harness.rank_captures for button in capture["buttons"]))
-            harness.call("arm-measurement-reload", baseline["visit"])
-            harness.clock.lua.run(f"frame={baseline['frame']}; return 'loaded'")
-            loaded = harness.call("state-changed", "load", baseline["visit"])
-            self.assertEqual((loaded["frame"], loaded["epoch"]), (baseline["frame"], index + 1))
-            harness.boundary = deepcopy(baseline)
-        self.assertEqual([record["checkpoint"] for record in harness.saved_checkpoints], ["stage-1-load"])
-        self.assertEqual(harness.counters()["engines"], 1)
-        all_targets = debug_contest.debug_plan(category="Beauty", loops=10, midpoint_diagnostics=True)
-        self.loaded(inputs=True, settings=all_targets)
 
 
 class StripFallbackChecks(unittest.TestCase):
@@ -2774,10 +2341,6 @@ class CueAgreementChecks(unittest.TestCase):
                     pixels[x + dx, y + dy] = color
         return image
 
-    def plan(self, image, *, samples=(), read_frame=None):
-        return rank_speed_probe.response_plan(self.midpoint, image, samples, read_frame, rank="Master",
-            expected_cues=4, speed=timing_for("Master")["pixels_per_frame"], hold_frames=2, offset_frames=-8, dance=3)
-
     def debug_capture(self, folder, name, frame, x):
         image = self.image()
         pixels = image.load()
@@ -2798,9 +2361,9 @@ class CueAgreementChecks(unittest.TestCase):
             "path": str(path), "frame": frame, "epoch": 2, "source": "fresh_zero_frame_framebuffer",
             "capture_callback": "paused_lua_menu", "direct_read_frames": 0}}}
 
-    def test_main_and_debug_midpoints_preserve_early_captures_and_accept_both_line_pixels(self):
-        for main, positions in product((False, True), (((1000, 128),), ((1000, 129),), ((1000, 126), (1004, 128)))):
-            with self.subTest(main=main, positions=positions), temporary_directory() as folder:
+    def test_main_midpoints_preserve_early_captures_and_accept_both_line_pixels(self):
+        for positions in (((1000, 128),), ((1000, 129),), ((1000, 126), (1004, 128))):
+            with self.subTest(positions=positions), temporary_directory() as folder:
                 work, samples = Path(folder), iter(positions)
 
                 def command(action, *args):
@@ -2810,9 +2373,7 @@ class CueAgreementChecks(unittest.TestCase):
                 emulator = SimpleNamespace(controller=SimpleNamespace(live_deadline=None),
                     command=Mock(return_value={"stop_reason": "demo_midpoint"}))
                 plan = rank_dance.stage5_plan(rank="Master", source_frame=700, host_timeout=300,
-                    fixed_timing=debug_contest.fixed_timing("Cool", "Master"), entry_pointer_x=64,
-                    offset_frames=-7, feedback_policy="first_button_only" if main else "record_all_buttons",
-                    first_feedback_policy="warn_and_continue", observation_policy="scheduled")
+                    fixed_timing=fixed_timing("Cool", "Master"), entry_pointer_x=64, offset_frames=-7)
                 midpoint, planned, _ = rank_dance.prepare_response(emulator, client, work, 3, plan, record=record)
                 self.assertEqual(planned["pointer_x"], positions[-1][1])
                 self.assertEqual(midpoint["midpoint_status"], "on_line")
@@ -2828,17 +2389,15 @@ class CueAgreementChecks(unittest.TestCase):
                     self.assertTrue((work / "midpoint-adjustment-01.png").is_file())
 
     def test_held_midpoint_keeps_original_deadlines_and_only_skips_expired_inputs(self):
-        modes = (("first_button_only", False), ("record_all_buttons", False), ("record_all_buttons", True))
-        for (policy, diagnostics), elapsed in product(modes, (3, 100)):
-            with self.subTest(policy=policy, diagnostics=diagnostics, elapsed=elapsed), temporary_directory() as folder:
+        for elapsed in (3, 100):
+            with self.subTest(elapsed=elapsed), temporary_directory() as folder:
                 work, samples = Path(folder), iter(((1000, 127), (1000 + elapsed, 127)))
                 client = SimpleNamespace(command=Mock(side_effect=lambda action, name:
                     self.debug_capture(work, name, *next(samples)) if action == "capture" else {}))
                 emulator = SimpleNamespace(controller=SimpleNamespace(live_deadline=None),
                     command=Mock(return_value={"stop_reason": "demo_midpoint"}))
                 plan = rank_dance.stage5_plan(rank="Hyper", source_frame=700, host_timeout=300,
-                    fixed_timing=fixed_timing("Beauty", "Hyper"), entry_pointer_x=64,
-                    feedback_policy=policy, observation_policy="scheduled", midpoint_diagnostics=diagnostics)
+                    fixed_timing=fixed_timing("Beauty", "Hyper"), entry_pointer_x=64)
                 midpoint, planned, _ = rank_dance.prepare_response(emulator, client, work, 3, plan, record=Mock())
                 expected = [1056, 1146, 1236, 1326]
                 self.assertEqual([press["frame"] for press in planned["presses"]],
@@ -2852,12 +2411,12 @@ class CueAgreementChecks(unittest.TestCase):
                 if elapsed == 100:
                     self.assertEqual(planned["skipped_inputs"][0]["reason"], "input_already_due")
 
-    def test_main_and_debug_late_unreadable_or_invalid_corrections_install_a_continuation(self):
+    def test_main_late_unreadable_or_invalid_corrections_install_a_continuation(self):
         cases = ((((1000, 130),), 4, False), (((1000, 230),), 1, False), (((1000, None),), 0, False),
             (((1000, 127), (1002, 127)), 4, False), (((1000, 127), (1001, 127)), 0, False),
             (((1000, 127), (1002, 126)), 0, False), (((1000, 127),), 0, True))
-        for main, (positions, count, rejected) in product((False, True), cases):
-            with self.subTest(main=main, positions=positions), temporary_directory() as folder:
+        for positions, count, rejected in cases:
+            with self.subTest(positions=positions), temporary_directory() as folder:
                 work, samples = Path(folder), iter(positions)
                 client = SimpleNamespace(command=Mock(side_effect=lambda action, name:
                     self.debug_capture(work, name, *next(samples)) if action == "capture" else
@@ -2865,9 +2424,7 @@ class CueAgreementChecks(unittest.TestCase):
                 emulator = SimpleNamespace(controller=SimpleNamespace(live_deadline=None),
                     command=Mock(return_value={"stop_reason": "demo_midpoint"}))
                 plan = rank_dance.stage5_plan(rank="Master", source_frame=700, host_timeout=300,
-                    fixed_timing=debug_contest.fixed_timing("Cool", "Master"), entry_pointer_x=64,
-                    offset_frames=-7, feedback_policy="first_button_only" if main else "record_all_buttons",
-                    first_feedback_policy="warn_and_continue", observation_policy="scheduled")
+                    fixed_timing=fixed_timing("Cool", "Master"), entry_pointer_x=64, offset_frames=-7)
                 midpoint, planned, reading = rank_dance.prepare_response(emulator, client, work, 3, plan, record=Mock())
                 self.assertEqual(len(planned["presses"]), count)
                 self.assertEqual(planned["skipped_input_count"], 4 - count)
@@ -2883,58 +2440,18 @@ class CueAgreementChecks(unittest.TestCase):
                     self.assertFalse(adjustment["accepted"])
                     self.assertEqual(emulator.command.call_count, 1)
 
-    def test_diagnostic_midpoints_record_one_existing_correction_and_continue_off_center(self):
-        cases = ((127, 127, "still_early"), (126, 127, "still_early"), (127, 128, "fixed"),
-            (127, 129, "fixed"), (127, 130, "overshot"), (130, None, "late_uncorrected"), (129, None, "not_needed"))
-        for pre_x, post_x, outcome in cases:
-            with self.subTest(pre_x=pre_x, post_x=post_x), temporary_directory() as folder:
-                work = Path(folder)
-                frames = (128 - pre_x) * 3 if pre_x < 128 else 0
-                positions = [(1000, pre_x)] + ([(1000 + frames, post_x)] if post_x is not None else [])
-                samples = iter(positions)
-
-                def command(action, *args):
-                    return self.debug_capture(work, args[0], *next(samples)) if action == "capture" else {}
-
-                client = SimpleNamespace(command=Mock(side_effect=command))
-                emulator = SimpleNamespace(controller=SimpleNamespace(live_deadline=None),
-                    command=Mock(return_value={"stop_reason": "demo_midpoint"}))
-                plan = rank_dance.stage5_plan(rank="Hyper", source_frame=700, host_timeout=300,
-                    fixed_timing=debug_contest.fixed_timing("Beauty", "Hyper"), entry_pointer_x=64,
-                    offset_frames=-7, feedback_policy="record_all_buttons", observation_policy="scheduled", midpoint_diagnostics=True)
-                midpoint, planned, _ = rank_dance.prepare_response(emulator, client, work, 3, plan, record=Mock())
-                diagnostic = json.loads((work / "midpoint-diagnostic.json").read_text(encoding="utf-8"))
-                self.assertEqual(diagnostic["correction_outcome"], outcome)
-                self.assertEqual(diagnostic["correction_count"], int(post_x is not None))
-                self.assertEqual(diagnostic["correction_frames"], frames)
-                final_x = pre_x if post_x is None else post_x
-                self.assertEqual((planned["pointer_x"], midpoint["position"]["x"]), (final_x, final_x))
-                self.assertEqual(diagnostic["post"]["estimated_first_pixel_error_frames"], (final_x - 128) * 3)
-                self.assertEqual(diagnostic["post_off_first_pixel"], final_x != 128)
-                self.assertEqual(diagnostic["post_off_line"], not 128 <= final_x <= 129)
-                self.assertEqual(diagnostic["fixed_to_line"], pre_x < 128 and 128 <= final_x <= 129)
-                self.assertEqual(diagnostic["post_capture_reused"], post_x is None)
-                actions = [call.args[0] for call in client.command.call_args_list]
-                self.assertEqual(actions.count("retime-midpoint"), int(post_x is not None))
-                self.assertEqual(actions[-1], "plan")
-                for captured in (diagnostic["pre"], diagnostic["post"]):
-                    self.assertEqual(captured["direct_read_frames"], 0)
-                    self.assertTrue(Path(captured["image"]).is_file() and Path(captured["raw_image"]).is_file())
-
     def test_incomplete_views_keep_confirmed_pairs_and_install_the_plan_silently(self):
         image = self.image(left=("A", None, "X", "Y"), right=("A", "B", None, "Y"))
         with temporary_directory() as folder:
             work = Path(folder)
             image.save(work / "midpoint-source.png")
-            measured = pointer_calibration({"frame": 640, "epoch": 2, "pointer_x": 8},
-                {"frame": 700, "epoch": 2, "pointer_x": 28})
             midpoint = {**self.midpoint, "image": {"path": str(work / "midpoint-source.png")},
                 "png": str(work / "midpoint-source.png")}
             emulator = SimpleNamespace(controller=SimpleNamespace(live_deadline=None, remaining=lambda: None),
                 command=Mock(return_value={"stop_reason": "demo_midpoint"}))
             client, record, output = Mock(command=Mock(return_value={})), Mock(), io.StringIO()
             options = rank_dance.stage5_plan(rank="Master", source_frame=700, host_timeout=300,
-                pointer_calibration=measured, observation_policy="scheduled")
+                fixed_timing=fixed_timing("Cool", "Master"), entry_pointer_x=64)
             with patch("contest.rank_dance.capture_result", return_value=midpoint), redirect_stdout(output):
                 _, planned, reading = rank_dance.prepare_response(emulator, client, work, 3, options, record=record)
             client.command.assert_called_with("plan", (work / "response-plan.lua").as_posix())
@@ -2949,37 +2466,7 @@ class CueAgreementChecks(unittest.TestCase):
         self.assertFalse(any(50 <= x < 66 and 168 <= y < 184 for x, y, *_ in planned["pixel_points"]))
         self.assertFalse(any(200 <= x < 216 and 168 <= y < 184 for x, y, *_ in planned["pixel_points"]))
 
-    def test_conflicting_or_missing_fresh_cues_require_review(self):
-        old = self.image()
-        samples = [{"frame": 999, "epoch": 2, "readable": True}]
-        cases = ((self.image(right=("B", "B", "X", "Y")), "readable cue sides disagree"),
-                 (self.image(left=("A", "B", None, "Y"), right=("A", "B", None, "Y")), "expected 4 readable cue pairs; found 3"))
-        for fresh, message in cases:
-            with self.subTest(message=message), patch("contest.rank_speed_probe.gd_image", side_effect=lambda image: image):
-                with self.assertRaisesRegex(rank_speed_probe.ReviewNeeded, message):
-                    self.plan(fresh, samples=samples, read_frame=lambda sample: old)
-
-    def test_live_128_pixel_pairs_override_the_rank_hint_and_fill_opposite_missing_cues(self):
-        self.centers = (48, 64, 80, 112)
-        image = self.image(left=("A", "A", None, "X"), right=("A", "A", "B", None), side_offset=128)
-        planned = self.plan(image)
-        self.assertEqual(planned["cues"]["side_offset_pixels"], 128)
-        self.assertEqual(planned["cues"]["side_offset_source"], "fresh_paired_cue_centers")
-        self.assertEqual([(press["button"], press["response_x"]) for press in planned["presses"]],
-                         [("A", 176), ("A", 192), ("B", 208), ("X", 240)])
-        self.assertEqual([cue["source_side"] for cue in planned["cues"]["accepted"]], ["right", "right", "right", "left"])
-
-    def test_unpaired_extras_are_discarded_only_from_an_over_counted_side(self):
-        left = [{"x": x, "button": button} for x, button in zip(self.centers, BUTTONS)]
-        right = [{**cue, "x": cue["x"] + 120} for cue in left]
-        for extra_left, extra_right in (([{"x": 8, "button": "B"}], []),
-                ([], [{"x": 133, "button": "X"}]), ([{"x": 8, "button": "B"}], [{"x": 133, "button": "X"}])):
-            with self.subTest(left=extra_left, right=extra_right):
-                paired = rank_speed_probe.merge_cues(left + extra_left, right + extra_right, expected_cues=4, dance=3)
-                self.assertEqual([(cue["demo_x"], cue["button"]) for cue in paired["accepted"]], list(zip(self.centers, BUTTONS)))
-                self.assertEqual(len(paired["discarded_cues"]), len(extra_left) + len(extra_right))
-
-    def test_debug_conflict_preferences_missing_sides_and_confirmed_only_partial_reads(self):
+    def test_main_conflict_preferences_missing_sides_and_confirmed_only_partial_reads(self):
         cases = (
             (4, BUTTONS, BUTTONS, list(BUTTONS)),
             (4, BUTTONS, ("B", "X", "Y", "A"), ["A", "B", "Y", "A"]),
@@ -2993,10 +2480,9 @@ class CueAgreementChecks(unittest.TestCase):
         for count, left, right, expected in cases:
             with self.subTest(count=count, left=left, right=right):
                 offset = 128 if count == 3 else 120
-                planned = rank_speed_probe.response_plan(self.midpoint, self.image(left=left, right=right, side_offset=offset),
-                    [], None, rank="Normal" if count == 3 else "Master", expected_cues=count,
-                    speed=0.5, hold_frames=2, offset_frames=-7, dance=3, side_offset_pixels=offset,
-                    fixed_spacing=True, tolerant_inputs=True)
+                planned = dance_response.response_plan(self.midpoint, self.image(left=left, right=right, side_offset=offset),
+                    rank="Normal" if count == 3 else "Master", expected_cues=count,
+                    speed=0.5, hold_frames=2, offset_frames=-7, dance=3, side_offset_pixels=offset)
                 self.assertEqual([press["button"] for press in planned["presses"]], expected)
                 self.assertEqual(planned["skipped_input_count"], count - len(expected))
                 for cue in planned["cues"]["accepted"]:
@@ -3004,7 +2490,7 @@ class CueAgreementChecks(unittest.TestCase):
                     self.assertEqual(cue["response_x"] - cue["demo_x"], offset)
                     self.assertTrue(cue["pixel_points"])
 
-    def test_debug_excess_pairs_use_demo_prefix_and_response_suffix(self):
+    def test_main_excess_pairs_use_demo_prefix_and_response_suffix(self):
         positions = (16, 32, 48, 64, 80, 112)
         left = [{"x": x, "button": button} for x, button in zip(positions, ("A", "B", "X", "Y", "A", "B"))]
         right = [{**cue, "x": cue["x"] + 128} for cue in left]
@@ -3013,21 +2499,21 @@ class CueAgreementChecks(unittest.TestCase):
                     (left, right[:count], list(positions[:count])),
                     (left[:count], right, list(positions[:count])), (left, right[:1], [16])):
                 with self.subTest(count=count, left=len(a), right=len(b)):
-                    selected = rank_speed_probe.select_cues(a, b, expected_cues=count, side_offset_pixels=128)
+                    selected = dance_response.select_cues(a, b, expected_cues=count, side_offset_pixels=128)
                     self.assertEqual([cue["demo_x"] for cue in selected["accepted"]], expected)
                     self.assertTrue(all(cue["cross_checked"] for cue in selected["accepted"]))
                     if len(expected) == count:
                         self.assertEqual([cue["source_side"] for cue in selected["accepted"]],
                             ["left"] * (count - 2) + ["right"] * 2)
 
-    def test_debug_feedback_prunes_overlaps_and_accepts_an_empty_response(self):
-        profile = debug_contest.fixed_timing("Cool", "Master")
+    def test_main_feedback_prunes_overlaps_and_accepts_an_empty_response(self):
+        profile = fixed_timing("Cool", "Master")
         for frames, expected in (([1010, 1015, 1050, 1095], [1010, 1050]), ([], [])):
             with self.subTest(frames=frames):
                 planned = {"dance": 1, "frame": 1000, "response_end_frame": 1100, "hold_frames": 2,
                     "presses": [{"frame": frame} for frame in frames], "expected_inputs": 4, "skipped_inputs": [],
                     "cues": {"accepted": [{"pixel_points": [[index, 1, 1, 2, 3]]} for index in range(len(frames))]}}
-                feedback = rank_dance.feedback_schedule(planned, delay_frames=11, rank_timing=profile, tolerant_inputs=True)
+                feedback = rank_dance.feedback_schedule(planned, delay_frames=11, rank_timing=profile)
                 self.assertEqual([press["frame"] for press in planned["presses"]], expected)
                 self.assertEqual(planned["skipped_input_count"], 4 - len(expected))
                 self.assertEqual(feedback["feedback_frames"], [frame + 11 for frame in expected])
@@ -3053,77 +2539,6 @@ class CueAgreementChecks(unittest.TestCase):
                 self.assertGreaterEqual(matched["match_fraction"], 0.70)
                 pixels, sprite = self.damaged_cue(side, extra_miss=1)
                 self.assertIsNone(_match(pixels, 0, 0, sprite))
-
-
-class ArtifactOwnershipChecks(unittest.TestCase):
-    def test_win_cleanup_preserves_durable_references_states_and_unknown_user_files(self):
-        with temporary_directory() as folder:
-            work = Path(folder)
-            artifacts = OwnedArtifacts(work, "owned-check", 123)
-            capture, sequence, config = work / "stage1.png", work / "frames.bin", work / "section-config.lua"
-            live, user = work / "attach.lua", work / "user-photo.png"
-            for path in (capture, sequence, config, live, user):
-                path.write_bytes(b"owned fixture")
-            user_folder = work / "user-tools"
-            user_folder.mkdir()
-            (user_folder / "stage4.png").write_bytes(b"user image")
-            (work / "checkpoints").mkdir()
-            state = work / "checkpoints" / "accepted.ds6"
-            state.write_bytes(b"DeSmuME SState retained")
-            receipt = work / "checkpoints" / "accepted.json"
-            points = {"points": [[88, 44, 77, 81, 142]], "reference": {"path": str(capture),
-                "checkpoint": str(receipt), "frame": 80, "epoch": 1}}
-            write_json(work / "overworld-reference.json", points)
-            write_json(work / "runner-result.json", {"screen": {"path": str(capture), "retained": True}, "save_state": str(state)})
-            write_json(work / "user-data.json", {"path": str(capture)})
-            write_json(user_folder / "runner-result.json", {"path": str(capture)})
-            artifacts.register_tree(work)
-            artifacts.register(live, kind="generated_configuration", protected=True)
-            manifest = artifacts.cleanup("win-01")
-            self.assertFalse(any(path.exists() for path in (capture, sequence, config)))
-            self.assertTrue(all(path.exists() for path in (state, live, user)))
-            self.assertTrue((user_folder / "stage4.png").exists())
-            result = json.loads((work / "runner-result.json").read_text(encoding="utf-8"))
-            self.assertFalse(result["screen"]["retained"])
-            self.assertFalse(result["screen"]["artifact_retention"]["path"]["retained"])
-            self.assertEqual(result["screen"]["artifact_retention"]["path"]["manifest"], str(manifest))
-            self.assertEqual(json.loads((work / "overworld-reference.json").read_text(encoding="utf-8"))["points"], points["points"])
-            previous = {"frame": 80, "epoch": 1, "status": "complete", "proceed": True, "snapshot": {"screen": {"confirmed": True,
-                "expected": "loaded_overworld", "source": "visual_review", "frame": 80, "epoch": 1, "path": str(capture)}}}
-            with patch("contest.stage6_act.accepted_source", return_value=(receipt, state, previous)):
-                self.assertEqual(stage6_act.overworld_reference(receipt)["points"], points["points"])
-            self.assertEqual(json.loads((work / "user-data.json").read_text(encoding="utf-8")), {"path": str(capture)})
-            self.assertEqual(json.loads((user_folder / "runner-result.json").read_text(encoding="utf-8")), {"path": str(capture)})
-
-    def test_startup_cleans_prior_runs_and_keeps_live_lua(self):
-        with temporary_directory() as folder:
-            parent = Path(folder)
-            old, other, legacy, foreign = (parent / name for name in ("old", "other", "legacy", "foreign"))
-            for work in (old, other, legacy, foreign):
-                work.mkdir()
-                (work / "stage4.png").write_bytes(b"capture")
-            old_artifacts = OwnedArtifacts(old, "old", 101)
-            old_artifacts.register_tree(old)
-            OwnedArtifacts(other, "other", 102).register_tree(other)
-            live_lua = old / "attach.lua"
-            live_lua.write_text("return {}\n", encoding="utf-8", newline="\n")
-            old_artifacts.register(live_lua, kind="generated_configuration")
-            old_backup = old / "previous-slot-9.ds9"
-            old_backup.write_bytes(b"restored backup")
-            old_artifacts.register(old_backup, kind="slot_backup", protected=True)
-            write_json(old / "runner-result.json", {"temporary_slot_9_restored": True, "cleanup_errors": []})
-            unfinished = old / "visits" / "s5-001" / "dance-01"
-            unfinished.mkdir(parents=True)
-            unindexed = unfinished / "demo-frames.bin"
-            unindexed.write_bytes(b"last capture before host exit")
-            write_json(legacy / "runner-setup.json", {"run_id": "legacy", "host_pid": 103, "stage": 4, "work_dir": str(legacy)})
-            write_json(legacy / "runner-result.json", {"outcome": "fail", "cleanup_errors": []})
-            (legacy / "previous-slot-10.ds0").write_bytes(b"obsolete backup")
-            facts = cleanup_stale(parent, protected=[live_lua])
-            self.assertEqual(facts["removed_files"], 6)
-            self.assertTrue(live_lua.exists() and (foreign / "stage4.png").exists())
-            self.assertFalse(unindexed.exists())
-            self.assertFalse((legacy / "previous-slot-10.ds0").exists())
 
 
 class MasterLifecycleChecks(unittest.TestCase):
@@ -3173,42 +2588,30 @@ class MasterLifecycleChecks(unittest.TestCase):
                 if error and not closed:
                     self.assertIsNone(runtime.client.stop.call_args.kwargs["slot"])
 
-    def test_unlimited_debug_run_has_no_whole_run_or_stage_deadline(self):
-        settings = debug_contest.debug_plan(no_timeout=True)
-        self.assertFalse(settings["host_timeouts_enabled"])
-        self.assertTrue(debug_contest.debug_plan()["host_timeouts_enabled"])
-        with temporary_directory() as folder:
-            runtime = self.runtime(Path(folder), settings)
-            self.assertIsNone(runtime.total_deadline)
-            runtime.begin_visit(5, 1)
-            self.assertIsNone(runtime.stage_deadline)
-            self.assertIsNone(runtime.controller.live_deadline)
-            runtime.action("observe-demo")
-            runtime.emulator.command.assert_called_once_with("observe-demo", timeout=None, deadline=None)
-
-    def test_unlimited_poll_detects_a_closed_emulator(self):
+    def test_poll_detects_a_closed_emulator(self):
         alive, windows = Mock(return_value=True), Mock(return_value=True)
         controller = TimedController(windows_api=SimpleNamespace(process_alive=alive,
             USER32=SimpleNamespace(IsWindow=windows)))
         controller.live_session = {"pid": 7, "window": 11, "lua_window": 12}
-        self.assertTrue(controller.waiting(None))
+        deadline = time.monotonic() + 300
+        self.assertTrue(controller.waiting(deadline))
         alive.return_value = False
         with self.assertRaisesRegex(SystemExit, "emulator was closed"):
-            controller.waiting(None)
+            controller.waiting(deadline)
 
     def test_manual_emulator_close_restores_slot_storage_without_native_commands(self):
         with temporary_directory() as folder:
             work = Path(folder)
-            previous, native = work / "previous.ds0", work / "native.ds0"
+            previous, native = work / "previous.ds9", work / "native.ds9"
             previous.write_bytes(b"original slot")
             native.write_bytes(b"run baseline")
-            runtime = self.runtime(work, debug_contest.debug_plan(no_timeout=True))
-            runtime.originals[10] = previous
+            runtime = self.runtime(work, super_contest.chain_plan(debug=1))
+            runtime.originals[9] = previous
             runtime.emulator.states.path.return_value = native
             result = runtime.finalize(error="The controlled emulator was closed.", emulator_closed=True)
             self.assertEqual(native.read_bytes(), previous.read_bytes())
             self.assertEqual(result["errors"], [])
-            self.assertTrue(result["emulator_closed"] and result["temporary_slot_10_restored"])
+            self.assertTrue(result["emulator_closed"] and result["temporary_slot_9_restored"])
             self.assertIsNone(result["emulator_paused"])
             runtime.controller.set_pause.assert_not_called()
             runtime.client.command.assert_not_called()
@@ -3216,10 +2619,10 @@ class MasterLifecycleChecks(unittest.TestCase):
             self.assertEqual(runtime.lifecycle["terminal_cleanups"], 1)
 
     def test_main_and_debug_speed_policies_and_terminal_cleanup(self):
-        for runner in ("main", "debug"):
-            with self.subTest(runner=runner), temporary_directory() as folder:
-                diagnostic = runner == "debug"
-                settings = debug_contest.debug_plan() if diagnostic else super_contest.chain_plan()
+        for debug in (0, 1):
+            with self.subTest(debug=debug), temporary_directory() as folder:
+                diagnostic = debug == 1
+                settings = super_contest.chain_plan(debug=debug)
                 runtime = self.runtime(Path(folder), settings)
                 for phase in ("run", "run", "dressing", "dressing", "run"):
                     runtime.set_speed(phase)

@@ -22,7 +22,7 @@ function M.new(memory_api, game_code)
     local reader = core.new(memory_api, {game_code = game_code})
     local function read16(address) return memory_api.readword(address) % 0x10000 end
     local function read32(address) return memory_api.readdwordunsigned(address) % 0x100000000 end
-    return {read_first = function(frame)
+    return {read_first = function(frame, startup_party)
         local addresses, game = reader:addresses()
         assert(game.supported and addresses.party, "The first Pokemon's memory is unavailable. Load the saved game first")
         local count = memory_api.readbyte(addresses.party_count)
@@ -63,44 +63,57 @@ function M.new(memory_api, game_code)
         local growth = (order:find("A") - 1) * 16
         local attacks = (order:find("B") - 1) * 16
         local ribbon_block = (order:find("C") - 1) * 16
-        -- Unflagged live records have shown both plain and PID-encrypted HP tails.
-        local raw_hp, raw_max_hp = read16(address + 0x8E), read16(address + 0x90)
-        local decoded_hp, decoded_max_hp
-        key = personality
-        for index = 1, 5 do
-            key = common.lcg32(key, 0x41C64E6D, 0x6073)
-            if index == 4 then decoded_hp = common.xor16(raw_hp, math.floor(key / 0x10000)) end
-            if index == 5 then decoded_max_hp = common.xor16(raw_max_hp, math.floor(key / 0x10000)) end
-        end
-        local plain_valid = valid_hp(raw_hp, raw_max_hp)
-        local encrypted_valid = common.get_bits(flags, 0, 1) == 0 and valid_hp(decoded_hp, decoded_max_hp)
-        local same_hp = raw_hp == decoded_hp and raw_max_hp == decoded_max_hp
-        assert((plain_valid or encrypted_valid) and (not (plain_valid and encrypted_valid) or same_hp), string.format(
-            "The first Pokemon's HP could not be read reliably (game=%s, address=0x%08X, flags=0x%04X, plain=%d/%d, pid_decoded=%d/%d)",
-            game.code, address, flags, raw_hp, raw_max_hp, decoded_hp, decoded_max_hp))
         local result = {frame = frame, party_slot = 1, party_count = count,
             species_id = clear[growth + 1], held_item_id = clear[growth + 2],
-            is_egg = common.get_bits(clear[attacks + 10], 14, 1) == 1,
-            current_hp = plain_valid and raw_hp or decoded_hp,
-            max_hp = plain_valid and raw_max_hp or decoded_max_hp,
-            hp_encoding = plain_valid and "plain" or "pid_encrypted",
-            sheen = math.floor(clear[growth + 14] / 0x100),
-            moves = core.array(), move_count = 0, unavailable_move_slots = core.array(),
             data_validation_passed = true, read_valid = true,
             owned_ribbon_bits = core.array(), ribbon_flags = core.array(), owned_count = 0,
             source = "first_party_sinnoh_contest_ribbons", direct_read_frames = 0,
             game_phase_proven = false}
         assert(result.species_id >= 1 and result.species_id <= 493
             and result.held_item_id <= 536, "The first Pokemon has invalid selected fields")
-        for slot = 1, 4 do
-            local move = clear[attacks + slot]
-            assert(move >= 0 and move <= 467, "The first Pokemon's move slots could not be read reliably")
-            result.moves[slot] = move
-            if move == 0 then
-                result.unavailable_move_slots[#result.unavailable_move_slots + 1] = slot
-            else
-                result.move_count = result.move_count + 1
+        if startup_party then
+            assert(startup_party.read_valid and startup_party.data_validation_passed,
+                "Contest-finish reads require accepted startup party data")
+            for _, field in ipairs({"is_egg", "current_hp", "max_hp", "hp_encoding", "sheen", "move_count"}) do
+                result[field] = startup_party[field]
             end
+            result.moves, result.unavailable_move_slots = core.array(), core.array()
+            for index, move in ipairs(startup_party.moves) do result.moves[index] = move end
+            for index, slot in ipairs(startup_party.unavailable_move_slots) do result.unavailable_move_slots[index] = slot end
+            result.static_read_frame = startup_party.static_read_frame or startup_party.frame
+            result.read_scope = "items_and_ribbons"
+        else
+            -- Unflagged live records have shown both plain and PID-encrypted HP tails.
+            local raw_hp, raw_max_hp = read16(address + 0x8E), read16(address + 0x90)
+            local decoded_hp, decoded_max_hp
+            key = personality
+            for index = 1, 5 do
+                key = common.lcg32(key, 0x41C64E6D, 0x6073)
+                if index == 4 then decoded_hp = common.xor16(raw_hp, math.floor(key / 0x10000)) end
+                if index == 5 then decoded_max_hp = common.xor16(raw_max_hp, math.floor(key / 0x10000)) end
+            end
+            local plain_valid = valid_hp(raw_hp, raw_max_hp)
+            local encrypted_valid = common.get_bits(flags, 0, 1) == 0 and valid_hp(decoded_hp, decoded_max_hp)
+            local same_hp = raw_hp == decoded_hp and raw_max_hp == decoded_max_hp
+            assert((plain_valid or encrypted_valid) and (not (plain_valid and encrypted_valid) or same_hp), string.format(
+                "The first Pokemon's HP could not be read reliably (game=%s, address=0x%08X, flags=0x%04X, plain=%d/%d, pid_decoded=%d/%d)",
+                game.code, address, flags, raw_hp, raw_max_hp, decoded_hp, decoded_max_hp))
+            result.is_egg = common.get_bits(clear[attacks + 10], 14, 1) == 1
+            result.current_hp, result.max_hp = plain_valid and raw_hp or decoded_hp, plain_valid and raw_max_hp or decoded_max_hp
+            result.hp_encoding = plain_valid and "plain" or "pid_encrypted"
+            result.sheen = math.floor(clear[growth + 14] / 0x100)
+            result.moves, result.move_count, result.unavailable_move_slots = core.array(), 0, core.array()
+            for slot = 1, 4 do
+                local move = clear[attacks + slot]
+                assert(move >= 0 and move <= 467, "The first Pokemon's move slots could not be read reliably")
+                result.moves[slot] = move
+                if move == 0 then
+                    result.unavailable_move_slots[#result.unavailable_move_slots + 1] = slot
+                else
+                    result.move_count = result.move_count + 1
+                end
+            end
+            result.static_read_frame, result.read_scope = frame, "full_readiness"
         end
         -- Logical block C, byte offset 24: category-major Sinnoh ribbon bits 0..19.
         local bits = clear[ribbon_block + 13] + clear[ribbon_block + 14] * 0x10000

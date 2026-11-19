@@ -6,14 +6,13 @@ local combos = dofile(root .. "/lua/input_sequences.lua")
 local master = dofile(root .. "/lua/checkpoint_master.lua")
 local sections = dofile(directory .. "/sections.lua")
 local platinum = dofile(root .. "/lua/platinum.lua")
+local memory_boundary = dofile(directory .. "/memory_boundary.lua")
 local mailbox_directory = CONTEST_MAILBOX_DIR or root .. "/tmp"
 CONTEST_MAILBOX_DIR = nil
 local mailbox = bridge_io.new(mailbox_directory)
 local checkpoint_mailbox = bridge_io.new(mailbox_directory, "checkpoint-")
 local checkpoint_id, idle = checkpoint_mailbox:previous_id(), false
 local active, current, config, latest, run_id, work, debug_mode
-local dance_observation_policy
-local measurement_run
 local last_dance_feedback_visit
 local halted = false
 local state = {protocol = 1, checkpoint_protocol = 1, bridge = "pt-super-contest",
@@ -30,7 +29,7 @@ runtime.adapter = adapter
 
 local stage_feedback = {
     {name = "Loading", checkpoint = "stage-1-load", message = "Fast text speed, position, Bag, and first Pokemon readiness confirmed."},
-    {name = "Preparation", checkpoint = "stage-2-prep", message = "Ribbon and held-item checks complete."},
+    {name = "Preparation", checkpoint = "stage-2-prep", message = "Scarf preparation inputs complete."},
     {name = "Contest Entry", checkpoint = "stage-3-enter", message = "Dress-up entry confirmed."},
     {name = "Dress-up", checkpoint = "stage-4-dress", message = "Dancing entry confirmed."},
     {name = "Dancing", checkpoint = "stage-5-dance", message = "Scripted Acting transition complete."},
@@ -52,7 +51,7 @@ function runtime.fail_stage()
 end
 
 function runtime.main_dance_feedback(judgment, section)
-    assert(not measurement_run and section.stage == 5 and section.feedback_policy == "first_button_only"
+    assert(section.stage == 5 and section.feedback_policy == "first_button_only"
         and section.first_feedback_policy == "warn_and_continue" and judgment.dance == 1 and judgment.index == 1
         and (judgment.label == "Excellent" and judgment.fresh_message or judgment.label == "Miss" or judgment.skipped)
         and (not last_dance_feedback_visit or section.section_visit > last_dance_feedback_visit),
@@ -186,38 +185,19 @@ local function stable(record)
 end
 
 local function initialize(args)
-    assert(not runtime.engine and (#args == 3 or #args == 4 or #args == 5) and (args[3] == "0" or args[3] == "1")
-        and (args[4] == nil or args[4] == "scheduled" or args[4] == "diagnostic"
-            or args[4] == "measurement" or args[4] == "debug_inputs"
-            or args[4] == "scarf_test"),
-        "Initialize once with run identity, debug mode, and the dance observation policy")
+    assert(not runtime.engine and #args == 4 and (args[3] == "0" or args[3] == "1"),
+        "Initialize once with run identity, debug mode, and the resolved regional timing profile")
     run_id, work, debug_mode = args[1], args[2], tonumber(args[3])
-    dance_observation_policy = args[4] or "diagnostic"
-    if args[5] then
-        runtime.timing_profile = assert(loadfile(args[5]))()
-        assert(runtime.timing_profile.schema == 1 and runtime.timing_profile.game_code == emu.gamecode()
-            and type(runtime.timing_profile.sections) == "table",
-            "The resolved timing profile must match the trusted running ROM code")
-        state.timing_profile_source = runtime.timing_profile.source
-    end
+    runtime.timing_profile = assert(loadfile(args[4]))()
+    assert(runtime.timing_profile.schema == 1 and runtime.timing_profile.game_code == emu.gamecode()
+        and type(runtime.timing_profile.sections) == "table",
+        "The resolved timing profile must match the trusted running ROM code")
+    state.timing_profile_source = runtime.timing_profile.source
     local definitions = sections.definitions()
-    local prototypes = {}
-    if dance_observation_policy == "measurement" or dance_observation_policy == "debug_inputs"
-        or dance_observation_policy == "scarf_test" then
-        assert(debug_mode == 0, "Measurement modes own their declared state policies")
-        local measurement = dofile(directory .. (dance_observation_policy == "scarf_test"
-            and "/scarf_tester.lua" or "/debug_measure.lua"))
-        definitions = measurement.definitions(definitions, runtime, dance_observation_policy == "debug_inputs")
-        measurement_run = measurement.run(runtime, dance_observation_policy == "debug_inputs")
-    else
-        prototypes = {
-            assert(loadfile(directory .. "/stage4_dress.lua"))({stage = 4}, runtime),
-            assert(loadfile(directory .. "/dance_master.lua"))({stage = 5,
-                dances = {{}, {}, {}, {}, {}, {}, {}, {}}, transition = {mash_frames = 1}}, runtime),
-            assert(loadfile(directory .. "/rank_dance.lua"))({stage = 5,
-                first_feedback_policy = "warn_and_continue"}, runtime),
-        }
-    end
+    local prototypes = {
+        assert(loadfile(directory .. "/stage4_dress.lua"))({stage = 4}, runtime),
+        assert(loadfile(directory .. "/rank_dance.lua"))({stage = 5}, runtime),
+    }
     for _, section in ipairs(prototypes) do
         for name, definition in pairs(section.definitions()) do
             if name ~= "stopped" then
@@ -230,18 +210,14 @@ local function initialize(args)
         ["stage-1-load"] = "screen", ["stage-2-prep"] = "memory", ["stage-3-enter"] = "screen",
         ["stage-4-dress"] = "handoff", ["stage-4-dress-page"] = "screen", ["stage-5-dance"] = "handoff",
         ["stage-6-round"] = "screen", ["stage-6-act"] = "memory",
-        start = "screen", ["offset-check"] = "screen", finish = "dance_debug",
-        ["rank-dance-start"] = "screen", ["rank-dance-offset"] = "screen", ["rank-dance-finish"] = "dance_debug",
+        ["rank-dance-start"] = "screen", ["rank-dance-offset"] = "screen", ["rank-dance-finish"] = "screen",
         stopped = "debug",
     }
-    if not measurement_run then
-        for name, definition in pairs(definitions) do
-            local policy = assert(save_policies[name], "Classify each contest checkpoint's save policy")
-            definition.save_state = debug_mode == 1 and (policy == "memory" or policy == "handoff" or policy == "debug"
-                or policy == "dance_debug" and dance_observation_policy == "diagnostic")
-        end
+    for name, definition in pairs(definitions) do
+        local policy = assert(save_policies[name], "Classify each contest checkpoint's save policy")
+        definition.save_state = debug_mode == 1 and (policy == "memory" or policy == "handoff" or policy == "debug")
     end
-    state.debug, state.dance_observation_policy = debug_mode, dance_observation_policy
+    state.debug = debug_mode
     runtime.engine = master.new({run_id = run_id, emulator = adapter, definitions = definitions,
         reader = {snapshot = function(frame)
             if current then return current.snapshot(frame) end
@@ -257,16 +233,6 @@ local function begin_section(path)
     begin_feedback(next_config.stage, next_config.section_visit)
     assert(next_config.run_id == run_id and next_config.source_frame == adapter.frame(),
         "The section must use this runtime and its current paused source frame")
-    if measurement_run then
-        local selected = measurement_run.begin(next_config, latest)
-        finish(nil, "section_ready")
-        state.combo_name, state.combo_history = "", setmetatable({}, bridge_io.array_metatable)
-        config, current = next_config, selected or sections.new(next_config, runtime)
-        state.active_stage, state.section_visit = config.stage, config.section_visit
-        return {frame = adapter.frame(), epoch = adapter.epoch(), next_section = "section_ready",
-            handoff = {stage = config.stage, source_context = config.source_context,
-                emulator_frames = 0, native_lua_attachment = "persistent"}}
-    end
     local number, source = next_config.stage, latest
     if number == 1 then
         assert(not latest and not current, "Run Stage 1 once at fresh setup")
@@ -285,13 +251,15 @@ local function begin_section(path)
         if number ~= 2 then
             assert(same_target(next_config.target, source.snapshot.target), "The section changed the accepted contest target")
         end
-        if number == 2 and source.checkpoint == "stage-1-load" then
+        if number == 2 then
             next_config.accepted_readiness = copy(source.snapshot)
         end
+        next_config.party_context = copy(runtime.party_context)
+        if number == 6 then
+            assert(runtime.startup_party and runtime.party_context, "Readiness must precede the first Acting entry")
+            next_config.startup_party = copy(runtime.startup_party)
+        end
         if number == 5 and next_config.rank_timing then
-            assert(next_config.observation_policy == dance_observation_policy,
-                "The dance observation policy must match its runtime save policy")
-            next_config.accepted_pointer_calibration = copy(source.snapshot.pointer_calibration)
             next_config.accepted_entry_pointer = copy(source.snapshot.screen and source.snapshot.screen.pointer)
         end
     end
@@ -304,7 +272,7 @@ local function begin_section(path)
         current = assert(loadfile(directory .. "/stage4_dress.lua"))(config, runtime)
     elseif number == 5 then
         assert(config.refresh_frames == 0, "Direct dancing entry adds zero refresh frames")
-        current = assert(loadfile(directory .. (config.rank_timing and "/rank_dance.lua" or "/dance_master.lua")))(config, runtime)
+        current = assert(loadfile(directory .. "/rank_dance.lua"))(config, runtime)
     else
         current = sections.new(config, runtime)
     end
@@ -318,17 +286,7 @@ local function dispatch(action, args)
     if action == "init-run" then
         initialize(args)
     elseif action == "state-changed" then
-        if args[1] == "reset" then
-            assert(not runtime.engine, "Reset requires initial boot")
-        elseif measurement_run then
-            local keep_section = measurement_run.loaded(args)
-            if not keep_section then
-                if current then current.finish() end
-                current = nil
-            end
-        else
-            error("Quick-loads are disabled in the full contest runner")
-        end
+        assert(args[1] == "reset" and not runtime.engine, "Quick-loads are disabled; reset requires initial boot")
         adapter.state_changed()
         state.frame = adapter.frame()
         finish(nil, "state_changed")
@@ -336,10 +294,6 @@ local function dispatch(action, args)
     elseif action == "begin-section" then
         assert(#args == 1, "Supply the section configuration path")
         return begin_section(args[1])
-    elseif action == "arm-measurement-reload" then
-        assert(measurement_run, "Baseline reloads belong to the measurement debug runner")
-        stable(latest)
-        return measurement_run.arm(args, latest)
     elseif action == "terminal" then
         if current then current.finish() end
         finish(nil, "terminal")
@@ -365,6 +319,14 @@ local function dispatch(action, args)
     else
         assert(current, "Start a callable section before issuing its commands")
         local result = current.checkpoint(action, args)
+        if action == "complete" and result.checkpoint
+            and result.checkpoint.status == "complete" and result.checkpoint.proceed then
+            local record = result.checkpoint
+            if record.checkpoint == "stage-1-load" then runtime.startup_party = copy(record.snapshot.party) end
+            if record.checkpoint == "stage-1-load" or record.checkpoint == "stage-6-act" then
+                runtime.party_context = copy(memory_boundary.context(record))
+            end
+        end
         if action == "init-prep" and not result.error and config.target then
             print("Contest selected: " .. config.target.category .. " - " .. config.target.rank)
         end

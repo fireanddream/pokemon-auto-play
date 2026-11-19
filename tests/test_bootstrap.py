@@ -97,23 +97,17 @@ class EnvironmentSetupChecks(unittest.TestCase):
         self.setup()
         self.assertEqual((self.process.creations, self.process.installations), (1, 1))
 
-    def test_failed_install_has_no_ready_marker_and_next_launch_repairs_it(self):
-        self.process.failure = RuntimeError("installation failed")
-        with self.assertRaisesRegex(RuntimeError, "installation failed"):
-            self.setup()
-        self.assertFalse((self.root / ".venv/environment-ready.json").exists())
+    def test_failed_or_interrupted_install_releases_lock_and_next_launch_repairs_it(self):
+        for error in (RuntimeError("installation failed"), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__):
+                self.process.failure = error
+                with self.assertRaises(type(error)):
+                    self.setup()
+                self.assertFalse((self.root / ".venv/environment-ready.json").exists())
         self.setup()
-        self.assertEqual(self.process.creations, 1)
-        self.assertEqual(self.process.installations, 2)
-        self.assertTrue((self.root / ".venv/environment-ready.json").is_file())
-
-    def test_interrupted_install_releases_lock_and_can_finish_on_next_launch(self):
-        self.process.failure = KeyboardInterrupt()
-        with self.assertRaises(KeyboardInterrupt):
-            self.setup()
-        self.assertFalse((self.root / ".venv/environment-ready.json").exists())
-        self.setup()
+        self.assertEqual((self.process.creations, self.process.installations), (1, 3))
         self.assertTrue(self.process.installed)
+        self.assertTrue((self.root / ".venv/environment-ready.json").is_file())
 
     def test_interrupted_environment_creation_repairs_a_missing_package_installer(self):
         python = self.root / (".venv/Scripts/python.exe" if os.name == "nt" else ".venv/bin/python")

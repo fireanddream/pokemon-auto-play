@@ -1,8 +1,6 @@
-"""Shared main-runner dance metrics and retained prepared-source evidence."""
+"""Fixed regional dance metrics; historical motion evidence is not a dependency."""
 
-import json
 import math
-from pathlib import Path
 
 from contest.timing_profiles import load_profile, section
 
@@ -10,19 +8,14 @@ from contest.timing_profiles import load_profile, section
 RANKS = ("Normal", "Super", "Hyper", "Master")
 CATEGORIES = ("Cool", "Beauty", "Cute", "Smart", "Tough")
 ALIASES = {"normal": "Normal", "super": "Super", "great": "Super", "hyper": "Hyper", "ultra": "Hyper", "master": "Master"}
-PROFILE_PATH = Path(__file__).with_suffix(".json")
-POINTER_CALIBRATION_FRAMES = section(None, "diagnostics")["pointer_calibration_frames"]
-VISIBLE_HALF_PIXELS = 120
 DEFAULT_OFFSET_FRAMES = section(None, "stage5_dancing")["input_offset_frames"]
 
-# Speed is pixels per emulator frame; gaps run from x=248 to the next x=8.
+
 def metrics_for(timing_profile=None):
+    # Speed is pixels per emulator frame; gaps run from x=248 to the next x=8.
     return {family: (values["pointer_speed_numerator"] / values["pointer_speed_denominator"],
         values["same_leader_gap_frames"], values["leader_change_gap_frames"])
         for family, values in section(timing_profile, "fixed_dance_metrics").items() if family != "_help"}
-
-
-FIXED_METRICS = metrics_for()
 
 
 def canonical_rank(rank):
@@ -32,7 +25,6 @@ def canonical_rank(rank):
 
 
 def fixed_cue_spacing(category, rank, *, timing_profile=None):
-    """Measured native cue separation shared by all dancing tools."""
     rank = canonical_rank(rank)
     if category not in CATEGORIES:
         raise ValueError("Select Cool, Beauty, Cute, Smart, or Tough.")
@@ -40,47 +32,14 @@ def fixed_cue_spacing(category, rank, *, timing_profile=None):
     return section(timing_profile, "fixed_dance_metrics")[family]["cue_side_offset_pixels"]
 
 
-def rank_references():
-    """Keep historical evidence; its old motion values no longer drive inputs."""
-    document = json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
-    if document.get("schema") != 1 or set(document.get("profiles", {})) != set(RANKS):
-        raise ValueError("The dance timing file must contain all four contest ranks.")
-    result = {}
-    for rank in RANKS:
-        profile = document["profiles"][rank]
-        cues, offset = profile["cues_per_dance"], profile["cue_side_offset_pixels"]
-        if isinstance(cues, bool) or not isinstance(cues, int) or cues != (3 if rank == "Normal" else 4):
-            raise ValueError(f"{rank} needs its rank-specific cue count.")
-        if isinstance(offset, bool) or not isinstance(offset, int) or not 0 < offset < 256:
-            raise ValueError(f"{rank} needs a positive native cue-side pixel offset.")
-        speed = profile["pixels_per_frame"]
-        if isinstance(speed, bool) or not math.isfinite(speed) or speed <= 0:
-            raise ValueError(f"{rank} needs a positive pointer speed.")
-        for field in ("cycle_frames", "extra_switch_frames", "response_frames"):
-            value = profile[field]
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{rank}.{field} must be a positive emulator-frame count.")
-        if profile["response_frames"] >= profile["cycle_frames"]:
-            raise ValueError(f"{rank} needs a response shorter than its complete dance cycle.")
-        result[rank] = {"rank": rank, **profile}
-    return result
-
-
-def timing_for(rank, *, category="Cool", timing_profile=None):
-    profile = load_profile() if timing_profile is None else timing_profile
-    rank = canonical_rank(rank)
-    return {**rank_references()[rank], **fixed_timing(category, rank, timing_profile=profile),
-        "evidence_source": "contest/dance_timings.json (historical prepared-source evidence)"}
-
-
-def fixed_timing(category, rank, *, metrics=None, timing_profile=None):
-    """Resolve base or caller-supplied metrics without an entry speed probe."""
+def fixed_timing(category, rank, *, timing_profile=None):
+    """Resolve the selected regional profile without loading historical evidence."""
     if category not in CATEGORIES:
         raise ValueError("Select Cool, Beauty, Cute, Smart, or Tough.")
     profile = load_profile() if timing_profile is None else timing_profile
     rank = canonical_rank(rank)
     family = "Normal/Super" if rank in RANKS[:2] else category
-    speed, dance_gap, leader_gap = (metrics_for(profile) if metrics is None else metrics)[family]
+    speed, dance_gap, leader_gap = metrics_for(profile)[family]
     cycle, extra = math.floor(240 / speed + dance_gap), leader_gap - dance_gap
     return {"category": category, "rank": rank, "family": family,
         "cues_per_dance": 3 if rank == "Normal" else 4,
@@ -92,67 +51,6 @@ def fixed_timing(category, rank, *, metrics=None, timing_profile=None):
         "timing_source": "fixed_normalized_contest_measurements", "derived_frame_rounding": "floor"}
 
 
-def all_timings(*, category="Cool", timing_profile=None):
-    profile = load_profile() if timing_profile is None else timing_profile
-    return {rank: timing_for(rank, category=category, timing_profile=profile) for rank in RANKS}
-
-
 def all_fixed_timings(*, timing_profile=None):
     profile = load_profile() if timing_profile is None else timing_profile
     return {category: {rank: fixed_timing(category, rank, timing_profile=profile) for rank in RANKS} for category in CATEGORIES}
-
-
-def pointer_calibration(start, end, *, calibration_frames=None, timing_profile=None):
-    """Bind two readable demo positions to the configured input-free frame window."""
-    if calibration_frames is None:
-        calibration_frames = section(timing_profile, "diagnostics")["pointer_calibration_frames"]
-    if isinstance(calibration_frames, bool) or not isinstance(calibration_frames, int) or calibration_frames < 1:
-        raise ValueError("Pointer calibration needs a positive whole emulator-frame window.")
-    for sample in (start, end):
-        for field in ("frame", "epoch", "pointer_x"):
-            value = sample[field]
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"Pointer calibration needs a whole nonnegative {field}.")
-        if not 8 <= sample["pointer_x"] < 128:
-            raise ValueError("Both calibration positions must remain within Dance 1's demonstration.")
-    frames = end["frame"] - start["frame"]
-    pixels = end["pointer_x"] - start["pointer_x"]
-    if frames != calibration_frames or start["epoch"] != end["epoch"]:
-        raise ValueError(f"Pointer calibration requires exactly {calibration_frames} emulator frames in the same state epoch.")
-    if pixels <= 0:
-        raise ValueError("Pointer calibration needs positive forward displacement.")
-    return {"source": "fresh_paused_pointer_displacement", "start": dict(start), "end": dict(end),
-        "emulator_frames": frames, "pointer_pixels": pixels, "input_policy": "none",
-        "pixels_per_frame": pixels / frames, "frames_per_pixel": frames / pixels}
-
-
-def calibrated_timing(rank, calibration, *, category="Cool", timing_profile=None):
-    """Change travel time only; retained fixed corrections are stop-gap estimates."""
-    profile_settings = load_profile() if timing_profile is None else timing_profile
-    measured = pointer_calibration(calibration["start"], calibration["end"], timing_profile=profile_settings)
-    for key, value in measured.items():
-        actual = calibration.get(key)
-        # Lua JSON rounds floating-point text. Integer endpoint facts stay exact;
-        # all applied timing is recomputed from them rather than the wire rate.
-        matches = (isinstance(actual, (int, float)) and not isinstance(actual, bool)
-            and math.isclose(actual, value, rel_tol=1e-12, abs_tol=0)) if key in (
-                "pixels_per_frame", "frames_per_pixel") else actual == value
-        if not matches:
-            raise ValueError("The pointer calibration differs from its captured endpoints.")
-    profile = timing_for(rank, category=category, timing_profile=profile_settings)
-    old_half = math.floor(VISIBLE_HALF_PIXELS / profile["pixels_per_frame"] + 0.5)
-    half = math.floor(VISIBLE_HALF_PIXELS / measured["pixels_per_frame"] + 0.5)
-    fixed = {"cycle_extra_frames": profile["cycle_frames"] - 2 * old_half,
-        "response_tail_frames": profile["response_frames"] - old_half,
-        "leader_switch_frames": profile["extra_switch_frames"],
-        "source": "stored_rank_timing_minus_rounded_visible_travel", "measured_stop_gaps": False}
-    cycle, response = 2 * half + fixed["cycle_extra_frames"], half + fixed["response_tail_frames"]
-    if not 0 < response < cycle:
-        raise ValueError("The calibrated travel time and fixed corrections cannot form a complete dance.")
-    return {**profile, "stored_timing": {key: profile[key] for key in
-            ("pixels_per_frame", "cycle_frames", "response_frames", "extra_switch_frames")},
-        "timing_source": "per_contest_pointer_calibration", "fixed_timing_estimates": fixed,
-        "pixels_per_frame": measured["pixels_per_frame"], "frames_per_pixel": measured["frames_per_pixel"],
-        "visible_half_frames": VISIBLE_HALF_PIXELS / measured["pixels_per_frame"], "travel_half_frames": half,
-        "cycle_frames": cycle, "response_frames": response,
-        "lead_dances_frames": 2 * cycle + fixed["leader_switch_frames"]}

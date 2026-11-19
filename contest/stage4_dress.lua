@@ -1,38 +1,23 @@
 -- Paused accessory pages, counted stylus drags, Finish, and the Dance 1 handoff.
-local config, mode = ...
-local runtime = type(mode) == "table" and mode or nil
-local paused_handoff = mode == true
-assert(type(config) == "table" and config.stage == 4, "Stage 4 configuration is required")
+local config, runtime = ...
+assert(type(config) == "table" and config.stage == 4 and type(runtime) == "table",
+    "Stage 4 requires the persistent main runtime")
 assert(type(stylus) == "table" and type(stylus.set) == "function", "DeSmuME stylus.set is required")
-if paused_handoff then
-    assert(config.entry_mode == "stage3_handoff" and config.entry_render_frames == 0
-        and emu.framecount() == config.source_frame, "Expected the paused Stage 3 handoff frame")
-end
 local source = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/")
 local directory = assert(source:match("^(.*)/"))
 local root = dofile(directory .. "/resource_root.lua")
 local bridge_io = dofile(root .. "/lua/bridge_io.lua")
-local master = dofile(root .. "/lua/checkpoint_master.lua")
 local platinum = dofile(root .. "/lua/platinum.lua")
 local dress_pixels = dofile(directory .. "/dress_pixels.lua")
 local dance_pixels = dofile(directory .. "/dance_pixels.lua")
-local mailbox_directory = runtime and runtime.mailbox_directory or root .. "/tmp"
+local mailbox_directory = runtime.mailbox_directory
 local mailbox = bridge_io.new(mailbox_directory)
-local checkpoint_mailbox = bridge_io.new(mailbox_directory, "checkpoint-")
-local checkpoint_id = checkpoint_mailbox:previous_id()
-local idle, active, engine, pending, latest = false, nil, runtime and runtime.engine, nil, nil
+local idle, active, engine, pending, latest = false, nil, runtime.engine, nil, nil
 local initialized = false
 local stage, screen, transition, dressing = "setup", nil, nil, nil
 local capture_kind, render_prepared = "endpoint", false
 local touch_complete, mash_complete = false, false
-local calibration
-local state = runtime and runtime.state or {protocol = 1, checkpoint_protocol = 1, bridge = "pt-contest-stage4",
-    game_code = emu.gamecode(), frame = emu.framecount(), phase = "ready", buttons = "",
-    stylus_touch = false, command_id = mailbox:previous_id(), command_done = true, error = ""}
-local adapter = runtime and runtime.adapter or dofile(root .. "/lua/checkpoint_desmume.lua").new({
-    pause = function() assert(idle, "A host-confirmed native pause is required") end,
-    is_paused = function() return idle end,
-})
+local state, adapter = runtime.state, runtime.adapter
 local read_tip
 
 local function write_file(path, value, mode)
@@ -73,8 +58,7 @@ local function snapshot(frame)
     local raw = gui.gdscreenshot()
     local trial = {stage = stage, touch_complete = touch_complete, mash_complete = mash_complete,
         render_prepared = render_prepared,
-        entry_pointer_valid = not config.require_demo_pointer,
-        pointer_calibration_valid = not config.pointer_calibration_frames,
+        entry_pointer_valid = false,
         dressing_complete = dressing ~= nil and dressing.complete == true,
         released = state.buttons == "" and state.stylus_touch == false}
     if capture_kind == "dress_page" then
@@ -94,7 +78,7 @@ local function snapshot(frame)
             dressing.elapsed_game_seconds = dressing.elapsed_frames / config.automatic_dressing.frame_rate
             trial.dressing_complete = true
         end
-        return {frame = frame, game = game(), source_context = config.source_context,
+        return {frame = frame, game = game(), source_context = config.source_context, party_context = config.party_context,
             target = config.target, dressing = dressing, trial = trial}
     end
     local current_screen = {source = screen and screen.source or "unreviewed", memory_proven = false,
@@ -105,33 +89,12 @@ local function snapshot(frame)
         frame_range = screen and screen.frame_range or nil,
         fresh_visual_binding = screen ~= nil and screen.frame == frame and screen.epoch == adapter.epoch()
             and read_file(screen.path) == raw or false}
-    local measured = screen and screen.pointer_calibration
-    if config.require_demo_pointer then
-        local pointer = screen and screen.pointer
-        local bounds = pointer and pointer.position_bounds
-        trial.entry_pointer_valid = screen and screen.phase == "demo" and pointer and pointer.status == "exact"
-            and bounds and bounds[1] == bounds[2] and pointer_in_strip(raw, bounds[1]) or false
-    end
-    if config.pointer_calibration_frames and measured and calibration and calibration.complete then
-        local first, last = measured.start, measured["end"]
-        local point = screen.pointer and screen.pointer.position_bounds
-        trial.pointer_calibration_valid = first.frame == calibration.start.frame
-            and first.epoch == calibration.start.epoch and first.path == calibration.start.path
-            and first.pointer_x == calibration.start.pointer_x
-            and last.frame == frame and last.epoch == adapter.epoch() and last.path == screen.path
-            and calibration.end_frame == frame and calibration.epoch == adapter.epoch()
-            and last.epoch == first.epoch and last.frame - first.frame == config.pointer_calibration_frames
-            and measured.emulator_frames == config.pointer_calibration_frames and measured.input_policy == "none"
-            and measured.source == "fresh_paused_pointer_displacement"
-            and point ~= nil and point[1] == last.pointer_x and point[2] == last.pointer_x
-            and pointer_in_strip(raw, last.pointer_x) and last.pointer_x > first.pointer_x
-            and measured.pointer_pixels == last.pointer_x - first.pointer_x
-            and measured.pixels_per_frame == (last.pointer_x - first.pointer_x) / config.pointer_calibration_frames
-            and measured.frames_per_pixel == config.pointer_calibration_frames / (last.pointer_x - first.pointer_x) or false
-    end
-    return {frame = frame, game = game(), source_context = config.source_context, target = config.target,
-        screen = current_screen, transition = transition, dressing = dressing, trial = trial,
-        pointer_calibration = measured}
+    local pointer = screen and screen.pointer
+    local bounds = pointer and pointer.position_bounds
+    trial.entry_pointer_valid = screen and screen.phase == "demo" and pointer and pointer.status == "exact"
+        and bounds and bounds[1] == bounds[2] and pointer_in_strip(raw, bounds[1]) or false
+    return {frame = frame, game = game(), source_context = config.source_context, party_context = config.party_context, target = config.target,
+        screen = current_screen, transition = transition, dressing = dressing, trial = trial}
 end
 
 local function publish(observation)
@@ -141,7 +104,7 @@ local function publish(observation)
 end
 
 local function finish(message, reason)
-    if message and runtime then runtime.fail_stage() end
+    if message then runtime.fail_stage() end
     active = nil
     release()
     state.error, state.command_done = message or "", true
@@ -199,7 +162,6 @@ local function definitions()
             {id = "dance_1", field = "screen.dance", expected = 1},
             {id = "green_progress_tip", field = "screen.tip.green", expected = true},
             {id = "demo_pointer", field = "trial.entry_pointer_valid", expected = true},
-            {id = "pointer_calibration", field = "trial.pointer_calibration_valid", expected = true},
         }, branches = {pass = "finish"}},
         ["stage-4-dress-page"] = {checks = {
             {id = "platinum", field = "game.supported", expected = true},
@@ -217,29 +179,13 @@ end
 
 local function dispatch(action, args)
     local observation
-    if action == "state-changed" then
-        assert(not initialized, "A reload requires a fresh Stage 4 section")
-        adapter.state_changed()
-        state.frame = adapter.frame()
-        finish()
-        capture()
-    elseif action == "inspect" then
-        assert(not initialized, "Source inspection belongs before Stage 4 starts")
-        observation = snapshot(adapter.frame())
-        capture()
-    elseif action == "init" then
+    if action == "init" then
         assert(not initialized and #args == 0 and adapter.frame() == config.source_frame,
-            "Expected the retained dress-up source")
-        engine = engine or master.new({run_id = config.run_id, emulator = adapter, reader = {snapshot = snapshot},
-            log = master.jsonl(config.work .. "/checkpoint-events.jsonl"), definitions = definitions()})
+            "Expected the accepted current dress-up boundary")
+        assert(engine and config.entry_mode == "stage3_handoff" and config.entry_render_frames == 0,
+            "Direct Stage 3 to Stage 4 entry uses the main engine and adds zero frames")
         assert(config.target and config.automatic_dressing.full_checks[config.target.rank],
             "Automatic dressing requires the accepted contest rank")
-        assert(config.pointer_calibration_frames == nil or type(config.pointer_calibration_frames) == "number"
-            and config.pointer_calibration_frames >= 1 and config.pointer_calibration_frames == math.floor(config.pointer_calibration_frames),
-            "Per-contest pointer calibration needs a positive configured input-free frame window")
-        assert(type(config.entry_render_frames) == "number" and config.entry_render_frames >= 0
-            and config.entry_render_frames == math.floor(config.entry_render_frames),
-            "Declare the loaded-entry input-free render frame count")
         local taps = config.initial_page_taps
         assert(type(taps) == "number" and taps >= 0 and taps <= 7 and taps == math.floor(taps),
             "Choose the initial accessory page once, from zero through seven taps")
@@ -259,22 +205,8 @@ local function dispatch(action, args)
             initial_navigation = {chosen_taps = taps, executed_taps = 0, planned_frames = initial_frames,
                 executed_frames = 0, complete = taps == 0}}
         initialized = true
-        render_prepared = config.entry_render_frames == 0
-        stage = not render_prepared and "prepare-dress-render" or taps > 0 and "initial-pages" or "dressing"
-    elseif action == "dress-render-prepared" then
-        assert(engine and stage == "dress-render-ready" and not active and not pending
-            and not render_prepared and config.entry_render_frames > 0
-            and state.last_action == "prepare-dress-render"
-            and state.stop_reason == "dress_render_preparation_complete"
-            and state.command_start_frame == config.source_frame
-            and state.command_end_frame == config.source_frame + config.entry_render_frames
-            and adapter.frame() == config.source_frame + config.entry_render_frames
-            and state.buttons == "" and state.stylus_touch == false,
-            "A loaded Stage 3 source needs its configured input-free frames and a confirmed native pause")
         render_prepared = true
-        stage = dressing.initial_navigation.complete and "dressing" or "initial-pages"
-        observation = {frame = adapter.frame(), game = game(), dressing = dressing,
-            entry_render_frames = config.entry_render_frames, source = "counted_frames_then_native_pause"}
+        stage = taps > 0 and "initial-pages" or "dressing"
     elseif action == "dress-page-visit" then
         assert(engine and stage == "dressing" and render_prepared and dressing.initial_navigation.complete
             and not active and not pending and dressing and dressing.remaining_frames > 0
@@ -304,17 +236,6 @@ local function dispatch(action, args)
         capture()
         observation = snapshot(adapter.frame())
         observation.tip = observation.screen.tip
-    elseif action == "calibration-start" then
-        assert(engine and stage == "dance_candidate" and not active and not pending and not calibration
-            and config.pointer_calibration_frames and #args == 1,
-            "Calibrate once from the first paused Dance 1 candidate")
-        local first = assert(loadfile(args[1]))()
-        local raw = gui.gdscreenshot()
-        assert(first.frame == adapter.frame() and first.epoch == adapter.epoch()
-            and read_file(first.path) == raw and read_tip(raw).green and pointer_in_strip(raw, first.pointer_x),
-            "The calibration start needs fresh bound pixels within Dance 1's demonstration")
-        calibration = {start = first, epoch = adapter.epoch(), complete = false}
-        stage = "calibrate_pointer"
     elseif action == "visit" then
         assert(engine and stage == "dance_candidate" and not active and not pending and #args == 1,
             "Expected the paused endpoint pixel evidence")
@@ -332,9 +253,6 @@ local function dispatch(action, args)
             saved = args[7] ~= "false"})
         pending, observation = nil, latest.snapshot
         stage = latest.proceed and latest.branch or "stopped"
-        if not runtime and (latest.checkpoint == "stage-4-dress" or not latest.proceed) then
-            print("Contest Stage 4: " .. (latest.proceed and "PASS" or "FAIL"))
-        end
     elseif action == "abort" then
         local reason = args[1] or "Host stopped contest Stage 4"
         finish(reason)
@@ -353,32 +271,6 @@ local function dispatch(action, args)
     return packet(observation)
 end
 
-local function checkpoint_callback()
-    local parts = checkpoint_mailbox:read_command(checkpoint_id)
-    if not parts then return end
-    checkpoint_id = parts[1]
-    local args = {}
-    for index = 3, #parts do args[#args + 1] = parts[index] end
-    assert(not idle, "Reentrant paused checkpoint request")
-    idle, state.frame = true, adapter.frame()
-    local ok, result = pcall(dispatch, parts[2], args)
-    if not ok then
-        local message = tostring(result)
-        if pending then latest, pending = engine:cancel(message), nil end
-        finish(message)
-        stage = "stopped"
-        result = {frame = adapter.frame(), epoch = adapter.epoch(), error = message}
-    end
-    idle = false
-    result.command_id, result.command_done = checkpoint_id, true
-    state.checkpoint_epoch = adapter.epoch()
-    state.checkpoint_visit = result.checkpoint and result.checkpoint.visit
-    state.checkpoint_status = result.checkpoint and result.checkpoint.status
-    state.observation_stale = false
-    publish(result.observation)
-    checkpoint_mailbox:publish(result, false)
-end
-
 local function start(parts)
     state.command_id = parts[1]
     assert(engine and initialized and not pending, "Expected one authorized Stage 4 action")
@@ -386,12 +278,7 @@ local function start(parts)
     state.last_action, state.command_start_frame = parts[2], state.frame
     state.phase, state.stop_reason, state.command_end_frame = "running", nil, nil
     active = {kind = parts[2], elapsed = 0}
-    if active.kind == "prepare-dress-render" then
-        assert(#parts == 2 and stage == "prepare-dress-render" and config.entry_render_frames > 0
-            and state.frame == config.source_frame and not render_prepared,
-            "Only a loaded Stage 3 source needs its configured render advance")
-        active.total = config.entry_render_frames
-    elseif active.kind == "dress-initial-pages" then
+    if active.kind == "dress-initial-pages" then
         local navigation = dressing.initial_navigation
         assert(#parts == 2 and stage == "initial-pages" and render_prepared and dressing.pages == 0
             and not navigation.complete and navigation.chosen_taps > 0,
@@ -428,11 +315,6 @@ local function start(parts)
         assert(#parts == 3 and stage == "observe" and mash_complete and frames and frames > 0
             and frames == math.floor(frames), "Expected a whole observation frame count")
         active.total = frames
-    elseif active.kind == "calibrate-pointer" then
-        assert(#parts == 2 and stage == "calibrate_pointer" and calibration and not calibration.complete
-            and state.frame == calibration.start.frame and adapter.epoch() == calibration.epoch,
-            "Start the counted calibration at its fresh paused pointer sample")
-        active.total = config.pointer_calibration_frames
     else
         error("Unknown Stage 4 input action: " .. tostring(parts[2]))
     end
@@ -533,7 +415,7 @@ local function after_frame()
                 end
             end
         end
-        if dressing and (active.kind == "prepare-dress-render" or active.kind == "dress-initial-pages"
+        if dressing and (active.kind == "dress-initial-pages"
             or active.kind == "dress-page-inputs") then
             dressing.elapsed_frames = state.frame - dressing.start_frame
             dressing.remaining_frames = dressing.budget_frames - dressing.elapsed_frames
@@ -549,11 +431,7 @@ local function after_frame()
                 return
             end
         end
-        if active.kind == "prepare-dress-render" and active.elapsed >= active.total then
-            stage = "dress-render-ready"
-            stop(nil, "dress_render_preparation_complete")
-            return
-        elseif active.kind == "dress-initial-pages" and active.elapsed >= active.total then
+        if active.kind == "dress-initial-pages" and active.elapsed >= active.total then
             local navigation = dressing.initial_navigation
             assert(navigation.executed_taps == navigation.chosen_taps, "The initial page count changed during navigation")
             navigation.complete, navigation.end_frame, navigation.executed_frames = true, state.frame, active.elapsed
@@ -585,21 +463,12 @@ local function after_frame()
             transition.total_frames = state.frame - transition.start_frame
             stop(nil, "observation_interval_complete")
             return
-        elseif active.kind == "calibrate-pointer" and active.elapsed >= active.total then
-            assert(active.elapsed == config.pointer_calibration_frames and state.frame == calibration.start.frame + config.pointer_calibration_frames
-                and adapter.epoch() == calibration.epoch, "Pointer calibration exceeded its counted frame window")
-            calibration.complete, calibration.end_frame = true, state.frame
-            transition.total_frames = state.frame - transition.start_frame
-            stage = "dance_candidate"
-            stop(nil, "pointer_calibration_complete")
-            return
         end
     end
     if state.frame % 15 == 0 then publish() end
 end
 
-if runtime then
-    return {definitions = definitions, snapshot = snapshot, before = before_frame, after = after_frame,
+return {definitions = definitions, snapshot = snapshot, before = before_frame, after = after_frame,
         finish = finish, checkpoint = function(action, args)
             idle, state.frame = true, adapter.frame()
             local ok, result = pcall(dispatch, action, args)
@@ -613,14 +482,3 @@ if runtime then
             end
             return result
         end}
-end
-
-emu.registermenustart(checkpoint_callback)
-emu.registerbefore(before_frame)
-emu.registerafter(after_frame)
-
-release()
-capture()
-publish()
-if not paused_handoff then emu.pause() end
-print("Local contest Stage 4 bridge ready.")

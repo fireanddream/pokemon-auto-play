@@ -1,24 +1,16 @@
-"""Native-image CPUJ contest dance recognition from PNG or GD screenshots.
-
-Only image pixels identify progress and demonstrated buttons. The caller supplies
-the dance number (1..6); a still picture cannot distinguish the two dances with
-the same leader. Pillow is the only external dependency.
-"""
+"""Native dance sprite and pointer pixels shared by the main runner."""
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
-import json
 import math
 from pathlib import Path
 import struct
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 
 BUTTONS = ("A", "B", "X", "Y")
-GRID_X = tuple(range(18, 119, 10))
 CUE_SIDE_OFFSET = 120
 FILLED_PROFILES = (
     ((56, 255, 134), (190, 255, 255), (56, 255, 134), (24, 207, 113)),
@@ -149,6 +141,17 @@ def gd_image(raw: bytes) -> Image.Image:
         raise ValueError("GD framebuffer length does not match its dimensions")
     channels = Image.frombytes("RGBA", (width, height), raw[11:]).split()
     return native_top(Image.merge("RGB", channels[1:]))
+
+
+def stacked_gd(path):
+    raw = Path(path).read_bytes()
+    if len(raw) < 11:
+        raise ValueError("Truncated timing screenshot.")
+    magic, width, height = struct.unpack_from(">HHH", raw)
+    if magic != 65534 or raw[6] != 1 or (width, height) != (256, 384) or len(raw) != 11 + width * height * 4:
+        raise ValueError("Expected a native stacked-screen GD image.")
+    channels = Image.frombytes("RGBA", (width, height), raw[11:]).split()
+    return Image.merge("RGB", channels[1:])
 
 
 def native_top(image: Image.Image) -> Image.Image:
@@ -313,52 +316,6 @@ def layout_for(dance):
             "preferred_side": ("left", "right", "right")[pair]}
 
 
-def read_side(image, side, layout, *, cue_side_offset_pixels=CUE_SIDE_OFFSET):
-    px = image.load()
-    result = []
-    sprites = LEFT_SPRITES if side == "left" else RIGHT_SPRITES
-    y = 168 if side == "left" else layout["right_marker_y"] - 8
-    for demo_x in GRID_X:
-        center = demo_x if side == "left" else demo_x + cue_side_offset_pixels
-        candidates = []
-        for button, sprite in sprites.items():
-            match = _match(px, center - 8, y, sprite)
-            if match:
-                candidates.append({"button": button, **match})
-        if candidates:
-            result.append({"demo_x": demo_x, "screen_x": center,
-                           "status": "readable" if len(candidates) == 1 else "ambiguous",
-                           "candidates": candidates})
-    return result
-
-
-def merge_buttons(left, right, preferred_side, conflict_policy):
-    if conflict_policy not in ("error", "master"):
-        raise ValueError("Conflict policy must be error or master")
-    sides = {"left": {item["demo_x"]: item for item in left},
-             "right": {item["demo_x"]: item for item in right}}
-    if preferred_side == "best_visible":
-        preferred_side = max(("left", "right"), key=lambda side: sum(
-            item["status"] == "readable" for item in sides[side].values()))
-    accepted, conflicts = [], []
-    for x in sorted(set(sides["left"]) | set(sides["right"])):
-        readings = {side: entries[x]["candidates"][0] for side, entries in sides.items()
-                    if x in entries and entries[x]["status"] == "readable"}
-        if not readings:
-            continue
-        different = len({item["button"] for item in readings.values()}) > 1
-        if different:
-            conflicts.append({"demo_x": x, "readings": readings})
-            if conflict_policy == "error" or preferred_side not in readings:
-                continue
-        selected = preferred_side if preferred_side in readings else next(iter(readings))
-        accepted.append({"demo_x": x, "button": readings[selected]["button"], "source_side": selected,
-                         "fallback": selected != preferred_side, "cross_checked": len(readings) == 2 and not different,
-                         "evidence": readings})
-    return {"master_side": preferred_side, "conflict_policy": conflict_policy,
-            "accepted": accepted, "conflicts": conflicts, "left": left, "right": right}
-
-
 def read_progress(bar, pointer, *, frames_per_pixel=None):
     if frames_per_pixel is None:
         from contest.dance_timings import fixed_timing
@@ -394,171 +351,3 @@ def read_progress(bar, pointer, *, frames_per_pixel=None):
             "nominal_frame": round(((lower + upper) / 2 - 8) * frames_per_pixel, 2),
             "frames_to_response_range": [half_frames - frames[1], half_frames - frames[0]],
             "timing_source": "pixel_position_with_measured_tempo_envelope"}
-
-
-def analyze(image, dance, *, conflict_policy="error", frames_per_pixel=None, cue_side_offset_pixels=None, expected_cues=4):
-    if cue_side_offset_pixels is None:
-        from contest.dance_timings import fixed_timing
-
-        cue_side_offset_pixels = fixed_timing("Cool", "Master")["cue_side_offset_pixels"]
-    if isinstance(expected_cues, bool) or not isinstance(expected_cues, int) or expected_cues not in (3, 4):
-        raise ValueError("Select the rank's three or four expected cues.")
-    image = native_top(image)
-    layout = layout_for(dance)
-    bar, pointer = read_bar(image), read_pointer(image)
-    progress = read_progress(bar, pointer, frames_per_pixel=frames_per_pixel)
-    buttons = merge_buttons(read_side(image, "left", layout, cue_side_offset_pixels=cue_side_offset_pixels),
-                            read_side(image, "right", layout, cue_side_offset_pixels=cue_side_offset_pixels),
-                            layout["preferred_side"], conflict_policy)
-    errors = []
-    if progress["status"] == "conflict":
-        errors.append("Pointer and timing-strip evidence disagree")
-    if buttons["conflicts"] and conflict_policy == "error":
-        errors.append("The two button sources disagree")
-    if len(buttons["accepted"]) > expected_cues:
-        errors.append(f"More than {expected_cues} demonstrated buttons were identified")
-    if errors:
-        status = "error"
-    elif progress["status"] == "inactive":
-        status = "inactive"
-    elif progress["frame_range"] is None:
-        status = "uncertain"
-    else:
-        status = "ok" if len(buttons["accepted"]) == expected_cues else "partial"
-    return {"status": status, "errors": errors, "source": "offline_image_pixels", "layout": layout,
-            "progress": progress, "bar": bar, "pointer": pointer, "buttons": buttons,
-            "expected_cues": expected_cues, "cue_side_offset_pixels": cue_side_offset_pixels}
-
-
-class ProgressTracker:
-    """Intersect visual frame ranges with explicitly counted emulator advances.
-
-    Create a new tracker after a load/reset or for a new dance. Counts are
-    emulator frames between observations, never host seconds. An obscured image
-    can carry an earlier anchor forward, with its nonvisual source made explicit.
-    """
-
-    def __init__(self, dance):
-        layout_for(dance)
-        self.dance = dance
-        self.frame_range = None
-
-    def update(self, reading, *, advanced_frames):
-        if isinstance(advanced_frames, bool) or not isinstance(advanced_frames, int) or advanced_frames < 0:
-            raise ValueError("Supply a nonnegative integer count of advanced emulator frames")
-        if reading["layout"]["dance"] != self.dance:
-            raise ValueError("Start a new progress tracker for a different dance")
-        if reading["status"] == "error":
-            raise ValueError("; ".join(reading["errors"]))
-        observed = reading["progress"]["frame_range"]
-        predicted = [value + advanced_frames for value in self.frame_range] if self.frame_range is not None else None
-        if predicted is not None and observed is not None:
-            bounds = [max(predicted[0], observed[0]), min(predicted[1], observed[1])]
-            if bounds[0] > bounds[1]:
-                raise ValueError("Visual progress disagrees with counted frames; inspect capture freshness or a state change")
-            source = "visual_range_and_counted_advances"
-        else:
-            bounds = observed if observed is not None else predicted
-            source = "visual_range" if observed is not None else "counted_advances_from_visual_anchor" if predicted else "unreadable"
-        self.frame_range = bounds
-        return {"dance": self.dance, "frame_range": bounds, "source": source,
-                "visually_confirmed": observed is not None,
-                "frame_unit": "emulator_frames_from_dance_sweep_start"}
-
-
-class DemoAccumulator:
-    """Remember actual observations within one explicitly selected demo.
-
-    Missing/covered pixels never erase a previously read cue. Start a new object
-    for each dance, including the second dance led by the same opponent.
-    """
-
-    def __init__(self, dance, *, expected_cues=4):
-        layout_for(dance)
-        if isinstance(expected_cues, bool) or not isinstance(expected_cues, int) or expected_cues not in (3, 4):
-            raise ValueError("Select the rank's three or four expected cues.")
-        self.dance = dance
-        self.expected_cues = expected_cues
-        self.seen = {}
-        self.last_position = None
-
-    def add(self, reading):
-        if reading["layout"]["dance"] != self.dance:
-            raise ValueError("Start a new accumulator for a different dance")
-        if reading["status"] == "error":
-            raise ValueError("; ".join(reading["errors"]))
-        progress = reading["progress"]
-        if progress["phase"] != "demo":
-            return self.result()
-        bounds = progress["position_bounds"]
-        if self.last_position is not None and bounds[1] < self.last_position:
-            raise ValueError("Demo progress moved backward; check capture freshness or reset the accumulator")
-        self.last_position = max(self.last_position or 8, bounds[0])
-        for cue in reading["buttons"]["accepted"]:
-            x = cue["demo_x"]
-            if x in self.seen and self.seen[x]["button"] != cue["button"]:
-                raise ValueError(f"The demonstrated button at x={x} changed")
-            self.seen[x] = cue
-        if len(self.seen) > self.expected_cues:
-            raise ValueError(f"More than {self.expected_cues} demonstrated buttons accumulated")
-        return self.result()
-
-    def result(self):
-        return {"dance": self.dance, "complete": len(self.seen) == self.expected_cues,
-                "buttons": [self.seen[x] for x in sorted(self.seen)]}
-
-
-def annotate(image, reading):
-    image = native_top(image)
-    draw = ImageDraw.Draw(image)
-    progress = reading["progress"]
-    if progress["position_bounds"]:
-        left, right = progress["position_bounds"]
-        draw.rectangle((left, 153, right, 160), outline="red")
-    for cue in reading["buttons"]["accepted"]:
-        for side in cue["evidence"]:
-            x = cue["demo_x"] + (reading["cue_side_offset_pixels"] if side == "right" else 0)
-            y = 168 if side == "left" else reading["layout"]["right_marker_y"] - 8
-            draw.rectangle((x - 8, y, x + 7, y + 15), outline="lime" if side == cue["source_side"] else "cyan")
-    return image
-
-
-def summarize(reading):
-    progress = reading["progress"]
-    buttons = reading["buttons"]
-    return {
-        "status": reading["status"], "errors": reading["errors"],
-        "dance": reading["layout"]["dance"], "player_position": reading["layout"]["player_position"],
-        "phase": progress["phase"], "position_bounds": progress["position_bounds"],
-        "frame_range": progress["frame_range"], "frame_unit": "emulator_frames_from_dance_sweep_start",
-        "position_source": progress.get("position_source"), "master_side": buttons["master_side"],
-        "visible_buttons_complete": len(buttons["accepted"]) == reading["expected_cues"],
-        "buttons": [{key: cue[key] for key in ("demo_x", "button", "source_side", "fallback", "cross_checked")}
-                    for cue in buttons["accepted"]],
-        "conflicts": buttons["conflicts"],
-    }
-
-
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("image", type=Path)
-    parser.add_argument("--dance", type=int, choices=range(1, 7), required=True)
-    parser.add_argument("--conflict-policy", choices=("error", "master"), default="error")
-    parser.add_argument("--details", action="store_true", help="Include individual pixel-match evidence")
-    parser.add_argument("--annotate", type=Path)
-    args = parser.parse_args(argv)
-    try:
-        image = load_image(args.image)
-        result = analyze(image, args.dance, conflict_policy=args.conflict_policy)
-        if args.annotate:
-            if not args.annotate.parent.is_dir():
-                raise ValueError("The annotation output directory must already exist")
-            annotate(image, result).save(args.annotate)
-    except (OSError, ValueError) as error:
-        parser.exit(2, f"{error}\n")
-    print(json.dumps(result if args.details else summarize(result), indent=2))
-    return 1 if result["status"] == "error" else 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
