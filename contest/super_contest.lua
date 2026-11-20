@@ -33,7 +33,7 @@ local stage_feedback = {
     {name = "Contest Entry", checkpoint = "stage-3-enter", message = "Dress-up entry confirmed."},
     {name = "Dress-up", checkpoint = "stage-4-dress", message = "Dancing entry confirmed."},
     {name = "Dancing", checkpoint = "stage-5-dance", message = "Scripted Acting transition complete."},
-    {name = "Acting", checkpoint = "stage-6-act", message = "Target ribbon confirmed."},
+    {name = "Acting", checkpoint = "stage-6-act", message = "Target ribbon acquired."},
 }
 local feedback_stage, feedback_visit, reported_result, collection_reported = 1, 0, nil, false
 
@@ -85,12 +85,13 @@ local function report_checkpoint(action, record)
             reported_result = "warning"
             return
         elseif feedback_stage == 6 then
-            print("Acting: WARN - Target ribbon not acquired; retrying.")
+            print("Contest: FAIL - Target ribbon not acquired; retrying.")
             reported_result = "warning"
             return
         else runtime.fail_stage(); return end
     end
-    print(feedback.name .. ": PASS - " .. feedback.message)
+    local name = feedback_stage == 6 and "Contest" or feedback.name
+    print(name .. ": PASS - " .. feedback.message)
     reported_result = "pass"
     local snapshot = record.snapshot
     if record.checkpoint == "stage-6-act" then

@@ -16,6 +16,8 @@ the initial empty-move-slot list. One caller, emulator, Lua connection, and
 checkpoint engine serve the whole run; no quick-loads or Lua restarts.
 Finish paused on all 20 ribbons, unexpected failure, or timeout. Release inputs,
 stop movie mode, and restore 100% speed with frame limiting enabled.
+Then display `Total run time: HH:MM:SS` in Lua output and the host log, including
+setup, pauses, retries, and cleanup (actual host time, not game time).
 
 ## Setup and ownership
 

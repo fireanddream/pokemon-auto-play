@@ -343,6 +343,15 @@ def _run(run_name, plan, started, *, controller_config=None, fresh_start=False):
             all_ribbons_owned=result["all_ribbons_owned"], owned_ribbon_count=result["owned_ribbon_count"],
             ribbons_acquired=len(result["ribbons_acquired"]),
             stage=result["active_stage"], frame=result.get("frame"), total_host_seconds=result["total_host_seconds"])
+        minutes, seconds = divmod(int(result["total_host_seconds"]), 60)
+        hours, minutes = divmod(minutes, 60)
+        message = f"Total run time: {hours:02d}:{minutes:02d}:{seconds:02d}"
+        print(message, flush=True)
+        if result["lifecycle"]["lua_attachments"]:
+            try:
+                runtime.controller.log_lua(message)
+            except (Exception, SystemExit, KeyboardInterrupt):
+                pass  # A closed output window must not change the completed result.
     return result
 
 

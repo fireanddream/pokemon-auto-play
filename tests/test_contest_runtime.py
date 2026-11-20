@@ -3231,7 +3231,7 @@ class CollectionLoopChecks(unittest.TestCase):
                 cleanup = json.loads(Path(result["cleanup_manifests"][0]).read_text(encoding="utf-8"))
                 self.assertEqual(cleanup["status"], "complete")
                 self.assertEqual(cleanup["removed_folders"], ["failed-run", "interrupted-run", "old-run"])
-                self.assertEqual(len(runtime.startup_messages), 2)
+                self.assertEqual(len(runtime.startup_messages), 3)
 
     def test_five_ribbon_misses_warn_once_per_streak_and_keep_retrying(self):
         attempts = [False] * 6 + [True] + [False] * 6 + [True]
