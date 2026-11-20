@@ -17,7 +17,7 @@ import subprocess
 import sys
 import traceback
 
-RELEASE = "0.91"
+RELEASE = "0.92"
 SCRIPT = Path(__file__).resolve()
 SUPPORT = SCRIPT.parent / "contest"
 MODULE_ROOT = SUPPORT if (SUPPORT / "host" / "paths.py").is_file() else SCRIPT.parent

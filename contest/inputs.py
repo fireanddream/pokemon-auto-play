@@ -1,16 +1,6 @@
-"""Contest input grammar and JPN compatibility aliases for shared menu defaults."""
+"""Contest input grammar and whole-frame validation."""
 
 from __future__ import annotations
-
-
-from contest.timing_profiles import section
-
-
-_ENTRY = section(None, "stage3_entry")
-MASH_HOLD_FRAMES = _ENTRY["intro_mash_hold_frames"]
-MASH_RELEASE_FRAMES = _ENTRY["intro_mash_release_frames"]
-NORMAL_HOLD_FRAMES = _ENTRY["menu_hold_frames"]
-NORMAL_RELEASE_FRAMES = _ENTRY["menu_release_frames"]
 
 
 def whole(value: int, minimum: int, label: str) -> int:

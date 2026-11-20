@@ -262,8 +262,7 @@ local function snapshot(frame)
 end
 
 local function common()
-    return {{id = "platinum", field = "game.supported", expected = true},
-        {id = "released", field = "released", expected = true},
+    return {{id = "released", field = "released", expected = true},
         {id = "frame", field = "frame", context = "frame"},
         {id = "epoch", field = "epoch", context = "epoch"},
         {id = "fresh_capture", field = "image.direct_read_frames", expected = 0},
@@ -293,7 +292,6 @@ local function definitions()
                 local trial = snapshot.trial
                 return trial.total_inputs + trial.total_skipped_inputs == trial.dance * trial.cues_per_dance
             end},
-            {id = "feedback_policy_met", field = "trial.feedback_policy_met", expected = true},
             {id = "verified_feedback_total", expected = true, evaluate = function(snapshot)
                 local actual, required = snapshot.trial.total_judgment_count, snapshot.trial.required_judgments_so_far
                 return actual == required, {count = actual, required = required}
@@ -306,7 +304,6 @@ local function definitions()
             {id = "feedback_capture_bound", field = "trial.first_feedback_bound", expected = true},
         }, branches = {hit = "mirror_rest", miss = "mirror_rest"}},
         ["stage-5-dance"] = {checks = {
-            {id = "platinum", field = "game.supported", expected = true},
             {id = "released", field = "released", expected = true},
             {id = "frame", field = "frame", context = "frame"},
             {id = "epoch", field = "epoch", context = "epoch"},

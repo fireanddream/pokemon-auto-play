@@ -14,7 +14,3 @@ class Stage2BagState:
         if self.opened_once:
             return ("X", "A")
         return ("X", "down", "down", "A")
-
-    def record_opened(self) -> None:
-        """Record a confirmed opening; the main menu now remembers Bag."""
-        self.opened_once = True

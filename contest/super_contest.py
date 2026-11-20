@@ -31,17 +31,9 @@ from host.paths import project_path
 
 HERE = Path(__file__).resolve().parent
 dress_grid = stage4_dress.DRESS_GRID
-dress_seconds = stage4_dress.AUTO_SECONDS
-dress_pickup_frames = stage4_dress.PICKUP_FRAMES
-dress_drag_frames = stage4_dress.DRAG_FRAMES
-dress_release_frames = stage4_dress.DRAG_RELEASE_FRAMES
-dress_page_wait_frames = stage4_dress.PAGE_WAIT_FRAMES
 debug = 0
 total_timeout_seconds = 120 * 60
 stage_timeout_seconds = 5 * 60
-acting_round_seconds = stage6_act.ROUND_SECONDS
-acting_final_seconds = stage6_act.FINAL_SECONDS
-OSD_SETTLE_SECONDS = section(None, "stage5_dancing")["native_overlay_settle_host_seconds"]
 STAGES = {1: stage1_load, 2: stage2_prep, 3: stage3_enter,
           4: stage4_dress, 5: rank_dance, 6: stage6_act}
 
@@ -79,7 +71,7 @@ def chain_plan(*, debug=debug,
         3: "All 5/10/15/20 rank-selected empty accessory slots on the native top screen; no button or text matching.",
         4: "Zero-frame Stage 3 handoff, fresh accessory grid/rank marker, counted dressing deadline, and a readable green Dance 1 demo pointer.",
         5: "Fixed category/rank metrics and cue spacing, early-targeted midpoints, non-fatal cue/input skips, one first-button feedback result, six counted responses, input-free lead dances, and the scripted B transition.",
-        6: "Reuse accepted party facts; prepare rendering input-free, confirm native pause and all 15 empty star slots, cache move categories/hearts once per attempt, read judges/order each round, then X/read party and Bag/X after every completed contest before the closed-menu overworld check."}
+        6: "Reuse accepted party facts; render input-free, guard entry with 15 empty stars and each round's order/menu, cache move scoring once, and plan paused before one B-delay/selection combo. After results, match startup player pixels and the closed dialogue top tip together; B retry/settle precedes X/read party and Bag/X and the overworld check."}
     return {"game": profile["game_code"], "timing_profile": profile, "debug": debug,
         "uncapped": True, "total_timeout_seconds": total_timeout, "stage_timeout_seconds": stage_timeout,
         "runtime": {"host_callers": 1, "lua_windows": 1, "lua_attachments": 1, "checkpoint_engines": 1,
@@ -101,6 +93,7 @@ def chain_plan(*, debug=debug,
         "acting_final_game_seconds": acting_final_seconds,
         "acting_wait_emulator_frames": [item["mash_frames"] for item in acting["rounds"]],
         "acting_between_round_readiness": acting["between_round_readiness"],
+        "acting_result_readiness": acting["post_acting_readiness"],
         "acting_move_policy": acting["move_policy"], "acting_move_category_read_policy": acting["move_category_read_policy"],
         "acting_move_navigation": acting["move_navigation"],
         "target_selection": "first missing first-party Sinnoh contest ribbon; select the next missing ribbon after each win",

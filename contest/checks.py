@@ -26,12 +26,13 @@ RUNTIME_SOURCES = {
         "sections.lua", "stage4_dress.lua", "super_contest.lua",
     ),
     "host": (
-        "__init__.py", "bootstrap.py", "checkpoints.py", "controller.py", "dialogs.py", "emulator.py",
+        "__init__.py", "bootstrap.py", "checkpoints.py", "controller.py", "dialogs.py", "emulator.py", "guards.py",
         "lua51.py", "paths.py", "rtc.py", "savestates.py", "windows.py",
     ),
     "lua": (
         "bridge_io.lua", "checkpoint_desmume.lua", "checkpoint_master.lua", "input_bridge.lua",
-        "input_sequences.lua", "json.lua", "platinum.lua", "PLATINUM-LICENSE.txt",
+        "input_sequences.lua", "json.lua", "platinum.lua", "pt_rng_common.lua", "pt_rng_readers.lua",
+        "PLATINUM-LICENSE.txt",
     ),
 }
 

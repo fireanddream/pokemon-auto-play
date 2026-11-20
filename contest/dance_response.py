@@ -4,7 +4,7 @@ import math
 from pathlib import Path
 
 from contest.pt_dance_read import (
-    LEFT_SPRITES, RIGHT_SPRITES, _match, gd_image, layout_for,
+    LEFT_SPRITES, RIGHT_SPRITES, _match, layout_for, native_top,
     read_bar, read_pointer, read_progress, stacked_gd,
 )
 
@@ -96,8 +96,10 @@ def select_cues(left, right, *, expected_cues, side_offset_pixels):
 
 
 def response_plan(midpoint, image, *, rank, expected_cues, speed, hold_frames, offset_frames,
-                  side_offset_pixels, dance=1, counted_midpoint_anchor=None):
-    fresh = {side: cue_positions(image, side, dance) for side in ("left", "right")}
+                  side_offset_pixels, dance=1, counted_midpoint_anchor=None, cue_readings=None):
+    """Reuse the cue scan of this same fresh image when the caller already has it."""
+    fresh = cue_readings if cue_readings is not None else {
+        side: cue_positions(image, side, dance) for side in ("left", "right")}
     paired = select_cues(fresh["left"], fresh["right"], expected_cues=expected_cues,
         side_offset_pixels=side_offset_pixels)
     position = midpoint["position"]
@@ -164,9 +166,10 @@ def capture_result(result, *, allow_unreadable=False):
             or result["observation"].get("released") is not True or image.get("source") != "fresh_zero_frame_framebuffer"
             or image["direct_read_frames"] != 0 or image["frame"] != result["frame"] or image["epoch"] != result["epoch"]):
         raise RuntimeError("The fresh capture frame/epoch does not match its paused packet.")
-    stacked_gd(path).save(path.with_suffix(".png"))
+    framebuffer = stacked_gd(path)
+    framebuffer.save(path.with_suffix(".png"))
     try:
-        position = pointer_position(gd_image(path.read_bytes()))
+        position = pointer_position(native_top(framebuffer))
     except ReviewNeeded as error:
         if not allow_unreadable:
             raise

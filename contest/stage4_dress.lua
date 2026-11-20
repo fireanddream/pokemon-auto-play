@@ -86,7 +86,6 @@ local function snapshot(frame)
         pointer_source = screen and screen.pointer_source or nil,
         pointer_phase = screen and screen.phase or "unknown", dance = screen and screen.dance or 0,
         frame = screen and screen.frame or frame, epoch = screen and screen.epoch or adapter.epoch(),
-        frame_range = screen and screen.frame_range or nil,
         fresh_visual_binding = screen ~= nil and screen.frame == frame and screen.epoch == adapter.epoch()
             and read_file(screen.path) == raw or false}
     local pointer = screen and screen.pointer
@@ -150,7 +149,6 @@ end
 local function definitions()
     return {
         ["stage-4-dress"] = {checks = {
-            {id = "platinum", field = "game.supported", expected = true},
             {id = "finish_tap_complete", field = "trial.touch_complete", expected = true},
             {id = "dressing_complete", field = "trial.dressing_complete", expected = true},
             {id = "A_mashing_complete", field = "trial.mash_complete", expected = true},
@@ -164,7 +162,6 @@ local function definitions()
             {id = "demo_pointer", field = "trial.entry_pointer_valid", expected = true},
         }, branches = {pass = "finish"}},
         ["stage-4-dress-page"] = {checks = {
-            {id = "platinum", field = "game.supported", expected = true},
             {id = "released", field = "trial.released", expected = true},
             {id = "render_prepared", field = "trial.render_prepared", expected = true},
             {id = "readable_rank_indicator", field = "dressing.page.readable", expected = true},
@@ -220,7 +217,7 @@ local function dispatch(action, args)
         observation, stage = latest.snapshot, "checkpoint"
     elseif action == "check-dance" then
         assert(engine and stage == "observe" and mash_complete and not active and not pending,
-            "Complete one paused observation interval first")
+            "Complete A-mashing and pause before checking dancing entry")
         local tip = read_tip(gui.gdscreenshot())
         tip.frame, tip.epoch = adapter.frame(), adapter.epoch()
         transition.poll_count = transition.poll_count + 1

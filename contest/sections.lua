@@ -43,7 +43,6 @@ function M.definitions()
         }, branches = {pass = "finish"}},
         ["stage-3-enter"] = {checks = screen_rules("dress_up_entry_screenshot"), branches = {pass = "finish"}},
         ["stage-6-round"] = {checks = {
-            {id = "platinum", field = "game.supported", expected = true},
             {id = "released", field = "trial.released", expected = true},
             {id = "round", field = "trial.round", context = "round"},
             {id = "three_readable_judges", field = "stars.readable", expected = true},
@@ -65,16 +64,14 @@ function M.definitions()
             {id = "acting_order_capture_binding", expected = true, evaluate = function(snapshot)
                 return snapshot.acting_order.path == snapshot.image.path, snapshot.acting_order.path
             end},
-            {id = "readable_between_round_menu", expected = true, evaluate = function(snapshot, context)
-                return context.round == 1 or snapshot.round_readiness.ready == true
-            end},
+            {id = "readable_round_menu", field = "round_readiness.ready", expected = true},
             {id = "eligible_move_plan", field = "plan.selectable", expected = true},
             {id = "capture_frame", field = "image.frame", context = "frame"},
             {id = "capture_epoch", field = "image.epoch", context = "epoch"},
         }, branches = {pass = "perform-round"}},
         ["stage-6-act"] = {checks = {
-            {id = "platinum", field = "game.supported", expected = true},
             {id = "four_rounds_complete", field = "trial.completed_rounds", expected = 4},
+            {id = "post_acting_ready", field = "trial.post_acting_ready", expected = true},
             {id = "released", field = "trial.released", expected = true},
             {id = "overworld", field = "screen.confirmed", expected = true},
             {id = "validated_party", field = "party.data_validation_passed", expected = true},
@@ -93,8 +90,11 @@ function M.new(config, runtime)
     local stage = config.stage == 6 and "setup" or config.stage == 2 and "inspect" or "inputs"
     local latest, pending, captured, screen, initial, prep, current_plan, source_party, entry_moves, result_memory
     local round_index, completed_rounds, move_cursor, judge_cursor = 0, 0, 1, 1
-    local pause_plan, settled
+    local pause_plan, ready_round
     local readiness_checks = 0
+    local dress_entry_retry, dress_entry_checks, dress_entry_wait_frames = nil, 0, 0
+    local post_pause, post_settled
+    local post_readiness_checks = 0
     local render_prepared, render_end_frame = false, nil
     local render_epoch, capture_kind = adapter.epoch(), "source"
     local section = {}
@@ -108,7 +108,10 @@ function M.new(config, runtime)
             completed_rounds = completed_rounds, move_cursor = move_cursor, judge_cursor = judge_cursor,
             render_preparation_frames = render_prepared and render_end_frame - config.source_frame or 0,
             render_preparation_mode = config.entry_mode,
-            readiness_checks = readiness_checks, readiness_settle_frames = settled and settled.frames or 0,
+            readiness_checks = readiness_checks, pre_selection_frames = ready_round and ready_round.frames or 0,
+            post_acting_readiness_checks = post_readiness_checks,
+            post_acting_settle_frames = post_settled and post_settled.frames or 0,
+            post_acting_ready = post_settled ~= nil,
             released = api.state.command_done and api.state.buttons == "" and not api.state.stylus_touch}
     end
 
@@ -155,10 +158,8 @@ function M.new(config, runtime)
                     for _, warning in ipairs(entry_moves.warnings) do print(warning) end
                 end
                 result.move_categories = entry_moves
-                if round_index > 1 then
-                    result.round_readiness = acting_pixels.read_round_readiness(raw, config.unavailable_move_slots,
-                        move_cursor, result.stars, result.acting_order)
-                end
+                result.round_readiness = acting_pixels.read_round_readiness(raw, config.unavailable_move_slots,
+                    round_index > 1 and move_cursor or nil, result.stars, result.acting_order)
                 if result.stars.readable and result.acting_order.readable and entry_moves then
                     result.plan = acting_plan.round(config, round_index, move_cursor, judge_cursor, frame,
                         result.stars, entry_moves, result.acting_order)
@@ -182,6 +183,7 @@ function M.new(config, runtime)
                 end
             end
             result.screen = screen or {source = "unreviewed", memory_proven = false}
+            if config.stage == 3 then result.image = captured.image end
             if config.stage == 1 and screen and screen.confirmed then
                 local readiness = initial
                 result.party, result.bag, result.access = readiness.party, readiness.bag, readiness.access
@@ -203,13 +205,45 @@ function M.new(config, runtime)
         current_plan, stage = nil, "ready"
     end
 
-    function section.authorize(action)
+    local function planned_combo(parts, steps)
+        if not parts or not steps or #parts ~= #steps + 3 or parts[3] ~= "inputs" then return false end
+        for index, step in ipairs(steps) do
+            if parts[index + 3] ~= step then return false end
+        end
+        return true
+    end
+
+    function section.authorize(action, parts)
         if pending or not api.state.command_done then return false end
         if action == "combo" then
+            if config.stage == 3 then
+                if stage == "entry-wait" then
+                    return dress_entry_retry and adapter.frame() == dress_entry_retry.start_frame
+                        and adapter.epoch() == dress_entry_retry.epoch and planned_combo(parts, dress_entry_retry.steps)
+                end
+                return stage == "inputs" and adapter.frame() == config.source_frame
+                    and planned_combo(parts, config.inputs)
+            end
+            if config.stage == 6 then
+                if stage == "perform-round" then
+                    return current_plan and adapter.frame() == current_plan.start_frame
+                        and planned_combo(parts, current_plan.steps)
+                elseif stage == "round-wait" then
+                    return pause_plan and pause_plan.phase == "retry"
+                        and adapter.frame() == pause_plan.start_frame and adapter.epoch() == pause_plan.epoch
+                        and planned_combo(parts, pause_plan.steps)
+                elseif stage == "post-acting-wait" then
+                    return post_pause and adapter.frame() == post_pause.start_frame
+                        and adapter.epoch() == post_pause.epoch and planned_combo(parts, post_pause.steps)
+                elseif stage == "result-menu" then
+                    return post_settled and adapter.frame() == post_settled.end_frame
+                        and adapter.epoch() == post_settled.epoch and planned_combo(parts, {config.memory_x_input})
+                elseif stage == "result-read" then
+                    return result_memory and adapter.frame() == result_memory.frame
+                        and adapter.epoch() == result_memory.epoch and planned_combo(parts, {config.memory_x_input})
+                end
+            end
             return stage == "inputs" or stage == "prepare" or stage == "perform-round"
-                or stage == "round-wait" and pause_plan and adapter.frame() == pause_plan.start_frame
-                    and adapter.epoch() == pause_plan.epoch
-                or config.stage == 6 and stage == "ready" and completed_rounds == 4
         end
         return action == "advance" and config.stage == 6 and stage == "prepare-render"
             and config.entry_mode == "stage5_handoff"
@@ -223,9 +257,14 @@ function M.new(config, runtime)
             observation = initial
         elseif action == "inspect" and config.stage == 6 then
             assert(not result_memory, "Read contest-finish memory once inside the X menu")
-            finish_round()
+            assert(stage == "result-menu" and post_settled and completed_rounds == 4
+                and adapter.epoch() == post_settled.epoch
+                and api.state.stop_reason == "combo_complete"
+                and api.state.command_start_frame == post_settled.end_frame
+                and adapter.frame() == post_settled.end_frame + config.memory_x_frames,
+                "Finish the post-Acting guard and open X before reading result memory")
             result_memory = read_memory(false, config.startup_party, "contest_finish_items_and_ribbons")
-            observation = result_memory
+            observation, stage = result_memory, "result-read"
         elseif action == "inspect" then
             assert(config.stage == 2 and stage == "inspect", "Inspect the current Stage 2 source once")
             initial = assert(config.accepted_readiness, "Preparation requires accepted X-protected source data")
@@ -242,20 +281,50 @@ function M.new(config, runtime)
                 and prep.expected_item_id <= 536, "The prep plan differs from its first-party source")
             config.target, stage = prep.target, "prepare"
         elseif action == "capture" then
-            assert((config.stage == 1 or config.stage == 3) and stage == "inputs"
-                and api.state.command_done and api.state.stop_reason == "combo_complete"
-                and adapter.frame() == config.source_frame + config.total_emulator_frames,
+            assert((config.stage == 1 or config.stage == 3)
+                and (stage == "inputs" or config.stage == 3 and stage == "entry-wait")
+                and api.state.command_done and api.state.stop_reason == "combo_complete",
                 "Complete the counted section before reviewing its endpoint")
+            if config.stage == 3 and stage == "entry-wait" then
+                assert(dress_entry_retry and api.state.command_start_frame == dress_entry_retry.start_frame
+                    and adapter.frame() == dress_entry_retry.end_frame and adapter.epoch() == dress_entry_retry.epoch
+                    and #api.state.combo_history == #dress_entry_retry.steps
+                    and api.state.buttons == "" and not api.state.stylus_touch,
+                    "Complete the released input-free entry wait before taking another capture")
+                dress_entry_wait_frames = dress_entry_wait_frames + dress_entry_retry.frames
+                dress_entry_retry, stage = nil, "inputs"
+            end
+            assert(adapter.frame() == config.source_frame + config.total_emulator_frames + dress_entry_wait_frames,
+                "Capture only the counted baseline or completed dress-up entry wait")
             if config.stage == 1 then
                 memory_boundary.closed(initial, api.state, adapter.frame(), adapter.epoch(), runtime.is_paused())
             end
-            local image, raw = runtime.image(config.work .. "/stage" .. config.stage .. ".gd", adapter.frame())
+            local path = config.work .. "/stage" .. config.stage .. ".gd"
+            if config.stage == 3 then
+                dress_entry_checks = dress_entry_checks + 1
+                path = config.work .. string.format("/dress-entry-check-%03d.gd", dress_entry_checks)
+            end
+            local image, raw = runtime.image(path, adapter.frame())
             captured = {frame = image.frame, epoch = image.epoch, raw = raw, image = image,
                 check = screen_checks.read(raw, config.stage == 1 and "loaded_overworld" or "dress_up_entry",
                     config.target and config.target.rank)}
             observation = section.observation(adapter.frame())
             observation.automatic_check = captured.check
             stage = "review"
+            if config.stage == 3 then
+                local file = assert(io.open(config.work .. "/stage3.gd", "wb"))
+                assert(file:write(raw)); assert(file:close())
+                observation.image, observation.entry_wait_frames = image, dress_entry_wait_frames
+                if not captured.check.confirmed then
+                    local values = config.entry_readiness
+                    assert(values and values.retry_frames >= 1 and values.retry_frames == math.floor(values.retry_frames),
+                        "Dress-up entry retries require a positive whole input-free frame count")
+                    dress_entry_retry = {phase = "retry", game_seconds = values.retry_game_seconds,
+                        frames = values.retry_frames, steps = {"wait:" .. values.retry_frames},
+                        start_frame = image.frame, end_frame = image.frame + values.retry_frames, epoch = image.epoch}
+                    observation.pause_plan, stage = dress_entry_retry, "entry-wait"
+                end
+            end
         elseif action == "visit" then
             local context = {frame = adapter.frame(), epoch = adapter.epoch()}
             if config.stage == 2 then
@@ -305,48 +374,83 @@ function M.new(config, runtime)
             assert(config.stage == 6 and not pending and #args == 1, "Check readiness outside a checkpoint visit")
             if stage == "perform-round" then finish_round() end
             if stage == "round-wait" then
-                assert(pause_plan.phase == "retry", "Finish the ready-screen B delay before move selection")
+                assert(pause_plan.phase == "retry", "Use the matched paused capture for the next round plan")
                 acting_plan.finish_pause(pause_plan, api.state, adapter.frame(), adapter.epoch())
                 pause_plan, stage = nil, "ready"
             end
             local number = tonumber(args[1])
-            assert(stage == "ready" and round_index >= 1 and round_index < 4
-                and completed_rounds == round_index and number == round_index + 1 and not settled,
-                "Check only the next round after its base B segment")
+            assert(stage == "ready" and round_index >= 0 and round_index < 4
+                and completed_rounds == round_index and number == round_index + 1 and not ready_round,
+                "Check entry after render preparation, or the next round after its base B segment")
+            if round_index == 0 then
+                assert(render_prepared and adapter.epoch() == render_epoch and adapter.frame() >= render_end_frame,
+                    "Render preparation must precede the first Acting readiness capture")
+            end
             readiness_checks = readiness_checks + 1
             local frame = adapter.frame()
             local path = config.work .. string.format("/round-%d-readiness-%03d.gd", number, readiness_checks)
             local raw
             observation = section.observation(frame)
             observation.image, raw = runtime.image(path, frame)
-            observation.readiness = acting_pixels.read_round_readiness(raw, config.unavailable_move_slots, move_cursor)
+            observation.readiness = acting_pixels.read_round_readiness(raw, config.unavailable_move_slots,
+                round_index > 0 and move_cursor or nil)
             observation.readiness.frame, observation.readiness.epoch, observation.readiness.path =
                 frame, adapter.epoch(), path
             pause_plan = acting_plan.round_pause(config, number, frame, adapter.epoch(), observation.readiness.ready)
             observation.pause_plan, stage = pause_plan, "round-wait"
-        elseif action == "round-settled" then
+        elseif action == "round-ready" then
             assert(config.stage == 6 and not pending and #args == 1 and stage == "round-wait"
                 and pause_plan and pause_plan.phase == "settle" and tonumber(args[1]) == pause_plan.round,
-                "Complete the ready-screen B delay before the next round visit")
-            acting_plan.finish_pause(pause_plan, api.state, adapter.frame(), adapter.epoch())
-            settled, pause_plan, stage = pause_plan, nil, "ready"
+                "Match the paused pre-round screen before planning move and judge selection")
+            assert(runtime.is_paused() and adapter.frame() == pause_plan.start_frame and adapter.epoch() == pause_plan.epoch
+                and api.state.command_done and api.state.buttons == "" and not api.state.stylus_touch,
+                "Keep the matched pre-round capture paused until its selection plan is accepted")
+            ready_round, pause_plan, stage = pause_plan, nil, "ready"
+            observation = section.observation(adapter.frame())
+        elseif action == "post-acting-readiness" then
+            assert(config.stage == 6 and not pending and #args == 0, "Check post-Acting readiness outside a checkpoint visit")
+            if stage == "perform-round" then finish_round() end
+            if stage == "post-acting-wait" then
+                assert(post_pause.phase == "retry", "Finish the matched-screen B settle delay before opening X")
+                acting_plan.finish_pause(post_pause, api.state, adapter.frame(), adapter.epoch())
+                post_pause, stage = nil, "ready"
+            end
+            assert(stage == "ready" and round_index == 4 and completed_rounds == 4 and not post_settled,
+                "Check post-Acting readiness only after the final/results B baseline")
+            post_readiness_checks = post_readiness_checks + 1
+            local frame, epoch = adapter.frame(), adapter.epoch()
+            local path = config.work .. string.format("/post-acting-readiness-%03d.gd", post_readiness_checks)
+            local raw
+            observation = section.observation(frame)
+            observation.image, raw = runtime.image(path, frame)
+            observation.readiness = screen_checks.post_acting(raw, config.overworld)
+            assert(adapter.frame() == frame and adapter.epoch() == epoch,
+                "Post-Acting readiness must use the same fresh zero-frame paused capture")
+            observation.readiness.frame, observation.readiness.epoch, observation.readiness.path = frame, epoch, path
+            post_pause = acting_plan.post_acting_pause(config, frame, epoch, observation.readiness.ready)
+            observation.pause_plan, stage = post_pause, "post-acting-wait"
+        elseif action == "post-acting-settled" then
+            assert(config.stage == 6 and not pending and #args == 0 and stage == "post-acting-wait"
+                and post_pause and post_pause.phase == "settle", "Match both post-Acting checks and finish B settling before X")
+            acting_plan.finish_pause(post_pause, api.state, adapter.frame(), adapter.epoch())
+            post_settled, post_pause, stage = post_pause, nil, "result-menu"
             observation = section.observation(adapter.frame())
         elseif action == "round-visit" or action == "result-visit" then
             assert(config.stage == 6 and not pending, "Expected one active Acting visit")
             if stage == "perform-round" then finish_round() end
-            assert(stage == "ready", "Complete the previous Acting round first")
             if action == "round-visit" then
+                assert(stage == "ready", "Complete the previous Acting round first")
                 assert(round_index < 4 and tonumber(args[1]) == round_index + 1, "Expected the next Acting round")
                 if round_index == 0 then
-                    assert(render_prepared and adapter.epoch() == render_epoch and adapter.frame() == render_end_frame,
+                    assert(render_prepared and adapter.epoch() == render_epoch and adapter.frame() >= render_end_frame,
                         "Render preparation must precede the first fresh judge capture")
-                else
-                    assert(settled and settled.round == round_index + 1 and settled.end_frame == adapter.frame()
-                        and settled.epoch == adapter.epoch(), "Finish the post-readiness B delay before move selection")
                 end
+                assert(ready_round and ready_round.round == round_index + 1 and ready_round.start_frame == adapter.frame()
+                    and ready_round.epoch == adapter.epoch(), "Plan the next round from its matched paused capture")
                 round_index, capture_kind = round_index + 1, "round"
             else
-                assert(round_index == 4 and completed_rounds == 4, "Complete all four Acting rounds first")
+                assert(stage == "result-read" and post_settled and round_index == 4 and completed_rounds == 4,
+                    "Complete all four Acting rounds, the post-Acting guard, and the result memory read first")
                 memory_boundary.closed(result_memory, api.state, adapter.frame(), adapter.epoch(), runtime.is_paused())
                 capture_kind = "result"
             end
@@ -354,7 +458,7 @@ function M.new(config, runtime)
                 {frame = adapter.frame(), epoch = adapter.epoch(), round = round_index, attempt = config.attempt})
             pending = (latest.status == "awaiting_save" or latest.status == "awaiting_ack") and latest or nil
             current_plan, observation, stage = latest.snapshot and latest.snapshot.plan, latest.snapshot, "checkpoint"
-            settled, readiness_checks = nil, 0
+            ready_round, readiness_checks = nil, 0
         elseif action == "complete" then
             assert(pending and (#args == 6 or #args == 7), "Expected pending checkpoint evidence")
             latest = engine:complete(tonumber(args[2]), {run_id = args[1], visit = tonumber(args[2]),

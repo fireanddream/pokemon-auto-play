@@ -1,22 +1,14 @@
 """Six main-run dance responses using accepted entry pixels and fixed regional metrics."""
 
 import math
-from pathlib import Path
-import shutil
 
 from contest.dance_response import ReviewNeeded, capture_result, cue_positions, response_plan
-from contest.dance_timings import DEFAULT_OFFSET_FRAMES, fixed_timing as resolve_fixed_timing
+from contest.dance_timings import fixed_timing as resolve_fixed_timing
 from contest.inputs import whole
 from contest.pt_dance_read import load_image, stacked_gd
 from contest.runtime import lua_value, settle_native_overlay
 from contest.timing_profiles import FRAME_RATE, load_profile, section, setting
 from host.checkpoints import write_json
-
-
-_DANCE = section(None, "stage5_dancing")
-INPUT_HOLD_FRAMES = _DANCE["response_hold_frames"]
-FEEDBACK_RELEASE_FRAMES = _DANCE["feedback_release_frames"]
-FIRST_FEEDBACK_DELAY_FRAMES = INPUT_HOLD_FRAMES + FEEDBACK_RELEASE_FRAMES - 1
 
 
 def stage5_plan(*, rank, source_frame, entry_pointer_x, host_timeout, hold_frames=None, offset_frames=None,
@@ -146,8 +138,6 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
         midpoint["midpoint_status"] = "unreadable" if x is None else "early" if x < 128 else "on_line" if x <= 129 else "late"
         captures.append(dict(midpoint))
         write_json(folder / "midpoint-captures.json", {"accepted_pointer_pixels": [128, 129], "captures": captures})
-        shutil.copy2(midpoint["image"]["path"], folder / "midpoint.gd")
-        shutil.copy2(midpoint["png"], folder / "midpoint.png")
         record("midpoint_capture", dance=dance, frame=midpoint["frame"], pointer_x=x,
             midpoint_status=midpoint["midpoint_status"], image=midpoint["png"], direct_read_frames=0)
         write_json(folder / "midpoint.json", midpoint)
@@ -180,10 +170,7 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
                 break
         frames = math.ceil((128 - x) / options["pointer_pixels_per_emulator_frame"])
         adjustment = {"frame": midpoint["frame"], "epoch": midpoint["epoch"], "pointer_x": x,
-            "next_frame": midpoint["frame"] + frames, "path": midpoint["image"]["path"],
-            "retained_image": str(folder / f"midpoint-adjustment-{len(adjustments) + 1:02d}.gd")}
-        shutil.copy2(adjustment["path"], adjustment["retained_image"])
-        shutil.copy2(midpoint["png"], Path(adjustment["retained_image"]).with_suffix(".png"))
+            "next_frame": midpoint["frame"] + frames, "path": midpoint["image"]["path"]}
         adjustments.append(adjustment)
         write_json(folder / "midpoint-adjustments.json", {"adjustments": adjustments})
         path = folder / "midpoint-adjustment.lua"
@@ -199,7 +186,7 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
         checked_dance_result(adjusted)
         record("midpoint_adjusted", dance=dance, frame=midpoint["frame"], pointer_x=x,
              additional_emulator_frames=frames, next_frame=adjustment["next_frame"])
-    image = load_image(Path(midpoint["image"]["path"]))
+    image = load_image(midpoint["image"]["path"])
     cues = {side: cue_positions(image, side, dance) for side in ("left", "right")}
     write_json(folder / "midpoint-cues.json", {"frame": midpoint["frame"], "epoch": midpoint["epoch"],
         "expected_cues": options["cues_per_dance"], "cues": cues, "source": "fresh_paused_native_pixels"})
@@ -216,7 +203,7 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
             speed=options["pointer_pixels_per_emulator_frame"], hold_frames=options["hold_frames"],
             offset_frames=options["offset_frames"], dance=dance,
             side_offset_pixels=options["rank_timing"]["cue_side_offset_pixels"],
-            counted_midpoint_anchor=midpoint.get("counted_midpoint_anchor"))
+            counted_midpoint_anchor=midpoint.get("counted_midpoint_anchor"), cue_readings=cues)
     except ReviewNeeded as error:
         planned = skipped_response(midpoint, dance, options, str(error))
     if not planned.get("skip_reason"):
@@ -241,7 +228,7 @@ def prepare_response(emulator, client, folder, dance, options, *, record):
 def stage5_responses(runtime, plan):
     """Use the existing main client, Lua callbacks, deadlines, and slot ownership."""
     responses, last = [], None
-    previous_saved = runtime.boundary["save_state"] if runtime.boundary else None
+    entry_saved = runtime.boundary["save_state"] if runtime.boundary else None
     initialized = runtime.command("init")
     if initialized.get("recovery_required"):
         runtime.record("dance_warning", reason=initialized["warning"])
@@ -260,10 +247,10 @@ def stage5_responses(runtime, plan):
             checked_dance_result(runtime.command("select-dance", dance, folder.as_posix(), gap))
             if gap:
                 checked_dance_result(runtime.action("wait-gap", expected="leader_switch_gap_complete"))
-            settle_saved_overlay(runtime, folder, dance, previous_saved, "demo", plan["native_osd_settle_host_seconds"])
+            if dance == 1:
+                settle_saved_overlay(runtime, folder, dance, entry_saved, "demo", plan["native_osd_settle_host_seconds"])
             midpoint, planned, reading = prepare_response(runtime.emulator, runtime, folder, dance, plan, record=runtime.record)
-            started = acknowledge("rank-dance-start", midpoint["frame"], midpoint["epoch"])
-            settle_saved_overlay(runtime, folder, dance, started["host_savestate"], "response", plan["native_osd_settle_host_seconds"])
+            acknowledge("rank-dance-start", midpoint["frame"], midpoint["epoch"])
             responded = checked_dance_result(runtime.action("mirror"))
             if dance == 1:
                 if responded.get("stop_reason") != "offset_feedback_ready":
@@ -298,7 +285,6 @@ def stage5_responses(runtime, plan):
                 acknowledge("rank-dance-offset", recovered["frame"], recovered["epoch"])
             responded = checked_dance_result(runtime.action("mirror", expected="dance_response_complete"))
         last = acknowledge("rank-dance-finish", responded["frame"], midpoint["epoch"])
-        previous_saved = last["host_savestate"]
         trial = last["checkpoint"]["snapshot"]["trial"]
         value = {"dance": dance, "rank": plan["rank"], "midpoint_frame": midpoint["frame"],
             "midpoint_pointer_x": midpoint["position"]["x"], "midpoint_timing": midpoint.get("midpoint_timing"),

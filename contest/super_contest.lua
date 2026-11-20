@@ -371,7 +371,7 @@ local function start(parts)
     state.command_id = parts[1]
     assert(not halted, "The persistent runtime is stopped")
     assert(action == "reset" and not runtime.engine
-        or current and current.authorize and current.authorize(action),
+        or current and current.authorize and current.authorize(action, parts),
         "The active section did not authorize this input action")
     state.command_id, state.command_done, state.error = parts[1], false, ""
     state.last_action, state.command_start_frame = action, state.frame

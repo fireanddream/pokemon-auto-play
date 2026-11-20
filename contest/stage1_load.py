@@ -3,9 +3,6 @@
 from contest.timing_profiles import load_profile, section, setting
 
 
-START_WAIT_FRAMES = section(None, "stage1_loading")["start_release_frames"]
-
-
 def load_plan(*, boot_wait_frames=None, hold_frames=None, start_wait_frames=None,
               a_wait_frames=None, b_wait_frames=None, timing_profile=None):
     profile = load_profile() if timing_profile is None else timing_profile

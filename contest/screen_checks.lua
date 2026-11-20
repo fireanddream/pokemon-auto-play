@@ -13,16 +13,6 @@ local profiles = {
         {124,78,223,109,125}, {130,78,223,109,125}, {124,84,190,60,77},
         {130,84,190,60,77}, {124,94,207,207,223}, {130,94,207,207,223},
     }},
-    acting_entry = {reference = "stage5-live-04/stage5.png", points = {
-        {12,208,255,198,156}, {114,208,255,214,181}, {12,212,255,156,140}, {114,212,255,107,115},
-        {12,280,255,156,140}, {114,280,255,107,115}, {12,284,255,255,255}, {114,284,255,255,255},
-        {142,208,255,214,181}, {244,208,66,66,66}, {142,212,255,107,115}, {244,212,66,66,66},
-        {142,280,255,107,115}, {244,280,66,66,66}, {142,284,66,66,66}, {244,284,66,66,66},
-        {12,300,66,66,66}, {114,300,66,66,66}, {12,304,255,198,156}, {114,304,255,214,181},
-        {12,372,255,156,140}, {114,372,255,107,115}, {12,376,255,156,140}, {114,376,255,107,115},
-        {142,300,66,66,66}, {244,300,66,66,66}, {142,304,189,239,255}, {244,304,66,66,66},
-        {142,372,66,222,239}, {244,372,66,66,66}, {142,376,66,222,239}, {244,376,66,66,66},
-    }},
 }
 
 local function read_empty_slots(raw, rank)
@@ -68,5 +58,18 @@ function M.read(raw, expected, rank)
     result.source, result.expected, result.reference = "local_reference_pixels", expected, reference
     result.direct_read_frames = 0
     return result
+end
+
+function M.post_acting(raw, overworld)
+    assert(type(overworld) == "table" and type(overworld.player_points) == "table" and #overworld.player_points > 0
+        and type(overworld.dialogue_top) == "table" and type(overworld.dialogue_top.points) == "table"
+        and #overworld.dialogue_top.points > 0, "Use the accepted startup position and closed-dialogue tip reference")
+    local position = pixels.match_points(raw, overworld.player_points)
+    local dialogue_closed = pixels.match_points(raw, overworld.dialogue_top.points)
+    dialogue_closed.bounds = overworld.dialogue_top.bounds
+    return {ready = position.confirmed and dialogue_closed.confirmed,
+        position = position, dialogue_closed = dialogue_closed, reference = overworld.reference,
+        source = "accepted_startup_player_and_reviewed_closed_dialogue_top",
+        direct_read_frames = 0, memory_proven = false}
 end
 return M

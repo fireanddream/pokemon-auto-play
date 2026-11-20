@@ -43,3 +43,6 @@ __pycache__/
 
 # Generated release archives.
 /dist/
+
+# Local Platinum Lua reference script.
+/Pt_RNG_DeSmuMe.lua

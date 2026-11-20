@@ -1,4 +1,4 @@
--- Pure move/judge and frame-counted B-input planning for both Acting callers.
+-- Pure main-run move/judge and frame-counted B-input planning.
 local M = {}
 
 local categories = {Cool = true, Beauty = true, Cute = true, Smart = true, Tough = true}
@@ -67,12 +67,21 @@ function M.mash_steps(timing, frames)
 end
 
 function M.round_pause(config, number, frame, epoch, ready)
-    assert(number >= 2 and number <= 4 and number == math.floor(number),
-        "Readiness delays apply only between Acting rounds")
+    assert(number >= 1 and number <= 4 and number == math.floor(number),
+        "Readiness retries and matched input prefixes apply before Acting rounds 1-4")
     local values = config.between_round_readiness
     local phase = ready and "settle" or "retry"
     local frames = values[phase .. "_frames"]
     return {round = number, phase = phase, game_seconds = values[phase .. "_game_seconds"],
+        frames = frames, steps = M.mash_steps(config.timing, frames),
+        start_frame = frame, end_frame = frame + frames, epoch = epoch}
+end
+
+function M.post_acting_pause(config, frame, epoch, ready)
+    local values = config.post_acting_readiness
+    local phase = ready and "settle" or "retry"
+    local frames = values[phase .. "_frames"]
+    return {phase = phase, game_seconds = values[phase .. "_game_seconds"],
         frames = frames, steps = M.mash_steps(config.timing, frames),
         start_frame = frame, end_frame = frame + frames, epoch = epoch}
 end
@@ -125,18 +134,17 @@ function M.round(config, number, move_cursor, judge_cursor, frame, stars, moves,
     end
     menu[#menu + 1] = "A"
     local timing = config.timing
+    local pre_selection = config.between_round_readiness.settle_frames
+    if pre_selection > 0 then
+        for _, step in ipairs(M.mash_steps(timing, pre_selection)) do steps[#steps + 1] = step end
+    end
     for _, button in ipairs(menu) do
         steps[#steps + 1] = button .. ":" .. timing.hold_frames .. ":" .. timing.release_frames
     end
     local mash = config.rounds[number].mash_frames
     for _, step in ipairs(M.mash_steps(timing, mash)) do steps[#steps + 1] = step end
     local menu_frames = #menu * (timing.hold_frames + timing.release_frames)
-    local total = menu_frames + mash
-    if number == 4 then
-        -- Open the result-read menu using profile timings, independent of move-input overrides.
-        steps[#steps + 1] = config.memory_x_input
-        total = total + config.memory_x_frames
-    end
+    local total = pre_selection + menu_frames + mash
     return {round = number, selectable = true, move = move, judge = judge, previous_move = move_cursor,
         excluded_previous_move = last_move, acting_position = acting_order.position,
         eligible_move_slots = fallback and {move} or eligible, recognized_move_slots = recognized,
@@ -151,7 +159,8 @@ function M.round(config, number, move_cursor, judge_cursor, frame, stars, moves,
         judge_policy = override and "early_four_stars_matching" or "first_fewest_stars",
         previous_judge = judge_cursor, menu_buttons = menu, steps = steps,
         start_frame = frame, end_frame = frame + total,
-        menu_frames = menu_frames, mash_frames = mash, total_frames = total,
+        pre_selection_game_seconds = config.between_round_readiness.settle_game_seconds,
+        pre_selection_frames = pre_selection, menu_frames = menu_frames, mash_frames = mash, total_frames = total,
         judge_confirmed_before_mashing = true}
 end
 

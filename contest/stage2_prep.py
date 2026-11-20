@@ -4,7 +4,6 @@ from contest.timing_profiles import load_profile, section
 
 
 SCARVES = {260: "Red Scarf", 261: "Blue Scarf", 262: "Pink Scarf", 263: "Green Scarf", 264: "Yellow Scarf"}
-BAG_DOWN_RELEASE_FRAMES = section(None, "stage2_preparation")["bag_down_release_frames"]
 
 
 def prep_plan(snapshot, *, bag_state, cursor=1, target=None, timing_profile=None):

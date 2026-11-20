@@ -5,25 +5,17 @@ from pathlib import Path
 
 from PIL import Image
 
-from contest.dance_timings import fixed_timing
 from contest.inputs import whole
 from contest.pt_dance_read import native_top, read_pointer, read_progress, stacked_gd
 from contest.runtime import lua_value
 from contest.timing_profiles import FRAME_RATE, load_profile, section, setting
 from host.checkpoints import write_json
+from host.guards import wait_visual_match
 
 
-_DRESS = section(None, "stage4_dress_up")
-TRANSITION_SECONDS = _DRESS["dance_transition_a_mash_game_seconds"]
-POLL_SECONDS = _DRESS["dance_entry_poll_game_seconds"]
-AUTO_SECONDS = _DRESS["accessory_budget_game_seconds"]
 DRESS_GRID = 8
 DRESS_BOX = (6, 16, 122, 143)
 DRESS_BACKGROUND = Path(__file__).with_name("dress_background.png")
-PICKUP_FRAMES = _DRESS["accessory_pickup_hold_frames"]
-DRAG_FRAMES = _DRESS["accessory_drag_frames"]
-DRAG_RELEASE_FRAMES = _DRESS["accessory_release_frames"]
-PAGE_WAIT_FRAMES = _DRESS["page_render_wait_frames"]
 INITIAL_PAGE_TAPS = (0, 7)
 PAGE_FLIP_LIMIT = 14
 
@@ -126,10 +118,9 @@ def dress_plan(*, host_timeout, transition_seconds=None,
         "review_source": "fresh_zero_frame_left_tip_pixels", "memory_proven_phase": False}
 
 
-def pointer_timing(image, *, rank_timing=None, timing_profile=None):
+def pointer_reading(image):
     pointer = read_pointer(native_top(image))
-    progress = read_progress({"status": "unreadable", "position_bounds": None, "first_empty_x": None}, pointer,
-        frames_per_pixel=(rank_timing or fixed_timing("Cool", "Master", timing_profile=timing_profile))["frames_per_pixel"])
+    progress = read_progress({"status": "unreadable", "position_bounds": None, "first_empty_x": None}, pointer)
     return {"source": "pt_dance_read_jigglypuff_pixels", "pointer": pointer, "progress": progress,
             "memory_proven": False}
 
@@ -234,7 +225,7 @@ def place_accessories(emulator, client, plan, work, source_frame, initial_page_t
     return summary
 
 
-def locate_dance_entry(emulator, client, plan, work, *, record, rank_timing, timing_profile=None):
+def locate_dance_entry(emulator, client, plan, work, *, record, rank_timing):
     """Bind the first green Dance 1 entry to its fresh pointer and fixed metrics."""
     controller = emulator.controller
     poll_seconds = plan["timing"]["poll_game_seconds"]
@@ -244,52 +235,46 @@ def locate_dance_entry(emulator, client, plan, work, *, record, rank_timing, tim
     if inputs.get("stop_reason") != "A_mash_complete":
         raise RuntimeError("The A-mashing segment did not complete.")
     checks, wait_frames, poll = [], 0, 0
-    while True:
-        controller.remaining()
+
+    def observe():
+        nonlocal poll
         poll += 1
-        target_wait_frames = round(poll * poll_seconds * FRAME_RATE)
+        checked = client.command("check-dance")
+        tip = checked["observation"]["tip"]
+        sample = {"poll": poll, "frame": checked["frame"], "epoch": checked["epoch"],
+            "wait_emulator_frames": wait_frames, "wait_game_seconds": wait_frames / FRAME_RATE, "tip": tip}
+        checks.append(sample)
+        write_json(work / "dance-checks.json", {"interval_game_seconds": poll_seconds, "checks": checks})
+        record("dance_check", poll=poll, frame=checked["frame"], green=tip["green"])
+        return sample
+
+    def retry(sample):
+        nonlocal wait_frames
+        if sample["tip"]["green"]:
+            return
+        target_wait_frames = round(sample["poll"] * poll_seconds * FRAME_RATE)
         advance = emulator.command("observe-frames", target_wait_frames - wait_frames, timeout=None, deadline=controller.live_deadline)
         if advance.get("stop_reason") != "observation_interval_complete":
             raise RuntimeError("The configured observation interval did not complete.")
         wait_frames = target_wait_frames
-        checked = client.command("check-dance")
-        tip = checked["observation"]["tip"]
-        checks.append({"poll": poll, "frame": checked["frame"], "epoch": checked["epoch"],
-            "wait_emulator_frames": wait_frames, "wait_game_seconds": wait_frames / FRAME_RATE, "tip": tip})
-        write_json(work / "dance-checks.json", {"interval_game_seconds": poll_seconds, "checks": checks})
-        record("dance_check", poll=poll, frame=checked["frame"], green=tip["green"])
-        if tip["green"]:
-            break
+
+    wait_visual_match(controller, observe, retry, matches=lambda sample: sample["tip"]["green"])
     capture = client.command("capture")
-    reading = pointer_timing(stacked_gd(work / "stage4.gd"), rank_timing=rank_timing, timing_profile=timing_profile)
+    reading = pointer_reading(stacked_gd(work / "stage4.gd"))
     image_path = work / "stage4.png"
     controller.screenshot(image_path)
     result = {"frame": capture["frame"], "screenshot": str(image_path), "dance_checks": checks,
         "transition_emulator_frames": capture["observation"]["transition"]["total_frames"],
         "dance_entry_poll_frames": wait_frames, "no_input_wait_frames": wait_frames}
-    half_frames = rank_timing["visible_half_frames"]
-    progress, bounds = reading["progress"], reading["progress"]["frame_range"]
+    progress = reading["progress"]
     evidence = {"frame": capture["frame"], "epoch": capture["epoch"], "dance": 1,
         "source": "fresh_zero_frame_left_tip_pixels", "path": (work / "stage4.gd").as_posix(),
-        "tip": capture["observation"]["tip"], "phase": progress["phase"], "frame_range": bounds,
+        "tip": capture["observation"]["tip"], "phase": progress["phase"],
         "pointer": reading["pointer"], "pointer_source": reading["source"], "memory_proven": False}
     write_json(work / "endpoint-reading.json", {**evidence, "reading": reading})
     endpoint_path = work / "endpoint.lua"
     endpoint_path.write_text("return " + lua_value(evidence) + "\n", encoding="utf-8", newline="\n")
-    anchor = {"source": reading["source"], "exact": False, "demo_start_frame": None,
-        "demo_start_frame_range": None, "response_start_frame": None, "response_start_frame_range": None,
-        "rank": rank_timing["rank"], "pixels_per_frame": rank_timing["pixels_per_frame"],
-        "profile_source": rank_timing["profile_source"]}
-    if bounds is not None:
-        origin = capture["observation"]["transition"]["start_frame"]
-        start_range = [capture["frame"] - bounds[1], capture["frame"] - bounds[0]]
-        result.update(dance_start_frame_range=start_range,
-            dance_start_game_seconds_range=[(frame - origin) / FRAME_RATE for frame in start_range],
-            demo_percent_range=[100 * frame / half_frames for frame in bounds],
-            dance_percent_range=[100 * frame / (2 * half_frames) for frame in bounds])
-        start_frame = capture["frame"] - round(progress["nominal_frame"])
-        anchor.update(demo_start_frame=start_frame, demo_start_frame_range=start_range,
-            response_start_frame=start_frame + half_frames, response_start_frame_range=[frame + half_frames for frame in start_range])
-    result.update(landing=evidence, timing_anchor=anchor, rank_timing=rank_timing)
-    record("landing", frame=capture["frame"], dance_phase=progress["phase"], demo_frame_range=bounds, poll_count=poll)
+    result.update(landing=evidence, rank_timing=rank_timing)
+    record("landing", frame=capture["frame"], dance_phase=progress["phase"],
+        pointer_bounds=progress["position_bounds"], poll_count=poll)
     return result, client.command("visit", endpoint_path.as_posix())

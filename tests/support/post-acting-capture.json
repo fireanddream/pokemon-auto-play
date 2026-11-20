@@ -1,0 +1,24 @@
+{
+  "sources": ["Chinese", "Japan", "USA"],
+  "player_points": [
+    [124, 78, 223, 109, 125], [130, 78, 223, 109, 125],
+    [124, 84, 190, 60, 77], [130, 84, 190, 60, 77],
+    [124, 94, 207, 207, 223], [130, 94, 207, 207, 223]
+  ],
+  "dialogue_top_bounds": [124, 146, 131, 149],
+  "palette": {
+    "a": [40, 48, 40],
+    "b": [239, 142, 158],
+    "c": [255, 255, 255]
+  },
+  "closed_dialogue_top_rows": [
+    "bbbbbbb",
+    "bbbbbbb",
+    "bbbbbbb"
+  ],
+  "open_dialogue_top_rows": [
+    "ccccccc",
+    "aaaaaaa",
+    "aaaaaaa"
+  ]
+}

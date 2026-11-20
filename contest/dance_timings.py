@@ -8,7 +8,6 @@ from contest.timing_profiles import load_profile, section
 RANKS = ("Normal", "Super", "Hyper", "Master")
 CATEGORIES = ("Cool", "Beauty", "Cute", "Smart", "Tough")
 ALIASES = {"normal": "Normal", "super": "Super", "great": "Super", "hyper": "Hyper", "ultra": "Hyper", "master": "Master"}
-DEFAULT_OFFSET_FRAMES = section(None, "stage5_dancing")["input_offset_frames"]
 
 
 def metrics_for(timing_profile=None):

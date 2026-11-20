@@ -45,17 +45,6 @@ local function matches(raw, x, rows)
     return true
 end
 
-function M.choose_judge(counts)
-    assert(type(counts) == "table" and #counts == 3, "Three readable judge counts are required")
-    for _, count in ipairs(counts) do
-        assert(type(count) == "number" and count >= 0 and count <= 5 and count == math.floor(count),
-            "Judge stars must be whole counts from zero through five")
-    end
-    local selected = 1
-    for index = 2, 3 do if counts[index] < counts[selected] then selected = index end end
-    return selected
-end
-
 function M.read_stars(raw)
     validate(raw)
     local result = {source = "native_five_cell_star_shapes", readable = true, all_empty = true,
@@ -83,7 +72,6 @@ function M.read_stars(raw)
         result.counts[judge] = item.readable and item.stars or -1
         result.readable = result.readable and item.readable
     end
-    if result.readable then result.selected_judge = M.choose_judge(result.counts) end
     return result
 end
 
@@ -236,9 +224,10 @@ end
 
 function M.read_move_buttons(raw, unavailable_move_slots, previous_move)
     assert(validate(raw) == 384, "Move-menu readiness requires a native stacked GD framebuffer")
-    assert(type(previous_move) == "number" and previous_move >= 1 and previous_move <= 4
-        and previous_move == math.floor(previous_move), "Supply the previous move for a between-round menu check")
-    local blocked = {[previous_move] = true}
+    assert(previous_move == nil or type(previous_move) == "number" and previous_move >= 1 and previous_move <= 4
+        and previous_move == math.floor(previous_move), "Use no previous move at entry, or a valid slot between rounds")
+    local blocked = {}
+    if previous_move then blocked[previous_move] = true end
     for _, slot in ipairs(unavailable_move_slots or {}) do blocked[slot] = true end
     local result = {source = "native_selectable_move_button_fills", readable = true,
         slots = {}, available_count = 0, direct_read_frames = 0}
@@ -272,7 +261,9 @@ function M.read_round_readiness(raw, unavailable_move_slots, previous_move, star
     stars = stars or M.read_stars(raw)
     acting_order = acting_order or M.read_acting_order(raw)
     local moves = M.read_move_buttons(raw, unavailable_move_slots, previous_move)
-    return {ready = stars.readable and acting_order.readable and moves.readable,
+    local entry = previous_move == nil
+    return {ready = stars.readable and (not entry or stars.all_empty == true) and acting_order.readable and moves.readable,
+        entry = entry,
         stars = stars, acting_order = acting_order, move_buttons = moves,
         source = "fresh_judges_order_and_selectable_move_menu", direct_read_frames = 0}
 end

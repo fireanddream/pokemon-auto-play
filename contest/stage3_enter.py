@@ -1,14 +1,18 @@
-"""Regional enrollment inputs for the main runner's accepted contest target."""
+"""Regional enrollment inputs and paused dress-up entry retries for the main runner."""
 
 import math
 
 from contest.inputs import taps
+from contest.pt_dance_read import stacked_gd
 from contest.timing_profiles import FRAME_RATE, load_profile, section, setting
+from host.checkpoints import write_json
+from host.guards import wait_visual_match
+from host.paths import project_path
 
 
 CATEGORIES = ("Cool", "Beauty", "Cute", "Smart", "Tough")
 RANKS = ("Normal", "Super", "Hyper", "Master")
-INTRO_SECONDS = section(None, "stage3_entry")["intro_a_mash_game_seconds"]
+ENTRY_RETRY_GAME_SECONDS = 3
 
 
 def entry_plan(category, rank, *, host_timeout, hold_frames=None,
@@ -48,5 +52,49 @@ def entry_plan(category, rank, *, host_timeout, hold_frames=None,
         "rank_down_presses": RANKS.index(rank), "category_down_presses": CATEGORIES.index(category),
         "inputs": steps, "menu_frames": len(menu) * (hold_frames + release_frames),
         "total_emulator_frames": total_frames,
+        "entry_readiness": {"retry_game_seconds": ENTRY_RETRY_GAME_SECONDS,
+            "retry_frames": round(ENTRY_RETRY_GAME_SECONDS * FRAME_RATE),
+            "inputs": "input_free_wait", "matched_frames": 0,
+            "deadline": "existing_section_host_deadline"},
         "acceptance": "Dress-up entry for the selected contest.",
         "review_source": "local_reference_pixels", "memory_proven_phase": False}
+
+
+def wait_dress_entry(emulator, client, plan, work):
+    """Keep the first matched paused frame; only mismatches authorize input-free waits."""
+    controller = emulator.controller
+    checks = []
+    manifest = work / "dress-entry-checks.json"
+
+    def save_checks():
+        write_json(manifest, {"retry_game_seconds": plan["entry_readiness"]["retry_game_seconds"], "checks": checks})
+
+    def observe():
+        response = client.command("capture")
+        snapshot = response["observation"]
+        image = snapshot["image"]
+        path = project_path(image["path"])
+        if (not path.is_relative_to(work) or image["frame"] != response["frame"]
+                or image["epoch"] != response["epoch"] or image["direct_read_frames"] != 0):
+            raise RuntimeError("The dress-up entry capture must belong to this fresh paused Stage 3 frame.")
+        png = path.with_suffix(".png")
+        stacked_gd(path).save(png)
+        sample = {"frame": response["frame"], "epoch": response["epoch"], "observation": snapshot,
+            "image": {**image, "png": str(png)}, "end_frame": response["frame"]}
+        checks.append(sample)
+        save_checks()
+        return sample
+
+    def retry(sample):
+        if sample["observation"]["automatic_check"]["confirmed"]:
+            return
+        pause = sample["observation"]["pause_plan"]
+        progressed = emulator.command("combo", "inputs", *pause["steps"],
+            timeout=None, deadline=controller.live_deadline)
+        if progressed.get("stop_reason") != "combo_complete" or progressed["frame"] != pause["end_frame"]:
+            raise RuntimeError("The dress-up entry wait did not reach its configured endpoint.")
+        sample["end_frame"] = progressed["frame"]
+        save_checks()
+
+    return wait_visual_match(controller, observe, retry,
+        matches=lambda sample: sample["observation"]["automatic_check"]["confirmed"])

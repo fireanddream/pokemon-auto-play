@@ -316,38 +316,24 @@ def layout_for(dance):
             "preferred_side": ("left", "right", "right")[pair]}
 
 
-def read_progress(bar, pointer, *, frames_per_pixel=None):
-    if frames_per_pixel is None:
-        from contest.dance_timings import fixed_timing
-
-        frames_per_pixel = fixed_timing("Cool", "Master")["frames_per_pixel"]
+def read_progress(bar, pointer):
+    """Classify native pointer position and phase without estimating elapsed time."""
     bounds = bar["position_bounds"]
     point = pointer["position_bounds"]
     source = "bar" if bounds is not None else None
     if bar["status"] == "conflict":
-        return {"status": "conflict", "phase": "unknown", "position_bounds": None, "frame_range": None}
+        return {"status": "conflict", "phase": "unknown", "position_bounds": None}
     if bar["status"] == "empty":
-        return {"status": "inactive", "phase": "unknown", "position_bounds": None, "frame_range": None}
+        return {"status": "inactive", "phase": "unknown", "position_bounds": None}
     if point is not None:
         if bounds is not None and not bounds[0] <= point[0] <= bounds[1]:
-            return {"status": "conflict", "phase": "unknown", "position_bounds": None, "frame_range": None}
+            return {"status": "conflict", "phase": "unknown", "position_bounds": None}
         if bounds is None and bar["first_empty_x"] is not None and point[0] >= bar["first_empty_x"]:
-            return {"status": "conflict", "phase": "unknown", "position_bounds": None, "frame_range": None}
+            return {"status": "conflict", "phase": "unknown", "position_bounds": None}
         bounds, source = point, "bar_and_pointer" if bounds else "pointer"
     if bounds is None:
-        return {"status": "unreadable", "phase": "unknown", "position_bounds": None, "frame_range": None}
+        return {"status": "unreadable", "phase": "unknown", "position_bounds": None}
     lower, upper = bounds
     phase = "demo" if upper < 128 else "response" if lower >= 128 else "boundary_uncertain"
-    # The retained replay includes two-frame
-    # display holds and small timing offsets, especially early in odd dances.
-    # These are conservative measured envelopes, not exact emulator timestamps.
-    before, after = (1, 5) if phase == "demo" else (3, 3) if phase == "response" else (3, 5)
-    half_frames = 120 * frames_per_pixel
-    frames = [max(0, math.ceil((lower - 8) * frames_per_pixel - before)),
-              min(math.ceil(2 * half_frames) - 1, math.floor((upper - 8) * frames_per_pixel + after))]
     return {"status": "readable" if lower == upper else "bounded", "phase": phase,
-            "position_bounds": bounds, "position_source": source, "frame_range": frames,
-            "frame_unit": "emulator_frames_from_dance_sweep_start",
-            "nominal_frame": round(((lower + upper) / 2 - 8) * frames_per_pixel, 2),
-            "frames_to_response_range": [half_frames - frames[1], half_frames - frames[0]],
-            "timing_source": "pixel_position_with_measured_tempo_envelope"}
+            "position_bounds": bounds, "position_source": source}

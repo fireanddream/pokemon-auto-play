@@ -86,6 +86,8 @@ class ReleasePackagingChecks(unittest.TestCase):
             self.assertIn("contest/wheels/manifest.json", names)
             self.assertIn("contest/readme.md", names)
             self.assertIn("contest/dress_background.png", names)
+            self.assertIn("contest/lua/pt_rng_common.lua", names)
+            self.assertIn("contest/lua/pt_rng_readers.lua", names)
             self.assertEqual(archive.read("contest/dress_background.png"),
                 (ROOT / "contest/dress_background.png").read_bytes())
             self.assertNotIn("contest/readme.txt", names)

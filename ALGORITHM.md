@@ -54,9 +54,11 @@ or compare items with a cache.
 ## Stage 3: Contest entry
 
 Enroll the first Pokemon for the selected rank/category and tap A through the
-regional introduction. Accept a fresh image showing **5 / 10 / 15 / 20 empty
-accessory slots** for Normal / Super / Hyper / Master. This frame starts dressing;
-the handoff adds zero frames.
+configured regional introduction baseline. The shared visual guard requires a
+fresh paused image showing **5 / 10 / 15 / 20 empty accessory slots** for
+Normal / Super / Hyper / Master. A mismatch waits input-free for **3 game seconds**
+and rechecks through the [shared visual guard](#implementation-boundaries).
+A match and the accepted frame's dressing handoff add zero frames.
 
 ## Stage 4: Dress-up and transition
 
@@ -71,9 +73,11 @@ the handoff adds zero frames.
    wait input-free to the deadline. Reserve time to release inputs.
 4. Finish at the rank's accessory limit, after **14 collection flips** (excluding
    initial random taps), or at the deadline. Complete each flip's rendering first.
-5. Tap A for **40 game seconds / 2,393 frames**, **10 held / 20 released**. Then wait
-   input-free in one-game-second steps for a fresh green progress-bar tip and
-   Dance 1 pointer at **8 <= x < 128**. This frame/position anchors dancing without a probe.
+5. Tap A for **37 game seconds / 2,214 frames** (English **40 / 2,393**),
+   **10 held / 20 released**. Check the fresh green progress-bar tip immediately;
+   the shared visual guard retries mismatches input-free after **1 game second**.
+   A match adds zero frames.
+   Require a Dance 1 pointer at **8 <= x < 128**; this frame/position anchors dancing without a probe.
 
 ## Stage 5: Dancing
 
@@ -99,7 +103,8 @@ next demo start `x=8`. Values live in the profile's `fixed_dance_metrics` sectio
   `ceil((128 - x) / v)`, aiming for **x=128-129**. If a same-epoch correction leaves
   the pixel unchanged, keep its verified pre-correction frame/position for deadlines
   while reading fresh cues. Unreadable/backward corrections skip the response.
-- Match button templates at **70% agreement**. Pair sides at **120 pixels for
+- Match button templates once per fresh image at **70% agreement**. Planning and
+  evidence reuse that scan. Pair sides at **120 pixels for
   Cool/Beauty Hyper/Master; 128 otherwise**. Both sides complete: prefer
   **Demo, Demo, Response, Response** (Normal: **Demo, Response, Response**).
   One complete side fills missing counterparts. Both incomplete or either
@@ -124,11 +129,11 @@ Stage 6's fresh prepared capture must still confirm readiness.
 
 ## Stage 6: Acting, results, and retry
 
-After render preparation, require **15 empty initial star cells**. Read each move's
-contest type and raw hearts from six color probes/heart cells; cache for this
-attempt, excluding empty slots. Unknown move data warns once per move. All reads
-use pixels/colors, not OCR. Each of four rounds reads three judges and the player's
-acting position (1-4) from the same fresh capture:
+After [render preparation](#stage-6-retry-render-preparation), cache each available
+move's contest type and raw hearts from six color probes and heart cells on the
+accepted first-round frame. Unknown move data warns once per move. Reads use
+pixels/colors, not OCR; each round reads three judges and the player's acting
+position (1-4) from the same fresh capture:
 
 1. Exclude empty slots, the previous move, and unknown moves. Allow zero hearts
    only when one recognized legal move remains.
@@ -140,22 +145,32 @@ acting position (1-4) from the same fresh capture:
    Unreadable judges/order, no legal slot, or recognized but ineligible moves stop paused.
 5. Navigate from remembered move/judge selections, confirm, then tap B at
    **10 held / 20 released frames** through the configured base round/results segment.
-6. Before rounds 2-4, check judges, acting order, and selectable move-button fills
-   from a fresh paused image, excluding empty slots and the gray previous move.
-   If unreadable, tap B for **5 game seconds** and recheck under the existing section
-   deadline. Once readable, tap B for **3 more game seconds**, then take the fresh
-   round checkpoint and select. Polls are silent and retain evidence without checkpoint
-   visits/saves; first-round messages and cached move scoring remain unchanged.
+6. Before every round, including Acting entry, check judges, acting order, and
+   selectable move-button fills from a fresh paused image. Entry requires all
+   **15 empty star cells**; exclude empty move slots always, and the gray previous
+   move only before rounds 2-4.
+   The shared visual guard retries mismatches with **3 game seconds of B**.
+   On match, keep paused for the fresh round checkpoint and move/judge planning. Resume once for
+   **3 more game seconds of B -> selection inputs -> base segment** in one authorized
+   combo, with no intervening pause. Polls are silent; first-round messages and
+   cached move scoring remain unchanged.
 
-Base segments last **60 / 140 game seconds** for JPN rounds 1-3 / final round and
-results; English uses **65 / 150**. Initial entry and final/results have no readiness
-loop. Selection uses raw hearts, not simulated move effects.
+Base segments last **60 / 135 game seconds** for JPN rounds 1-3 / final round and
+results; English uses **65 / 140**. Entry reuses the pre-round retry/settle timing settings.
+Selection uses raw hearts, not simulated move effects.
+
+After the final/results baseline and before the first X, take fresh zero-frame
+paused captures. Together, match the six accepted startup player pixels at
+**x=124/130, y=78/84/94** and the reviewed closed-dialogue pixels at
+**x=124-130, y=146-148** (top border directly below the player, never text or distant NPCs).
+The shared guard retries visual mismatches, including fades, with **3 game seconds
+of B**. Once both match, tap B for **3 more game seconds** before X. Polls are silent;
+an invalid capture cannot mean dialogue absent.
 
 After every completed contest (win or loss), use **X -> read party/Bag -> X** once,
 then confirm the closed-menu overworld and acknowledge before returning to Stage 2.
 Read actual held item, Bag quantities/order, and ribbons for the next preparation;
-retain full stored-record validation without rereading startup-only facts. Acting
-entry reuses the last accepted party read instead of reading memory again.
+retain full stored-record validation without rereading startup-only facts.
 Each new Acting entry resets round/move/judge to **1 / 1 / 1** and refreshes only
 move-scoring pixels. After **5 consecutive ribbon misses**,
 warn once about stats/moves and continue under the original deadline; a win resets the streak.
@@ -164,10 +179,9 @@ warn once about stats/moves and continue under the original deadline; a win rese
 
 Use **accepted paused source -> 10 input-free emulator frames -> confirmed native
 pause -> fresh zero-frame capture -> analysis**, in the same epoch and under the
-existing deadline. Every retry completes the contest and reenters from the overworld;
-there is no loaded-state Acting path. Cached images cannot prove readiness, and
-unreadable required captures stay paused with evidence. Acting reuses the accepted
-current-run party context; missing or inconsistent facts stop without an entry memory read.
+existing deadline. Cached images cannot prove readiness; unreadable required
+captures stay paused with evidence. Reuse the accepted current-run party context;
+missing or inconsistent facts stop without an entry memory read.
 
 ## Runner planning and checkpoints
 
@@ -194,9 +208,9 @@ states and restores temporary diagnostic slot 9 at cleanup. Routine checks ackno
 without saves; these receipts cannot satisfy state-required checkpoints. Savestates
 are not in-game saves or direct memory writes. There is no prepared-state or isolated-stage resume path.
 
-Stage 3->4 and 4->5 add zero handoff/render frames. Dance save overlays settle for
-**3 host seconds** paused with inputs released; fresh before/after captures must
-retain the same frame/epoch, adding zero emulator frames.
+Stage 3->4 and 4->5 add zero handoff/render frames. Before Dance 1, settle the
+accepted Stage 4 save overlay for **3 host seconds** paused with inputs released.
+Fresh before/after captures must retain the same frame/epoch, adding zero emulator frames.
 
 ## Regional memory readers
 
@@ -211,9 +225,14 @@ No X-button history is checked. Unreadable reads stay paused at their actual sou
 
 ## Regional timing profiles
 
-`contest/timing_profiles/CPUJ.json` and `CPUE.json` own stage, dance, and diagnostic
+`contest/timing_profiles/CPUJ.json` and `CPUE.json` own stage and fixed dance
 defaults. Validate once per caller against the running ROM. Preserve schema/keys
 and restart after edits; CLI timing flags override defaults, including allowed zeros.
+
+Reserved and unused by the collection runner: `standalone_dancing`, `diagnostics`,
+`stage4_dress_up.loaded_entry_render_frames`, `stage5_dancing.demo_sample_interval_frames`,
+and `stage6_acting.loaded_state_render_host_seconds`. Their `_help` text identifies
+them; keys and values remain for the locked schema.
 
 - `*_frames`: integer emulator-frame counts.
 - `*_game_seconds`: **67027965 / 1120380 emulator frames per game second**.
@@ -227,43 +246,35 @@ Stage order, slots, coordinates, and deadlines stay code-owned. Inspect settings
 ## Implementation boundaries
 
 `contest/super_contest.py` owns the loop; `runtime.py` owns connection, deadlines,
-speed, and cleanup. Stage/dance/Acting helpers own game rules. `host/` owns native
-controls/receipts; `lua/` owns the input bridge, checkpoint engine, and memory helpers.
+speed, Lua serialization, paused overlay settling, slot protection, and cleanup.
+`sections.py` and the persistent `super_contest.lua` / `sections.lua` dispatcher
+serve modular stage helpers. `dance_response.py` owns fresh pointer/cue reads and
+fixed-spacing plans; `rank_dance.lua` owns Stage 5 checkpoints, including the Acting handoff.
+`memory_boundary.lua` carries accepted party facts; `checks.py` declares sources
+for main `--check` and packaging. `host/` owns native controls/receipts; `lua/` owns
+the input bridge, checkpoint engine, and memory helpers.
 Adapters own targets, timings, slots, and screen policy; shared checkpoints stay game-independent.
+
+`host/guards.py` retries fresh paused visual mismatches under the existing section
+deadline. Callers own buttons, retry/matched-settle durations, evidence, and checks.
+Polls retain each actual capture without checkpoint visits/saves or deadline resets.
+Invalid captures stop paused with evidence; only valid visual mismatches can retry.
 
 ### Locked main-runner-only consolidation
 
 Every live run uses the full collection loop, including debugging. Do not add
 isolated-stage, prepared-source, scarf-only, dance-only measurement/debug, or
 AVI-specific execution paths or compatibility wrappers. Offline tests exercise
-retained helpers and the actual main-engine boundaries.
-Offline tests of retained helpers and main-engine boundaries remain supported.
+retained helpers and actual main-engine boundaries; keep modular helpers, not a monolith.
 
-- **One gameplay engine:** `sections.py` and the persistent `super_contest.lua` /
-  `sections.lua` dispatcher, with the main Dressing and `rank_dance` adapters. Keep
-  modular stage helpers; do not merge everything into another monolithic script.
-- **One lifecycle:** `ContestRuntime` owns connection, native setup, deadlines,
-  speed, slot protection, and terminal cleanup. Debugging uses the existing main
-  runner's save/evidence policy, not a different stage order or execution engine.
-- **One timing source:** regional `fixed_dance_metrics` drives dancing. No production
-  historical-motion reads, per-contest calibration, live speed fitting, or alternate
-  observation/feedback modes. Preserve
-  profile schema/keys, current defaults, timing units, and the first-input feedback contract.
-- **Same safety contracts:** preserve accepted current-state handoffs, fresh paused
-  evidence, Stage 6 render-before-analysis, input accounting, save ownership, and
-  existing deadlines. Retries still finish the contest and reenter from the overworld.
-
-`runtime.py` owns attachment, Lua serialization, and paused overlay settling.
-`dance_response.py` owns fresh pointer/cue reads and fixed-spacing response plans;
-`rank_dance.lua` owns all Stage 5 checkpoints, including the Acting handoff.
-`memory_boundary.lua` carries accepted party facts inside the current run.
-`checks.py` declares the retained sources used by main `--check` and packaging.
+Regional `fixed_dance_metrics` is the only production dance timing source: no
+historical-motion reads, per-contest calibration, live speed fitting, or alternate
+observation/feedback modes. The checkpoint, render, input-accounting, save, and
+deadline contracts above apply equally to debug runs and retries.
 
 Keep `contest/dance_timings.json` as historical evidence, not a runtime or release
 dependency. Preserve prepared states, private evidence, and attribution. Remove tests
-solely for retired paths, without keeping obsolete APIs to satisfy them. Verification
-uses the offline suite, main `--check`/`--plan-only`, and release gate; live verification
-requires a separately agreed main-runner attempt. Gameplay timing and guard limits stay unchanged.
+solely for retired paths, without keeping obsolete APIs to satisfy them.
 
 ## Run folders and cleanup
 
@@ -278,6 +289,7 @@ Run `python -B -m tests` (offline suite) or `python -B -m tests --release` (comp
 Use the main runner's `--check`, `--help`, and `--plan-only` entries.
 Offline tests use real Lua with simulated emulator callbacks, not live gameplay proof.
 `tests/README.md` owns details; new/expanded retained tests need an agreed reason.
+Live verification requires a separately agreed main-runner attempt.
 
 ## Release packaging
 
@@ -299,7 +311,8 @@ old statistics, and debug contents are excluded.
 Keep one current aggregate `.txt` report per comparison: scope, settings, units,
 totals, success/miss/unreadable/skipped counts. Finish matching tests before conclusions;
 after review/owner exit, verify the report and clear analyzed scratch/obsolete statistics.
-Do not embed run histories here.
+Keep superseded reports privately in `contest/debug/archived-reports/`; do not embed
+run histories here or rewrite old results as current verification.
 
 ## Attribution
 

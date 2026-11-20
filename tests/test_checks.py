@@ -88,6 +88,7 @@ class CheckLayoutChecks(unittest.TestCase):
         python, lua = sources.call_args.args
         self.assertIn("dance_response.py", {path.name for path in python})
         self.assertIn("memory_boundary.lua", {path.name for path in lua})
+        self.assertTrue({"pt_rng_common.lua", "pt_rng_readers.lua"}.issubset(path.name for path in lua))
 
 
 class LauncherPreflightChecks(unittest.TestCase):
