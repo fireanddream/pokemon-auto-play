@@ -61,7 +61,7 @@
       "rounds_1_to_3_b_mash_game_seconds": 65,
       "round_readiness_retry_b_mash_game_seconds": 3,
       "round_readiness_settle_b_mash_game_seconds": 3,
-      "final_round_and_results_b_mash_game_seconds": 140,
+      "final_round_and_results_b_mash_game_seconds": 135,
       "post_acting_retry_b_mash_game_seconds": 3,
       "post_acting_settle_b_mash_game_seconds": 3,
       "mash_hold_frames": 10,

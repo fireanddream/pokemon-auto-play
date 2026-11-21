@@ -158,7 +158,7 @@ position (1-4) from the same fresh capture:
    cached move scoring remain unchanged.
 
 Base segments last **58 / 125 game seconds** for JPN rounds 1-3 / final round and
-results; English uses **65 / 140**. Entry reuses the pre-round retry/settle timing settings.
+results; English uses **65 / 135**. Entry reuses the pre-round retry/settle timing settings.
 Selection uses raw hearts, not simulated move effects.
 
 After the final/results baseline and before the first X, take fresh zero-frame
