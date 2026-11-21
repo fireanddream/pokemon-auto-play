@@ -123,7 +123,22 @@ local function observation(frame)
         active_stage = state.active_stage}
 end
 
+local function acting_progress()
+    if state.active_stage ~= 6 or not active then return nil end
+    local index = active.plan and math.min(active.step_index, #active.plan.steps) or 1
+    local step = active.plan and active.plan.steps[index]
+    return {command_id = state.command_id, elapsed_frames = active.elapsed, step = index,
+        step_elapsed_frames = step and active.step_elapsed or active.elapsed,
+        step_total_frames = step and step.total or active.total}
+end
+
 local function publish(value)
+    if state.active_stage == 6 then
+        state.acting_publication = (state.acting_publication or 0) + 1
+        state.acting_progress = acting_progress() or state.acting_progress
+    else
+        state.acting_publication, state.acting_progress = nil, nil
+    end
     state.observation = value or observation(state.frame)
     mailbox:publish(state)
 end
@@ -148,6 +163,7 @@ local function finish(message, reason)
         runtime.fail_stage()
         print("Contest stopped: " .. tostring(message))
     end
+    if state.active_stage == 6 then state.acting_progress = acting_progress() or state.acting_progress end
     active = nil
     release()
     state.command_done, state.error = true, message or ""
@@ -378,6 +394,7 @@ local function start(parts)
     state.last_action, state.command_start_frame = action, state.frame
     state.combo_name, state.combo_step = "", 0
     state.combo_history = setmetatable({}, bridge_io.array_metatable)
+    state.acting_progress = nil
     active = {elapsed = 0, total = 1}
     if action == "combo" then
         assert(parts[3] == "inputs", "Contest sections use the prepared explicit input steps")

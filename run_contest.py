@@ -4,7 +4,7 @@ from __future__ import annotations
 
 # Saved after selection. Use full file paths with forward slashes; clear to select again.
 DESMUME_PATH = "D:/Program Files (x86)/Pokemon Stuff/Pokemon auto play/desmume-0.9.13-win64/DeSmuME_0.9.13_x64.exe"
-ROM_PATH = "D:/Program Files (x86)/Pokemon Stuff/Pokemon auto play/desmume-0.9.13-win64/Roms/Pokemon - Platinum Version (USA) (Rev 1).nds"
+ROM_PATH = "D:/Program Files (x86)/Pokemon Stuff/Pokemon auto play/desmume-0.9.13-win64/Roms/\u767d\u91d1\u3000\u4e2d\u6587.nds"
 debug = 0
 
 import argparse

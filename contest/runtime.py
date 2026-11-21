@@ -11,6 +11,7 @@ from host.checkpoints import CheckpointClient, write_json
 from host.emulator import DeSmuME
 from host.paths import ROOT
 from host.savestates import StateSlots
+from contest.acting_diagnostics import ActingDiagnostics
 from contest.platinum import identify_rom
 from contest.messages import CHECK_MESSAGES, abort_message
 from contest.timing_profiles import load_profile
@@ -198,6 +199,7 @@ class ContestRuntime:
         self.lifecycle = {"lua_attachments": 0, "checkpoint_engines": 0,
                           "speed_transitions": [], "terminal_cleanups": 0}
         self.on_progress = None
+        self.acting_diagnostics = ActingDiagnostics(self.work / "acting-diagnostics.jsonl", started)
 
     def confirm_ownership(self):
         owners = set(self.controller.emulator_process_ids()) | set(self.controller.emulator_window_process_ids())
@@ -238,6 +240,14 @@ class ContestRuntime:
     def record(self, phase, **details):
         if self.on_progress is not None:
             self.on_progress(phase, stage=self.stage, section_visit=self.section_visit, **details)
+
+    def diagnose(self, event, **details):
+        diagnostics = getattr(self, "acting_diagnostics", None)
+        if self.stage == 6 and diagnostics is not None:
+            try:
+                diagnostics(event, details)
+            except Exception:
+                pass
 
     def json(self, name, value):
         path = self.active_work / name
@@ -340,6 +350,8 @@ class ContestRuntime:
         self.controller.live_deadline = self.stage_deadline
         self.active_work = self.work / "visits" / f"s{stage}-{visit:03d}"
         self.active_work.mkdir(parents=True, exist_ok=False)
+        self.controller.bridge_observer = self.acting_diagnostics if stage == 6 else None
+        self.diagnose("visit_begin", visit=visit, started=self.stage_started, deadline=self.stage_deadline)
         return self.active_work
 
     def start_section(self, plan, **context):
@@ -348,6 +360,7 @@ class ContestRuntime:
         config = {**plan, "stage": self.stage, "run_id": self.run_id, "section_visit": self.section_visit,
             "work": self.active_work.as_posix(), "source_frame": source["frame"] if source else self.position["frame"],
             "source_context": source_context, "target": self.target, **context}
+        self.diagnose("section_setup", config=config)
         self.json("runner-setup.json", {**config, "shared_host_deadline": self.stage_deadline})
         handoff = self.client.command("begin-section", self.lua("section-config.lua", config).as_posix())
         if handoff["handoff"]["emulator_frames"] != 0 or handoff["frame"] != config["source_frame"]:
@@ -366,7 +379,10 @@ class ContestRuntime:
         return result
 
     def command(self, action, *arguments):
-        return self.client.command(action, *arguments)
+        self.diagnose("checkpoint_request", action=action, arguments=arguments)
+        result = self.client.command(action, *arguments)
+        self.diagnose("checkpoint", action=action, arguments=arguments, packet=result)
+        return result
 
     def protect_slot(self, slot):
         if slot not in self.originals:
@@ -394,6 +410,7 @@ class ContestRuntime:
         if saved is not None:
             self.accepted_slots[slot] = Path(saved["retained_path"])
         self.boundary = {"checkpoint": accepted["checkpoint"], "save_state": saved, "receipt": accepted["host_receipt"]}
+        self.diagnose("checkpoint_accepted", packet=accepted)
         return accepted
 
     def review(self, capture, expected, *, filename):
@@ -419,6 +436,7 @@ class ContestRuntime:
         self.finalized = True
         self.controller.live_deadline = None
         self.controller.live_session = None
+        self.diagnose("cleanup_begin")
         temporary_slot = self.settings["save_policy"]["temporary_slot"]
         result = {"errors": []}
         if emulator_closed:
@@ -502,4 +520,6 @@ class ContestRuntime:
             except (Exception, SystemExit) as cleanup_error:
                 result["errors"].append(abort_message(cleanup_error, stage=self.stage))
         result["lifecycle"] = self.lifecycle
+        self.diagnose("cleanup_end", result=result, error=error)
+        self.controller.bridge_observer = None
         return result

@@ -202,6 +202,10 @@ def _run(run_name, plan, started, *, controller_config=None, fresh_start=False):
 
     def record(phase, **details):
         event = {"phase": phase, "host_elapsed_seconds": round(time.monotonic() - started, 3), **details}
+        if phase == "stage_end" and details.get("stage") == 6:
+            diagnose = getattr(runtime, "diagnose", None)
+            if diagnose is not None:
+                diagnose("visit_end", outcome=details["outcome"], error=details.get("error"))
         write_json(work / "runner-progress.json", {**result, "event": event})
         with (work / "runner-events.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(event) + "\n")

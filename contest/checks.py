@@ -16,7 +16,7 @@ from contest.platinum import identify_rom
 HERE = Path(__file__).resolve().parent
 RUNTIME_SOURCES = {
     "contest": (
-        "__init__.py", "artifacts.py", "checks.py", "dance_response.py", "dance_timings.py", "inputs.py",
+        "__init__.py", "acting_diagnostics.py", "artifacts.py", "checks.py", "dance_response.py", "dance_timings.py", "inputs.py",
         "messages.py", "platinum.py", "pt_dance_read.py", "rank_dance.py", "runtime.py", "sections.py",
         "stage1_load.py", "stage2_bag.py", "stage2_prep.py", "stage3_enter.py", "stage4_dress.py", "stage6_act.py",
         "super_contest.py", "timing_profiles.py", "timing_profiles/CPUJ.json", "timing_profiles/CPUE.json",

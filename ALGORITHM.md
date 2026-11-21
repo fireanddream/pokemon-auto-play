@@ -56,8 +56,8 @@ or compare items with a cache.
 ## Stage 3: Contest entry
 
 Enroll the first Pokemon for the selected rank/category and tap A through the
-configured regional introduction baseline. The shared visual guard requires a
-fresh paused image showing **5 / 10 / 15 / 20 empty accessory slots** for
+regional introduction baseline: **45 game seconds** (English **60**). The shared visual
+guard requires a fresh paused image showing **5 / 10 / 15 / 20 empty accessory slots** for
 Normal / Super / Hyper / Master. A mismatch waits input-free for **3 game seconds**
 and rechecks through the [shared visual guard](#implementation-boundaries).
 A match and the accepted frame's dressing handoff add zero frames.
@@ -75,7 +75,7 @@ A match and the accepted frame's dressing handoff add zero frames.
    wait input-free to the deadline. Reserve time to release inputs.
 4. Finish at the rank's accessory limit, after **14 collection flips** (excluding
    initial random taps), or at the deadline. Complete each flip's rendering first.
-5. Tap A for **37 game seconds / 2,214 frames** (English **40 / 2,393**),
+5. Tap A for **34 game seconds / 2,034 frames** (English **40 / 2,393**),
    **10 held / 20 released**. Check the fresh green progress-bar tip immediately;
    the shared visual guard retries mismatches input-free after **1 game second**.
    A match adds zero frames.
@@ -157,7 +157,7 @@ position (1-4) from the same fresh capture:
    combo, with no intervening pause. Polls are silent; first-round messages and
    cached move scoring remain unchanged.
 
-Base segments last **60 / 135 game seconds** for JPN rounds 1-3 / final round and
+Base segments last **58 / 130 game seconds** for JPN rounds 1-3 / final round and
 results; English uses **65 / 140**. Entry reuses the pre-round retry/settle timing settings.
 Selection uses raw hearts, not simulated move effects.
 
@@ -184,6 +184,15 @@ pause -> fresh zero-frame capture -> analysis**, in the same epoch and under the
 existing deadline. Cached images cannot prove readiness; unreadable required
 captures stay paused with evidence. Reuse the accepted current-run party context;
 missing or inconsistent facts stop without an entry memory read.
+
+### Stage 6 diagnostic logging
+
+`acting-diagnostics.jsonl` in the current run folder records commands, readiness retry
+counts, host seconds alongside reported emulator frames, and existing pause checks.
+Samples use **5 host seconds**, at most **64 buffered samples**, and **512 KiB per run**;
+progress samples are written only after abnormal observations or failure. Logging adds
+no emulator calls, captures, saves, input retries, or deadline changes. Pause remains
+unknown between existing native checks; the log does not identify physical keystrokes.
 
 ## Runner planning and checkpoints
 

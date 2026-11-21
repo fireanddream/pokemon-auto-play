@@ -52,6 +52,14 @@ class Controller:
             from . import windows as windows_api
         self._windows = windows_api
         self.timeouts_enabled = True
+        self.bridge_observer = None
+
+    def _observe_bridge(self, event, **details):
+        if self.bridge_observer is not None:
+            try:
+                self.bridge_observer(event, details)
+            except Exception:
+                pass
 
     def __getattr__(self, name):
         return getattr(self._windows, name)
@@ -231,7 +239,9 @@ class Controller:
             self.send(data["window"], 0x212)
         if state == 0xFFFFFFFF:
             raise RuntimeError("DeSmuME's pause menu item was not found.")
-        return bool(state & 0x8)
+        paused = bool(state & 0x8)
+        self._observe_bridge("pause_observed", paused=paused)
+        return paused
 
     def stop_lua(self) -> dict:
         """Stop the controlled attachment at a native pause before removing its mailbox."""
@@ -259,9 +269,11 @@ class Controller:
         return {"lua_stopped": True, "emulator_paused": True}
 
     def set_pause(self, wanted: bool) -> None:
+        self._observe_bridge("pause_requested", wanted=wanted)
         data = self.session()
         if self.paused(data) != wanted:
             self.post_menu(data["window"], 113)
+            self._observe_bridge("pause_toggle_queued", wanted=wanted)
             deadline = self.deadline(5)
             while self.waiting(deadline):
                 if self.paused(data) == wanted:
@@ -312,38 +324,51 @@ class Controller:
                        *, deadline: float | None = None) -> dict:
         """Run an action; an explicit monotonic deadline also applies under without_timeouts()."""
         action_deadline = deadline
-        data = self.session()
-        self.set_pause(True)
-        if not self.waiting(action_deadline):
-            raise TimeoutError("timeout")
-        identifier = time.time_ns()
-        temporary = self.COMMAND.with_suffix(".new")
-        temporary.write_text("|".join([str(identifier), action, *arguments]) + "\n", encoding="ascii")
-        temporary.replace(self.COMMAND)
-        # Resume once: short commands can finish before a host poll sees them running.
-        self.post_menu(data["window"], 113)
-        deadline = action_deadline if action_deadline is not None else self.deadline(timeout)
-        while self.waiting(deadline):
-            try:
-                status = json.loads(self.STATUS.read_text(encoding="utf-8"))
-            except (FileNotFoundError, json.JSONDecodeError, PermissionError):
+        self._observe_bridge("command_begin", action=action, arguments=arguments)
+        try:
+            data = self.session()
+            self.set_pause(True)
+            if not self.waiting(action_deadline):
+                raise TimeoutError("timeout")
+            identifier = time.time_ns()
+            temporary = self.COMMAND.with_suffix(".new")
+            temporary.write_text("|".join([str(identifier), action, *arguments]) + "\n", encoding="ascii")
+            temporary.replace(self.COMMAND)
+            self._observe_bridge("command_issued", command_id=str(identifier), action=action)
+            # Resume once: short commands can finish before a host poll sees them running.
+            self.post_menu(data["window"], 113)
+            self._observe_bridge("pause_toggle_queued", wanted=False)
+            deadline = action_deadline if action_deadline is not None else self.deadline(timeout)
+            while self.waiting(deadline):
+                try:
+                    status = json.loads(self.STATUS.read_text(encoding="utf-8"))
+                except (FileNotFoundError, json.JSONDecodeError, PermissionError) as error:
+                    self._observe_bridge("status_read_error", error_type=type(error).__name__)
+                    time.sleep(0.05)
+                    continue
+                self._observe_bridge("status", status=status)
+                if status.get("command_id") == str(identifier) and status.get("command_done"):
+                    self._observe_bridge("completion_reported")
+                    pause_deadline = action_deadline if action_deadline is not None else self.deadline(5 if timeout is not None else None)
+                    while not self.paused(data):
+                        if not self.waiting(pause_deadline):
+                            self._observe_bridge("deadline_expired")
+                            self.set_pause(True)
+                            raise TimeoutError("timeout")
+                        time.sleep(0.02)
+                    status["emulator_paused"] = True
+                    if status.get("matched") and status.get("phase") == "target_hit":
+                        self.notify_seed_hit(data, status)
+                        status["alert_sent"] = True
+                    self._observe_bridge("command_returned")
+                    return status
                 time.sleep(0.05)
-                continue
-            if status.get("command_id") == str(identifier) and status.get("command_done"):
-                pause_deadline = action_deadline if action_deadline is not None else self.deadline(5 if timeout is not None else None)
-                while not self.paused(data):
-                    if not self.waiting(pause_deadline):
-                        self.set_pause(True)
-                        raise TimeoutError("timeout")
-                    time.sleep(0.02)
-                status["emulator_paused"] = True
-                if status.get("matched") and status.get("phase") == "target_hit":
-                    self.notify_seed_hit(data, status)
-                    status["alert_sent"] = True
-                return status
-            time.sleep(0.05)
-        self.set_pause(True)
-        raise TimeoutError("timeout")
+            self._observe_bridge("deadline_expired")
+            self.set_pause(True)
+            raise TimeoutError("timeout")
+        except BaseException as error:
+            self._observe_bridge("command_failed", error_type=type(error).__name__, error=str(error))
+            raise
 
     def combo(self, name: str, *arguments: object, timeout: float = 45) -> dict:
         """Execute a complete Lua-side input plan, pausing once at its endpoint."""
