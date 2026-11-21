@@ -75,7 +75,7 @@ A match and the accepted frame's dressing handoff add zero frames.
    wait input-free to the deadline. Reserve time to release inputs.
 4. Finish at the rank's accessory limit, after **14 collection flips** (excluding
    initial random taps), or at the deadline. Complete each flip's rendering first.
-5. Tap A for **34 game seconds / 2,034 frames** (English **40 / 2,393**),
+5. Tap A for **34 game seconds / 2,034 frames** (English **35 / 2,094**),
    **10 held / 20 released**. Check the fresh green progress-bar tip immediately;
    the shared visual guard retries mismatches input-free after **1 game second**.
    A match adds zero frames.
@@ -157,7 +157,7 @@ position (1-4) from the same fresh capture:
    combo, with no intervening pause. Polls are silent; first-round messages and
    cached move scoring remain unchanged.
 
-Base segments last **58 / 130 game seconds** for JPN rounds 1-3 / final round and
+Base segments last **58 / 125 game seconds** for JPN rounds 1-3 / final round and
 results; English uses **65 / 140**. Entry reuses the pre-round retry/settle timing settings.
 Selection uses raw hearts, not simulated move effects.
 

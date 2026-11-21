@@ -38,7 +38,7 @@
       "finish_tap_hold_frames": 2,
       "finish_tap_release_frames": 1,
       "loaded_entry_render_frames": 10,
-      "dance_transition_a_mash_game_seconds": 40,
+      "dance_transition_a_mash_game_seconds": 35,
       "transition_mash_hold_frames": 10,
       "transition_mash_release_frames": 20,
       "dance_entry_poll_game_seconds": 1

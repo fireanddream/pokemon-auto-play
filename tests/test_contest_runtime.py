@@ -2485,7 +2485,7 @@ class ActingMoveChecks(unittest.TestCase):
         self.assertEqual(plan["total_frames"], len(expected))
 
     def test_regional_bases_and_shared_retry_settle_durations(self):
-        for code, base, final in (("CPUJ", 58, 130), ("CPUE", 65, 140)):
+        for code, base, final in (("CPUJ", 58, 125), ("CPUE", 65, 140)):
             with self.subTest(code=code):
                 plan = stage6_act.acting_plan(host_timeout=300,
                     timing_profile=super_contest.load_profile(code))
