@@ -185,15 +185,6 @@ existing deadline. Cached images cannot prove readiness; unreadable required
 captures stay paused with evidence. Reuse the accepted current-run party context;
 missing or inconsistent facts stop without an entry memory read.
 
-### Stage 6 diagnostic logging
-
-`acting-diagnostics.jsonl` in the current run folder records commands, readiness retry
-counts, host seconds alongside reported emulator frames, and existing pause checks.
-Samples use **5 host seconds**, at most **64 buffered samples**, and **512 KiB per run**;
-progress samples are written only after abnormal observations or failure. Logging adds
-no emulator calls, captures, saves, input retries, or deadline changes. Pause remains
-unknown between existing native checks; the log does not identify physical keystrokes.
-
 ## Runner planning and checkpoints
 
 Agree on actions, readable boundaries, branches, guards with units, live attempt,

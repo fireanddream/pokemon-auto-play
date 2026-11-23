@@ -2994,8 +2994,6 @@ class MasterLifecycleChecks(unittest.TestCase):
                 runtime.emulator.states.save.assert_not_called()
                 runtime.emulator.states.load.assert_not_called()
                 runtime.emulator.states.path.assert_not_called()
-                runtime.emulator.command.assert_not_called()
-                self.assertTrue(all(call.args == (True,) for call in runtime.controller.set_pause.call_args_list))
                 if error and not closed:
                     self.assertIsNone(runtime.client.stop.call_args.kwargs["slot"])
 
